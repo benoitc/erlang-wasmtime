@@ -105,6 +105,7 @@ jobs:
         with:
           release: "14.3"
           usesh: true
+          envs: "WASMTIME_VERSION"
           sync: rsync
           copyback: true
           prepare: |

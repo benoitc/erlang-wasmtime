@@ -96,7 +96,7 @@ clean.
 4> js:eval(Engine, ~"for (;;) {}", #{timeout => 100}).
 {error, timeout}
 5> js:eval(Engine, ~"throw new Error('no')").
-{error, {exit, 1, ~"Error: no\n    at <anonymous> (<cmdline>:1:7)\n\n"}}
+{error, {exit, 1, ~"Error: no\n    at <anonymous> (<cmdline>:1:11)\n\n"}}
 6> js:run_file(Engine, "/srv/scripts", "main.js").
 {ok, ~"from file: 2,4,6\nGREETING = undefined\n"}
 ```

@@ -29,14 +29,18 @@ jobs:
             os: ubuntu-24.04
           - asset: aarch64-linux
             os: ubuntu-24.04-arm
-          # musl: Rust's musl target on the glibc runner, linked with
-          # musl-gcc; GitHub cannot run Alpine containers on arm64 runners.
+          # musl: Rust's musl target on the glibc runner, linked with zig cc,
+          # which carries its own libunwind for musl (musl-gcc from musl-tools
+          # has no libgcc_s, and GitHub cannot run Alpine containers on arm64
+          # runners; Alpine's cargo is also too old for Wasmtime's manifests).
           - asset: x86_64-musl
             os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
+            zig_target: x86_64-linux-musl
           - asset: aarch64-musl
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+            zig_target: aarch64-linux-musl
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -47,19 +51,41 @@ jobs:
           rustup default stable
           which cmake >/dev/null || (sudo apt-get update && sudo apt-get install -y cmake)
 
-      - name: Install the musl target
+      - name: Install zig
+        if: matrix.target != ''
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+
+      - name: Install the musl target and the zig wrappers
         if: matrix.target != ''
         run: |
-          sudo apt-get update && sudo apt-get install -y musl-tools
           rustup target add ${{ matrix.target }}
+          mkdir -p zigw
+          # Rust links its dynamic musl std against libgcc_s; zig has no such
+          # library but bundles libunwind, which provides the same symbols.
+          cat > zigw/cc <<'EOF'
+          #!/bin/bash
+          args=()
+          for a in "$@"; do
+            case "$a" in -lgcc_s) args+=("-lunwind") ;; *) args+=("$a") ;; esac
+          done
+          exec zig cc -target ${{ matrix.zig_target }} "${args[@]}"
+          EOF
+          printf '#!/bin/sh\nexec zig ar "$@"\n' > zigw/ar
+          chmod +x zigw/cc zigw/ar
+          T="$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
+          {
+            echo "WASMTIME_TARGET=${{ matrix.target }}"
+            echo "WASMTIME_TARGET_LINKER=$PWD/zigw/cc"
+            echo "CC_${{ matrix.target }}=$PWD/zigw/cc"
+            echo "AR_${{ matrix.target }}=$PWD/zigw/ar"
+            echo "CARGO_TARGET_${T}_LINKER=$PWD/zigw/cc"
+            # musl targets default to crt-static, which forbids a shared library
+            echo "RUSTFLAGS=-C target-feature=-crt-static"
+          } >> "$GITHUB_ENV"
 
       - name: Build the runtime C API
-        env:
-          WASMTIME_TARGET: ${{ matrix.target }}
-          WASMTIME_TARGET_LINKER: ${{ matrix.target != '' && 'musl-gcc' || '' }}
-          CC: ${{ matrix.target != '' && 'musl-gcc' || 'cc' }}
-          # musl targets default to crt-static, which forbids a shared library
-          RUSTFLAGS: ${{ matrix.target != '' && '-C target-feature=-crt-static' || '' }}
         run: scripts/build-wasmtime.sh runtime "$PWD/out/prefix"
 
       - name: Package

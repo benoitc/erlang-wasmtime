@@ -288,6 +288,9 @@ typedef struct instance {
   /* host call in flight (state == ST_IN_HOST) */
   ErlNifUInt64 host_id, host_seq;
   int has_reply, abort;
+  ErlNifPid host_pid; /* serves host calls for REQ_CALL when has_host_pid */
+  int has_host_pid;
+  ErlNifPid host_target; /* who the in-flight host call was sent to */
   ErlNifEnv *reply_env;
   ERL_NIF_TERM reply;
   unsigned host_timeout_ms;
@@ -399,6 +402,11 @@ static wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtim
   inst->state = ST_IN_HOST;
   inst->host_id = ++inst->host_seq;
   inst->has_reply = 0;
+  /* A dedicated handler serves calls; the start section at instantiate
+   * time goes to the caller, which is the only process that has the
+   * instance at that point. */
+  inst->host_target = inst->has_host_pid && inst->current->kind == REQ_CALL ? inst->host_pid
+                                                                            : inst->current->caller;
   enif_clear_env(inst->reply_env);
   ERL_NIF_TERM msg =
       enif_make_tuple5(menv, atom_wasmtime_host_call, enif_make_copy(menv, inst->ref),
@@ -406,10 +414,10 @@ static wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtim
                        enif_make_tuple2(menv, mk_binary(menv, fn->module, strlen(fn->module)),
                                         mk_binary(menv, fn->name, strlen(fn->name))),
                        list);
-  int sent = enif_send(NULL, &inst->current->caller, menv, msg);
+  int sent = enif_send(NULL, &inst->host_target, menv, msg);
   enif_free_env(menv);
   if (!sent) {
-    fail = "calling process is gone";
+    fail = "host process is gone";
   } else {
     struct timespec deadline;
     add_ms(&deadline, inst->host_timeout_ms);
@@ -614,15 +622,17 @@ done:
   return NULL;
 }
 
-/* Opts :: {Imports :: [{Module, Name}], Wasi, Limits, HostTimeoutMs}
- * Limits :: {MemoryBytes, Tables, TableElements, Instances}, -1 = unlimited */
+/* Opts :: {Imports :: [{Module, Name}], Wasi, Limits, HostTimeoutMs, HostPid}
+ * Limits :: {MemoryBytes, Tables, TableElements, Instances}, -1 = unlimited
+ * HostPid :: pid() | undefined */
 static ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
   ErlNifEnv *env = req->env;
   const ERL_NIF_TERM *o, *lim;
   int arity;
-  if (!enif_get_tuple(env, req->opts, &arity, &o) || arity != 4 ||
+  if (!enif_get_tuple(env, req->opts, &arity, &o) || arity != 5 ||
       !enif_get_tuple(env, o[2], &arity, &lim) || arity != 4)
     return mk_error_s(out, "link", "badarg", "malformed options");
+  inst->has_host_pid = enif_get_local_pid(env, o[4], &inst->host_pid);
 
   ErlNifSInt64 mem, tables, elems, instances;
   unsigned host_timeout;
@@ -982,6 +992,34 @@ static ERL_NIF_TERM nif_compile(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
   return enif_make_tuple2(env, atom_ok, t);
 }
 
+/* serialize(Module) -> {ok, Binary}: Wasmtime's own precompiled format */
+static ERL_NIF_TERM nif_serialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  module_res_t *m;
+  if (!enif_get_resource(env, argv[0], module_type, (void **)&m)) return enif_make_badarg(env);
+  wasm_byte_vec_t out;
+  wasmtime_error_t *e = wasmtime_module_serialize(m->mod, &out);
+  if (e) return error_to_term(env, e, "compile");
+  ERL_NIF_TERM t = mk_binary(env, out.data, out.size);
+  wasm_byte_vec_delete(&out);
+  return enif_make_tuple2(env, atom_ok, t);
+}
+
+/* deserialize(Binary) -> {ok, Module}. Wasmtime checks its own version and
+ * the CPU features the code was compiled for, not the code itself: only
+ * bytes that came from serialize/1 may be passed here. */
+static ERL_NIF_TERM nif_deserialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  ErlNifBinary bin;
+  if (!enif_inspect_binary(env, argv[0], &bin)) return enif_make_badarg(env);
+  wasmtime_module_t *mod = NULL;
+  wasmtime_error_t *e = wasmtime_module_deserialize(engine, bin.data, bin.size, &mod);
+  if (e) return error_to_term(env, e, "compile");
+  module_res_t *m = enif_alloc_resource(module_type, sizeof *m);
+  m->mod = mod;
+  ERL_NIF_TERM t = enif_make_resource(env, m);
+  enif_release_resource(m);
+  return enif_make_tuple2(env, atom_ok, t);
+}
+
 static ERL_NIF_TERM extern_kind_atom(wasm_externkind_t k) {
   switch (k) {
   case WASM_EXTERN_FUNC: return atom_func;
@@ -1062,8 +1100,7 @@ static ERL_NIF_TERM enqueue(ErlNifEnv *env, instance_t *inst, enum req_kind kind
   }
   /* A host function calling back into the instance it runs on would wait for
    * itself: the guest is parked until this process answers the host call. */
-  if (inst->state == ST_IN_HOST && inst->current &&
-      enif_compare_pids(&inst->current->caller, &r->caller) == 0) {
+  if (inst->state == ST_IN_HOST && enif_compare_pids(&inst->host_target, &r->caller) == 0) {
     pthread_mutex_unlock(&inst->mu);
     req_free(r);
     return mk_error_s(env, "call", "reentrant",
@@ -1111,9 +1148,13 @@ static ERL_NIF_TERM nif_instantiate(ErlNifEnv *env, int argc, const ERL_NIF_TERM
     enif_release_resource(inst);
     return r;
   }
+  /* Wasmtime runs the guest on the native stack (max_wasm_stack, 512 KB by
+   * default) and our callback runs above it; the platform default for a new
+   * thread is 512 KB on macOS. Ask for a size that holds both everywhere. */
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  pthread_attr_setstacksize(&attr, 4 * 1024 * 1024);
   pthread_t tid;
   int rc = pthread_create(&tid, &attr, worker_main, inst);
   pthread_attr_destroy(&attr);
@@ -1197,16 +1238,36 @@ static ERL_NIF_TERM nif_cancel(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv
 
 /* Memory is reachable from Erlang only while the guest is not executing:
  * when the instance is idle, or while it waits inside a host function. On
- * success the caller holds inst->mu. */
-static ERL_NIF_TERM with_memory(ErlNifEnv *env, ERL_NIF_TERM handle, instance_t **out) {
+ * success the caller holds inst->mu and *mem names the memory: the default
+ * one when `name` is the atom `default`, else the export called `name`. */
+static ERL_NIF_TERM with_memory(ErlNifEnv *env, ERL_NIF_TERM handle, ERL_NIF_TERM name,
+                                instance_t **out, wasmtime_memory_t *mem) {
   instance_t *inst;
-  if (!get_handle(env, handle, &inst)) return enif_make_badarg(env);
+  ErlNifBinary nm;
+  int named = !enif_is_atom(env, name);
+  if (!get_handle(env, handle, &inst) || (named && !enif_inspect_iolist_as_binary(env, name, &nm)))
+    return enif_make_badarg(env);
   pthread_mutex_lock(&inst->mu);
   if (inst->state == ST_RUNNING) {
     pthread_mutex_unlock(&inst->mu);
     return mk_error_s(env, "memory", "busy", "guest is running");
   }
-  if (!inst->instantiated || !inst->has_memory) {
+  if (!inst->instantiated) {
+    pthread_mutex_unlock(&inst->mu);
+    return mk_error_s(env, "memory", "no_memory", "instance exports no memory");
+  }
+  if (named) {
+    wasmtime_extern_t ext;
+    if (!wasmtime_instance_export_get(inst->ctx, &inst->instance, (const char *)nm.data, nm.size,
+                                      &ext) ||
+        ext.kind != WASMTIME_EXTERN_MEMORY) {
+      pthread_mutex_unlock(&inst->mu);
+      return mk_error(env, "memory", "no_memory", (const char *)nm.data, nm.size);
+    }
+    *mem = ext.of.memory;
+  } else if (inst->has_memory) {
+    *mem = inst->memory;
+  } else {
     pthread_mutex_unlock(&inst->mu);
     return mk_error_s(env, "memory", "no_memory", "instance exports no memory");
   }
@@ -1214,53 +1275,59 @@ static ERL_NIF_TERM with_memory(ErlNifEnv *env, ERL_NIF_TERM handle, instance_t 
   return 0;
 }
 
+/* read_memory(Handle, Name | default, Ptr, Len) */
 static ERL_NIF_TERM nif_read_memory(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   ErlNifUInt64 ptr, len;
-  if (!enif_get_uint64(env, argv[1], &ptr) || !enif_get_uint64(env, argv[2], &len))
+  if (!enif_get_uint64(env, argv[2], &ptr) || !enif_get_uint64(env, argv[3], &len))
     return enif_make_badarg(env);
   instance_t *inst;
-  ERL_NIF_TERM err = with_memory(env, argv[0], &inst);
+  wasmtime_memory_t mem;
+  ERL_NIF_TERM err = with_memory(env, argv[0], argv[1], &inst, &mem);
   if (err) return err;
-  size_t size = wasmtime_memory_data_size(inst->ctx, &inst->memory);
+  size_t size = wasmtime_memory_data_size(inst->ctx, &mem);
   ERL_NIF_TERM r;
   if (ptr > size || len > size - ptr) {
     r = mk_error_s(env, "memory", "out_of_bounds", "range is outside linear memory");
   } else {
-    const uint8_t *data = wasmtime_memory_data(inst->ctx, &inst->memory);
+    const uint8_t *data = wasmtime_memory_data(inst->ctx, &mem);
     r = enif_make_tuple2(env, atom_ok, mk_binary(env, data + ptr, len));
   }
   pthread_mutex_unlock(&inst->mu);
   return r;
 }
 
+/* write_memory(Handle, Name | default, Ptr, Data) */
 static ERL_NIF_TERM nif_write_memory(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   ErlNifUInt64 ptr;
   ErlNifBinary bin;
-  if (!enif_get_uint64(env, argv[1], &ptr) || !enif_inspect_iolist_as_binary(env, argv[2], &bin))
+  if (!enif_get_uint64(env, argv[2], &ptr) || !enif_inspect_iolist_as_binary(env, argv[3], &bin))
     return enif_make_badarg(env);
   instance_t *inst;
-  ERL_NIF_TERM err = with_memory(env, argv[0], &inst);
+  wasmtime_memory_t mem;
+  ERL_NIF_TERM err = with_memory(env, argv[0], argv[1], &inst, &mem);
   if (err) return err;
-  size_t size = wasmtime_memory_data_size(inst->ctx, &inst->memory);
+  size_t size = wasmtime_memory_data_size(inst->ctx, &mem);
   ERL_NIF_TERM r;
   if (ptr > size || bin.size > size - ptr) {
     r = mk_error_s(env, "memory", "out_of_bounds", "range is outside linear memory");
   } else {
-    memcpy(wasmtime_memory_data(inst->ctx, &inst->memory) + ptr, bin.data, bin.size);
+    memcpy(wasmtime_memory_data(inst->ctx, &mem) + ptr, bin.data, bin.size);
     r = atom_ok;
   }
   pthread_mutex_unlock(&inst->mu);
   return r;
 }
 
+/* memory_size(Handle, Name | default) */
 static ERL_NIF_TERM nif_memory_size(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   instance_t *inst;
-  ERL_NIF_TERM err = with_memory(env, argv[0], &inst);
+  wasmtime_memory_t mem;
+  ERL_NIF_TERM err = with_memory(env, argv[0], argv[1], &inst, &mem);
   if (err) return err;
   ERL_NIF_TERM r = enif_make_tuple2(
       env, atom_ok,
-      enif_make_tuple2(env, enif_make_uint64(env, wasmtime_memory_size(inst->ctx, &inst->memory)),
-                       enif_make_uint64(env, wasmtime_memory_data_size(inst->ctx, &inst->memory))));
+      enif_make_tuple2(env, enif_make_uint64(env, wasmtime_memory_size(inst->ctx, &mem)),
+                       enif_make_uint64(env, wasmtime_memory_data_size(inst->ctx, &mem))));
   pthread_mutex_unlock(&inst->mu);
   return r;
 }
@@ -1335,14 +1402,16 @@ static ErlNifFunc funcs[] = {
     {"compile", 2, nif_compile, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"module_imports", 1, nif_module_imports, 0},
     {"module_exports", 1, nif_module_exports, 0},
+    {"serialize", 1, nif_serialize, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"deserialize", 1, nif_deserialize, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"instantiate", 4, nif_instantiate, 0},
     {"call", 4, nif_call, 0},
     {"host_reply", 3, nif_host_reply, 0},
     {"interrupt", 1, nif_interrupt, 0},
     {"cancel", 2, nif_cancel, 0},
-    {"read_memory", 3, nif_read_memory, 0},
-    {"write_memory", 3, nif_write_memory, 0},
-    {"memory_size", 1, nif_memory_size, 0},
+    {"read_memory", 4, nif_read_memory, 0},
+    {"write_memory", 4, nif_write_memory, 0},
+    {"memory_size", 2, nif_memory_size, 0},
     {"version", 0, nif_version, 0},
 };
 

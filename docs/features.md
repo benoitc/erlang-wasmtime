@@ -15,7 +15,9 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Interruption | `timeout` option and `interrupt/1`, epoch based, 10 ms granularity |
 | Memory cap | `memory_limit`, default 256 MB, enforced by the store limiter |
 | Table, element and instance caps | `max_tables`, `max_table_elements`, `max_instances` |
-| Memory access from Erlang | `read_memory/3`, `write_memory/3`, `memory_size/1` on the export named `memory` or the first exported memory |
+| Memory access from Erlang | `read_memory/3,4`, `write_memory/3,4`, `memory_size/1,2`: the export named `memory` (or the first exported memory) by default, any exported memory by name |
+| Precompiled modules | `serialize/1` and `deserialize/1`, Wasmtime's `.cwasm` form; see [precompiled](precompiled.md) |
+| Host functions in a dedicated process | `host => Pid` at instantiate, `handle_host_call/2` in that process |
 | WASI preview 1 | args, env, preopened dirs with read or write, stdio to file or inherited |
 | Caller death | the abandoned call is interrupted, queued calls proceed |
 | Host function timeout | `host_timeout`, default 30 s |
@@ -54,16 +56,15 @@ feature is missing the runtime says so with an error; it does not approximate.
 - **Reference and GC values across the boundary.** Modules using them
   internally run; only conversion to and from Erlang terms is missing. Needs a
   rooting and lifetime design.
-- **Several memories.** Only one memory is reachable from Erlang. A memory-name
-  argument is the planned extension.
-- **Precompiled modules (`.cwasm`).** Would allow shipping compiled modules and
-  running them on Wasmtime's 1.8 MB runtime-only build. Tied to the exact
-  Wasmtime version and CPU features; needs its own docs and tests.
-- **Thread pool.** Thread per instance is fine for hundreds of long-lived
-  instances, not for thousands of short-lived ones per second. A pool where an
-  instance is bound to a thread only during a call keeps the same public API.
-- **Host functions in another process.** Today the caller handles them.
-  Routing to a dedicated handler process is not offered.
+- **Runtime-only library.** Wasmtime ships a 1.8 MB build without the
+  compiler that can load precompiled modules only. This package always links
+  the full library; a build option to link the small one (and refuse
+  `compile/1`) is not offered yet.
+- **Thread pool.** Measured on an M-series Mac: 13,900 instantiate, call and
+  drop cycles per second from one process, 34,500 per second from eight, with
+  one OS thread per instance. That covers "thousands of short-lived instances
+  per second", so a pool is not planned unless a workload shows the thread
+  cost first. Each thread reserves a 4 MB stack.
 - **Fault isolation from Wasmtime itself.** A bug in Wasmtime would take the VM
   down, like any NIF. A `mode => port` running the instance in a separate OS
   process is the answer if that matters; same API, not built.

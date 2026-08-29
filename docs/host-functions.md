@@ -52,7 +52,35 @@ This is the erlang-python model: the caller is the callback handler. Consequence
 - The fun can read and write guest memory through `Ctx`; the guest is stopped.
 - The fun can call `wasmtime:call` on another instance. Calling the instance
   it runs on is refused with `{error, #{kind := reentrant}}`: the guest is
-  parked waiting for this fun, so that call could never run.
+  parked waiting for this fun, so that call could never run. The same applies
+  to a `host` process serving the call.
+
+## Serve host calls from another process
+
+By default the fun runs in the process that called `wasmtime:call`. To keep
+callers plain clients and run every host fun in one dedicated process, name
+it at instantiate time and have it answer the messages:
+
+```erlang
+Handler = spawn_link(fun Loop() ->
+    receive
+        {set, Inst} -> put(inst, Inst), Loop();
+        Msg ->
+            ok = wasmtime:handle_host_call(get(inst), Msg),
+            Loop()
+    end
+end),
+{ok, Inst} = wasmtime:instantiate(Mod, #{host => Handler, imports => Imports}),
+Handler ! {set, Inst}.
+```
+
+`handle_host_call/2` runs the import fun for a
+`{wasmtime_host_call, Ref, HostId, Key, Args}` message and replies to the
+guest; it returns `ignore` for any other message. Host calls made by the
+module's start section during `instantiate/2` still go to the caller, which
+is the only process that has the instance at that point. If the handler
+process is gone the guest traps at once with `message => ~"host process is
+gone"`.
 
 ## Bound the wait
 

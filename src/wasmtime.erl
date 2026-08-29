@@ -22,12 +22,15 @@ on an instance at a time; concurrent callers are queued.
     compile/1,
     imports/1,
     exports/1,
+    serialize/1,
+    deserialize/1,
     instantiate/1, instantiate/2,
     call/3, call/4,
     interrupt/1,
-    read_memory/3,
-    write_memory/3,
-    memory_size/1,
+    handle_host_call/2,
+    read_memory/3, read_memory/4,
+    write_memory/3, write_memory/4,
+    memory_size/1, memory_size/2,
     version/0
 ]).
 
@@ -81,7 +84,8 @@ Erlang cannot represent; a `v128` is a 16-byte binary.
     max_tables => pos_integer() | unlimited,
     max_table_elements => pos_integer() | unlimited,
     max_instances => pos_integer() | unlimited,
-    host_timeout => timeout()
+    host_timeout => timeout(),
+    host => pid()
 }.
 
 %% ------------------------------------------------------------------ modules
@@ -97,6 +101,27 @@ compile({wat, Text}) ->
     wasmtime_nif:compile(iolist_to_binary(Text), true);
 compile(Bin) when is_binary(Bin) ->
     wasmtime_nif:compile(Bin, false).
+
+-doc """
+Serialize a compiled module into Wasmtime's precompiled form.
+
+The result loads with `deserialize/1` without compiling, on the same Wasmtime
+version and a CPU with the same features. Use it to compile once at build
+time and ship the output, or to keep a cache.
+""".
+-spec serialize(module_ref()) -> {ok, binary()} | error().
+serialize(Mod) -> wasmtime_nif:serialize(Mod).
+
+-doc """
+Load a module produced by `serialize/1`.
+
+Wasmtime verifies its own version and the CPU features the code was built
+for, not the machine code itself. Only bytes that came from `serialize/1`,
+from a source you trust, may be passed here; a `.wasm` file goes to
+`compile/1`.
+""".
+-spec deserialize(binary()) -> {ok, module_ref()} | error().
+deserialize(Bin) when is_binary(Bin) -> wasmtime_nif:deserialize(Bin).
 
 -doc "List what the module imports, as `{Module, Name, Kind}`.".
 -spec imports(module_ref()) -> [{binary(), binary(), func | global | table | memory | tag}].
@@ -126,6 +151,10 @@ memory at most. Options:
   per-store caps enforced by Wasmtime. `unlimited` removes a cap.
 - `host_timeout`: how long a host function may run before the guest traps
   (default 30 s).
+- `host`: a process that serves host calls instead of the caller. It receives
+  `{wasmtime_host_call, Ref, HostId, Key, Args}` messages and answers them
+  with `handle_host_call/2`. Host calls made by the module's start section
+  during `instantiate/2` still go to the caller.
 
 The module's start section runs during instantiation and may call host
 functions; a trap there is reported as `class => trap`. A WASI `_start` is an
@@ -134,6 +163,21 @@ ordinary export and is not run here: call it.
 -spec instantiate(module_ref(), options()) -> {ok, instance()} | error().
 instantiate(Mod, Opts) when is_map(Opts) ->
     Imports = maps:get(imports, Opts, #{}),
+    Ref = make_ref(),
+    Id = erlang:unique_integer([positive, monotonic]),
+    case wasmtime_nif:instantiate(Mod, nif_options(Imports, Opts), Ref, Id) of
+        {ok, Handle} ->
+            Inst = #instance{handle = Handle, ref = Ref, imports = Imports},
+            case await(Inst, Id, infinity) of
+                ok -> {ok, Inst};
+                {error, _} = Error -> Error
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+%% The tuple the NIF reads; see do_instantiate in wasmtime_nif.c.
+nif_options(Imports, Opts) ->
     Limits = {
         limit(memory_limit, Opts, ?DEFAULT_MEMORY_LIMIT),
         limit(max_tables, Opts, 100),
@@ -145,19 +189,9 @@ instantiate(Mod, Opts) when is_map(Opts) ->
             infinity -> 16#FFFFFFFF;
             T when is_integer(T), T >= 0 -> T
         end,
-    NifOpts = {maps:keys(Imports), wasi_options(maps:get(wasi, Opts, none)), Limits, HostTimeout},
-    Ref = make_ref(),
-    Id = erlang:unique_integer([positive, monotonic]),
-    case wasmtime_nif:instantiate(Mod, NifOpts, Ref, Id) of
-        {ok, Handle} ->
-            Inst = #instance{handle = Handle, ref = Ref, imports = Imports},
-            case await(Inst, Id, infinity) of
-                ok -> {ok, Inst};
-                {error, _} = Error -> Error
-            end;
-        {error, _} = Error ->
-            Error
-    end.
+    HostPid = maps:get(host, Opts, undefined),
+    true = HostPid =:= undefined orelse is_pid(HostPid),
+    {maps:keys(Imports), wasi_options(maps:get(wasi, Opts, none)), Limits, HostTimeout, HostPid}.
 
 limit(Key, Opts, Default) ->
     case maps:get(Key, Opts, Default) of
@@ -219,6 +253,24 @@ Returns `not_running` when the instance is idle.
 -spec interrupt(instance()) -> ok | not_running.
 interrupt(#instance{handle = H}) -> wasmtime_nif:interrupt(H).
 
+-doc """
+Serve one host call message in a `host` process.
+
+Call it with every `{wasmtime_host_call, Ref, HostId, Key, Args}` message the
+process receives for `Inst`; it runs the import fun and replies to the guest.
+Returns `ignore` for a message that is not a host call of this instance, so
+it can sit in a `receive` alongside other messages.
+""".
+-spec handle_host_call(instance(), term()) -> ok | ignore.
+handle_host_call(
+    #instance{handle = H, ref = Ref, imports = Imports} = Inst,
+    {wasmtime_host_call, Ref, HostId, Key, Args}
+) ->
+    _ = wasmtime_nif:host_reply(H, HostId, run_host(Imports, Key, Inst, Args)),
+    ok;
+handle_host_call(#instance{}, _) ->
+    ignore.
+
 %% Wait for the result of request Id, serving host calls meanwhile.
 await(#instance{handle = H, ref = Ref, imports = Imports} = Inst, Id, Timeout) ->
     receive
@@ -234,15 +286,17 @@ await(#instance{handle = H, ref = Ref, imports = Imports} = Inst, Id, Timeout) -
         case wasmtime_nif:cancel(H, Id) of
             ok ->
                 settle(Inst, Id),
-                {error, #{class => trap, kind => timeout, message => ~"call timed out"}};
+                timeout_error();
             not_running ->
                 receive
                     {wasmtime_result, Ref, Id, Result} -> Result
-                after 0 ->
-                    {error, #{class => trap, kind => timeout, message => ~"call timed out"}}
+                after 0 -> timeout_error()
                 end
         end
     end.
+
+timeout_error() ->
+    {error, #{class => trap, kind => timeout, message => ~"call timed out"}}.
 
 %% After a cancel no result message follows, but a host call sent before the
 %% cancel may still be queued; answer it so nothing lingers.
@@ -272,22 +326,38 @@ format_reason(Term) -> unicode:characters_to_binary(io_lib:format("~0p", [Term])
 %% ------------------------------------------------------------------- memory
 
 -doc """
-Read `Len` bytes at `Ptr` from the instance's exported memory.
+Read `Len` bytes at `Ptr` from the instance's default memory: the export
+named `memory`, or the first exported memory.
 
 Works while the instance is idle or while a host function runs (pass the
 instance the host fun received). Fails with `kind => busy` if the guest is
 executing.
 """.
 -spec read_memory(instance(), non_neg_integer(), non_neg_integer()) -> {ok, binary()} | error().
-read_memory(#instance{handle = H}, Ptr, Len) -> wasmtime_nif:read_memory(H, Ptr, Len).
+read_memory(Inst, Ptr, Len) -> read_memory(Inst, default, Ptr, Len).
 
--doc "Write `Data` at `Ptr` in the instance's exported memory. Same rules as `read_memory/3`.".
+-doc "Same as `read_memory/3` on the exported memory called `Name`.".
+-spec read_memory(instance(), default | iodata(), non_neg_integer(), non_neg_integer()) ->
+    {ok, binary()} | error().
+read_memory(#instance{handle = H}, Name, Ptr, Len) -> wasmtime_nif:read_memory(H, Name, Ptr, Len).
+
+-doc "Write `Data` at `Ptr` in the default memory. Same rules as `read_memory/3`.".
 -spec write_memory(instance(), non_neg_integer(), iodata()) -> ok | error().
-write_memory(#instance{handle = H}, Ptr, Data) -> wasmtime_nif:write_memory(H, Ptr, Data).
+write_memory(Inst, Ptr, Data) -> write_memory(Inst, default, Ptr, Data).
 
--doc "Size of the exported memory as `{Pages, Bytes}`.".
+-doc "Same as `write_memory/3` on the exported memory called `Name`.".
+-spec write_memory(instance(), default | iodata(), non_neg_integer(), iodata()) -> ok | error().
+write_memory(#instance{handle = H}, Name, Ptr, Data) ->
+    wasmtime_nif:write_memory(H, Name, Ptr, Data).
+
+-doc "Size of the default memory as `{Pages, Bytes}`.".
 -spec memory_size(instance()) -> {ok, {non_neg_integer(), non_neg_integer()}} | error().
-memory_size(#instance{handle = H}) -> wasmtime_nif:memory_size(H).
+memory_size(Inst) -> memory_size(Inst, default).
+
+-doc "Size of the exported memory called `Name` as `{Pages, Bytes}`.".
+-spec memory_size(instance(), default | iodata()) ->
+    {ok, {non_neg_integer(), non_neg_integer()}} | error().
+memory_size(#instance{handle = H}, Name) -> wasmtime_nif:memory_size(H, Name).
 
 -doc "Version of the linked Wasmtime library.".
 -spec version() -> binary().

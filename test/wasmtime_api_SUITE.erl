@@ -60,7 +60,13 @@
     limits_host_timeout_infinity/1,
     lifetime_instances_in_other_processes/1,
     lifetime_module_dropped_before_instance/1,
-    lifetime_error_shape/1
+    lifetime_error_shape/1,
+    serialize_roundtrip/1,
+    serialize_rejects_garbage/1,
+    memory_by_name/1,
+    host_process_serves_calls/1,
+    host_process_reentrancy_refused/1,
+    host_process_gone/1
 ]).
 
 all() ->
@@ -137,6 +143,18 @@ groups() ->
             lifetime_instances_in_other_processes,
             lifetime_module_dropped_before_instance,
             lifetime_error_shape
+        ]},
+        {precompiled, [parallel], [
+            serialize_roundtrip,
+            serialize_rejects_garbage
+        ]},
+        {memories, [parallel], [
+            memory_by_name
+        ]},
+        {host_process, [parallel], [
+            host_process_serves_calls,
+            host_process_reentrancy_refused,
+            host_process_gone
         ]}
     ].
 
@@ -918,4 +936,142 @@ lifetime_error_shape(_) ->
         Errors
     ),
     5 = length(Errors),
+    ok.
+
+%% ----------------------------------------------------------- precompiled
+
+serialize_roundtrip(_) ->
+    Mod = compile(~"(module (func (export \"one\") (result i32) i32.const 1))"),
+    {ok, Bin} = wasmtime:serialize(Mod),
+    ?assert(byte_size(Bin) > 0),
+    {ok, Mod2} = wasmtime:deserialize(Bin),
+    [{~"one", func}] = wasmtime:exports(Mod2),
+    {ok, Inst} = wasmtime:instantiate(Mod2),
+    {ok, [1]} = wasmtime:call(Inst, ~"one", []),
+    %% the precompiled form is not a wasm module and vice versa
+    {error, #{class := compile}} = wasmtime:compile(Bin),
+    ok.
+
+serialize_rejects_garbage(_) ->
+    {error, #{class := compile}} = wasmtime:deserialize(<<"not precompiled">>),
+    {error, #{class := compile}} = wasmtime:deserialize(<<>>),
+    {error, #{class := compile}} = wasmtime:deserialize(<<0, "asm", 1, 0, 0, 0>>),
+    ok.
+
+%% -------------------------------------------------------------- memories
+
+memory_by_name(_) ->
+    Inst = instance(
+        ~"""
+        (module
+          (memory $a 1)
+          (memory $b 2)
+          (export "memory" (memory $a))
+          (export "scratch" (memory $b))
+          (data (memory $b) (i32.const 0) "in b"))
+        """
+    ),
+    {ok, {1, 65536}} = wasmtime:memory_size(Inst),
+    {ok, {1, 65536}} = wasmtime:memory_size(Inst, ~"memory"),
+    {ok, {2, 131072}} = wasmtime:memory_size(Inst, ~"scratch"),
+    {ok, ~"in b"} = wasmtime:read_memory(Inst, ~"scratch", 0, 4),
+    {ok, <<0, 0, 0, 0>>} = wasmtime:read_memory(Inst, 0, 4),
+    ok = wasmtime:write_memory(Inst, ~"scratch", 100, ~"x"),
+    ok = wasmtime:write_memory(Inst, "scratch", 101, ~"y"),
+    {ok, ~"xy"} = wasmtime:read_memory(Inst, ~"scratch", 100, 2),
+    {ok, <<0, 0>>} = wasmtime:read_memory(Inst, ~"memory", 100, 2),
+    {error, #{class := memory, kind := no_memory}} = wasmtime:read_memory(Inst, ~"nope", 0, 1),
+    {error, #{class := memory, kind := out_of_bounds}} =
+        wasmtime:read_memory(Inst, ~"memory", 131000, 1),
+    ok.
+
+%% ---------------------------------------------------------- host process
+
+host_wat() ->
+    ~"""
+    (module
+      (import "env" "twice" (func $twice (param i32) (result i32)))
+      (func (export "run") (param i32) (result i32) local.get 0 call $twice))
+    """.
+
+%% A handler process: serves host calls for Inst until told to stop.
+handler(Parent) ->
+    receive
+        {inst, Inst} -> handler_loop(Parent, Inst)
+    end.
+
+handler_loop(Parent, Inst) ->
+    receive
+        stop ->
+            ok;
+        Msg ->
+            case wasmtime:handle_host_call(Inst, Msg) of
+                ok -> Parent ! {served, self()};
+                ignore -> Parent ! {ignored, Msg}
+            end,
+            handler_loop(Parent, Inst)
+    end.
+
+host_process_serves_calls(_) ->
+    Self = self(),
+    Handler = spawn_link(fun() -> handler(Self) end),
+    Twice = fun(_, [X]) ->
+        Self ! {ran_in, self()},
+        {ok, [X * 2]}
+    end,
+    {ok, Inst} = wasmtime:instantiate(compile(host_wat()), #{
+        host => Handler, imports => #{{~"env", ~"twice"} => Twice}
+    }),
+    Handler ! {inst, Inst},
+    {ok, [42]} = wasmtime:call(Inst, ~"run", [21]),
+    receive
+        {ran_in, Pid} -> Handler = Pid
+    after 1000 -> ct:fail(not_served)
+    end,
+    receive
+        {served, Handler} -> ok
+    after 1000 -> ct:fail(no_ack)
+    end,
+    %% the caller never saw the host call message
+    receive
+        {wasmtime_host_call, _, _, _, _} = M -> ct:fail({leaked_to_caller, M})
+    after 0 -> ok
+    end,
+    ignore = wasmtime:handle_host_call(Inst, something_else),
+    Handler ! stop,
+    ok.
+
+host_process_reentrancy_refused(_) ->
+    %% the handler calling the instance from inside a host fun is refused,
+    %% the same as a caller would be
+    Self = self(),
+    Handler = spawn_link(fun() -> handler(Self) end),
+    Twice = fun(Ctx, [X]) ->
+        Self ! {inner, wasmtime:call(Ctx, ~"run", [1])},
+        {ok, [X]}
+    end,
+    {ok, Inst} = wasmtime:instantiate(compile(host_wat()), #{
+        host => Handler, imports => #{{~"env", ~"twice"} => Twice}
+    }),
+    Handler ! {inst, Inst},
+    {ok, [5]} = wasmtime:call(Inst, ~"run", [5]),
+    receive
+        {inner, {error, #{kind := reentrant}}} -> ok
+    after 1000 -> ct:fail(no_inner)
+    end,
+    Handler ! stop,
+    ok.
+
+host_process_gone(_) ->
+    %% a dead handler fails the guest at once instead of waiting host_timeout
+    Handler = spawn(fun() -> ok end),
+    timer:sleep(20),
+    {ok, Inst} = wasmtime:instantiate(compile(host_wat()), #{
+        host => Handler,
+        host_timeout => 60000,
+        imports => #{{~"env", ~"twice"} => fun(_, [X]) -> {ok, [X]} end}
+    }),
+    T0 = erlang:monotonic_time(millisecond),
+    {error, #{class := host, message := ~"host process is gone"}} = wasmtime:call(Inst, ~"run", [1]),
+    ?assert(erlang:monotonic_time(millisecond) - T0 < 1000),
     ok.

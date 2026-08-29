@@ -66,7 +66,8 @@ WASMTIME_NIF_SANITIZE=address rebar3 compile     # ASan build of the NIF
 - `test/wasmtime_SUITE.erl`: behaviour of the binding (host calls, interrupts,
   isolation, WASI, lifetime).
 - `test/wasmtime_api_SUITE.erl`: API coverage in the style of wasmtime-py's
-  tests (values, traps, memory, imports, WASI details).
+  tests (values, traps, memory, imports, WASI details, precompiled modules,
+  named memories, host process).
 
 ## Conventions
 

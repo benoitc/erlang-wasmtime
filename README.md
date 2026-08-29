@@ -32,6 +32,8 @@ all come back as `{error, #{class => ..., kind => ..., message => ...}}`.
 - WASI preview 1 with explicit capabilities: `args`, `env`, preopened `dirs`,
   and stdio redirected to files or inherited.
 - Linear memory access from Erlang while the guest is idle or inside a host call.
+- Precompiled modules: compile once, `deserialize/1` in milliseconds.
+- Host functions served by the caller or by a dedicated process.
 
 ## Install
 
@@ -53,6 +55,7 @@ Requires OTP 27 or later.
 - [Getting started](docs/getting-started.md)
 - [Host functions](docs/host-functions.md)
 - [WASI](docs/wasi.md)
+- [Precompiled modules](docs/precompiled.md): compile once, load in milliseconds
 - [Building and shipping](docs/building.md)
 - [Features](docs/features.md): what is implemented, what is refused, what is deferred
 - [Examples](examples/README.md): a guest that reads ETS, logs and notifies processes

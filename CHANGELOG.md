@@ -22,3 +22,9 @@ First release.
   reports `kind => interrupt`.
 - Values cross the boundary through the raw C API so `v128` works; the typed
   path aborts the process on it.
+- `serialize/1` and `deserialize/1` for Wasmtime's precompiled form.
+- `read_memory/4`, `write_memory/4`, `memory_size/2` address an exported
+  memory by name.
+- `host => Pid` routes host calls to a dedicated process; `handle_host_call/2`
+  serves them there.
+- Worker threads get a 4 MB stack on every platform.

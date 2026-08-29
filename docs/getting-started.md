@@ -86,7 +86,10 @@ ok = wasmtime:write_memory(Inst, 0, <<"hello">>),
 ```
 
 Memory is reachable while the instance is idle, or from inside a host function.
-During a call it returns `{error, #{kind := busy}}`.
+During a call it returns `{error, #{kind := busy}}`. These act on the export
+named `memory` (or the first exported memory); `read_memory/4`,
+`write_memory/4` and `memory_size/2` take an export name for modules with
+several memories.
 
 ## Notes
 

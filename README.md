@@ -53,6 +53,7 @@ Requires OTP 27 or later.
 - [WASI](docs/wasi.md)
 - [Building and shipping](docs/building.md)
 - [Features](docs/features.md): what is implemented, what is refused, what is deferred
+- [Examples](examples/README.md): a guest that reads ETS, logs and notifies processes
 
 ## Related
 

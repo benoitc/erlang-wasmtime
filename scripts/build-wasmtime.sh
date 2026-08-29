@@ -20,6 +20,10 @@
 #
 # Needs git, cmake and cargo. The source tree is cloned next to PREFIX and
 # reused. Prints PREFIX on success.
+#
+# WASMTIME_TARGET=<rust triple> cross-builds for that target (the release
+# workflow uses it for the musl archives: rustup target added, musl-gcc
+# from musl-tools as the linker).
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(tr -d '[:space:]' < "$ROOT/scripts/wasmtime.version")"
@@ -51,6 +55,15 @@ case "$VARIANT" in
     *) echo "wasmtime: unknown variant '$VARIANT' (full or runtime)" >&2; exit 1 ;;
 esac
 export CARGO_PROFILE_RELEASE_STRIP=debuginfo
+TARGET_FLAGS=""
+if [ -n "${WASMTIME_TARGET:-}" ]; then
+    TARGET_FLAGS="-DWASMTIME_TARGET=$WASMTIME_TARGET"
+    # cargo reads the linker from CARGO_TARGET_<TRIPLE>_LINKER
+    triple="$(echo "$WASMTIME_TARGET" | tr 'a-z-' 'A-Z_')"
+    if [ -n "${WASMTIME_TARGET_LINKER:-}" ]; then
+        export "CARGO_TARGET_${triple}_LINKER=$WASMTIME_TARGET_LINKER"
+    fi
+fi
 
 WORK="$(dirname "$PREFIX")"
 SRC="$WORK/wasmtime-src"
@@ -65,9 +78,9 @@ fi
 
 echo "wasmtime: building the $VARIANT C API from source (this takes a few minutes)" >&2
 rm -rf "$BUILD" "$PREFIX"
-# shellcheck disable=SC2086 # FEATURES is a list of -D flags on purpose
+# shellcheck disable=SC2086 # FEATURES and TARGET_FLAGS are lists of -D flags on purpose
 cmake -S "$SRC/crates/c-api" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_INSTALL_PREFIX="$PREFIX" $FEATURES >"$BUILD.log" 2>&1 ||
+      -DCMAKE_INSTALL_PREFIX="$PREFIX" $FEATURES $TARGET_FLAGS >"$BUILD.log" 2>&1 ||
     { tail -20 "$BUILD.log" >&2; exit 1; }
 cmake --build "$BUILD" >>"$BUILD.log" 2>&1 || { tail -20 "$BUILD.log" >&2; exit 1; }
 cmake --install "$BUILD" >>"$BUILD.log" 2>&1 || { tail -20 "$BUILD.log" >&2; exit 1; }

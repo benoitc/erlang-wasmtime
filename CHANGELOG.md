@@ -32,6 +32,9 @@ First release.
 - Fuel metering: `compile/2` with `fuel => true`, `call/4` with `fuel`,
   `fuel_remaining/1`; `validate/1`; `trace` frames on trap errors;
   `global_get/2`, `global_set/3`, `table_size/2`, `table_grow/3`.
+- Compile options: `opt_level` and `proposals` in `compile/2` and
+  `validate/2`, `deserialize/2` for matching options, `module_options/1`.
+  One engine per option set, capped at 32.
 - WASI stdio without files: `stdin => {binary, Bytes}`, `stdout`/`stderr =>
   capture` read back with `read_output/1` under an `output_limit`;
   `args`/`env => inherit`.

@@ -21,7 +21,8 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Non-blocking calls | `call_async/3` and `await/2,3` |
 | Fuel metering | `compile(Bin, #{fuel => true})`, `call/4` with `fuel`, `fuel_remaining/1`; `kind => out_of_fuel` |
 | Structured traps | `trace` on trap errors: `[#{func_index, func_offset, func_name, module_name}]`, innermost first |
-| Validation without compiling | `validate/1` |
+| Validation without compiling | `validate/1`, `validate/2` with options |
+| Compile options | `compile/2`: `opt_level` (`none`, `speed`, `speed_and_size`), `proposals` on or off, `fuel`; `module_options/1`; `deserialize/2` to pick the engine |
 | Globals and tables from Erlang | `global_get/2`, `global_set/3`, `table_size/2`, `table_grow/3` (null elements) |
 | WASI stdio in memory | `stdin => {binary, _}`, `stdout`/`stderr => capture` with `read_output/1` and `output_limit`; `args`/`env => inherit` |
 | Runtime-only builds | `WASMTIME_RUNTIME_ONLY=1`: no compiler, 4 MB; `features/0` reports the linked library's capabilities; see [building](building.md) |
@@ -60,6 +61,8 @@ feature is missing the runtime says so with an error; it does not approximate.
 | A host function calling the instance it runs on | `kind => reentrant` |
 | `compile/1`, `{wat, _}`, `serialize/1` or the `wasi` option on a build without them | `kind => unavailable` |
 | `fuel` on a module compiled without metering | `kind => fuel_disabled` |
+| A 33rd distinct compile option set | `kind => too_many_configurations` |
+| `opt_level` other than `speed`, or a proposal the library lacks, on a build without it | `kind => unavailable` |
 | Writing a constant global | `kind => immutable` |
 | Reading a reference-typed global | `kind => unsupported_type` |
 

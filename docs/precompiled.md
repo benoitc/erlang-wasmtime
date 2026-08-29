@@ -52,6 +52,20 @@ compile_and_cache(WasmPath, Cache) ->
 A stale cache (other Wasmtime version, other CPU features) fails
 `deserialize/1` with `class => compile` and falls through to a fresh compile.
 
+## Compile options and compatibility
+
+A precompiled module records how it was compiled. At load time Wasmtime
+compares that with the engine:
+
+| Option | Checked at load | So |
+|---|---|---|
+| `fuel` | yes, exactly | load with `deserialize(Bin, #{fuel => true})` (`deserialize/1` tries it too) |
+| `opt_level` | no | loads on any engine, including runtime-only builds; the code keeps the level it was compiled at |
+| `proposals` | as a subset | a module compiled with proposals disabled loads on the defaults |
+
+`module_options/1` on the compile side tells you what to pass on the load
+side.
+
 ## Notes
 
 - The precompiled form is tied to the Wasmtime version in

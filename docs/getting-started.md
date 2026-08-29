@@ -91,6 +91,28 @@ served there, while it waits; a guest that calls the host earlier waits for
 `await` (within `host_timeout`), or use a `host` process. Two async calls on
 one instance run one after the other.
 
+## Compile options
+
+```erlang
+{ok, Mod} = wasmtime:compile(Bin, #{
+    opt_level => speed_and_size,
+    proposals => #{simd => false, threads => false, gc => false},
+    fuel => true}).
+```
+
+- `opt_level`: Cranelift's `none`, `speed` (default) or `speed_and_size`.
+- `proposals`: turn WebAssembly proposals off (or on) relative to Wasmtime's
+  defaults. A module that uses a disabled one is refused by `compile/2` and
+  `validate/2` with `class => compile`, which is how you pin down what a
+  plugin format may contain.
+- `fuel`: compile with fuel metering, see below.
+
+`module_options/1` returns what a module was compiled with. Each distinct
+option set is one Wasmtime engine, created on first use (at most 32 per
+VM). Of the options only `fuel` is checked when a precompiled module is
+loaded (`deserialize/2`); the optimization level and disabled proposals
+need nothing at load time.
+
 ## Bound a call by instructions instead of time
 
 ```erlang

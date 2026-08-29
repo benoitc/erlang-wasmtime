@@ -3,11 +3,12 @@
 
 -export([
     compile/3,
-    validate/1,
+    validate/2,
+    module_options/1,
     module_imports/1,
     module_exports/1,
     serialize/1,
-    deserialize/1,
+    deserialize/2,
     instantiate/4,
     call/5,
     global_get/2,
@@ -27,11 +28,12 @@
 ]).
 -nifs([
     compile/3,
-    validate/1,
+    validate/2,
+    module_options/1,
     module_imports/1,
     module_exports/1,
     serialize/1,
-    deserialize/1,
+    deserialize/2,
     instantiate/4,
     call/5,
     global_get/2,
@@ -61,12 +63,13 @@ init() ->
         end,
     erlang:load_nif(filename:join(Priv, "wasmtime_nif"), 0).
 
-compile(_Bin, _IsWat, _Fuel) -> erlang:nif_error(not_loaded).
-validate(_Bin) -> erlang:nif_error(not_loaded).
+compile(_Bin, _IsWat, _Key) -> erlang:nif_error(not_loaded).
+validate(_Bin, _Key) -> erlang:nif_error(not_loaded).
+module_options(_Mod) -> erlang:nif_error(not_loaded).
 module_imports(_Mod) -> erlang:nif_error(not_loaded).
 module_exports(_Mod) -> erlang:nif_error(not_loaded).
 serialize(_Mod) -> erlang:nif_error(not_loaded).
-deserialize(_Bin) -> erlang:nif_error(not_loaded).
+deserialize(_Bin, _Key) -> erlang:nif_error(not_loaded).
 instantiate(_Mod, _Opts, _Ref, _Id) -> erlang:nif_error(not_loaded).
 call(_Handle, _Name, _Args, _Id, _Fuel) -> erlang:nif_error(not_loaded).
 global_get(_Handle, _Name) -> erlang:nif_error(not_loaded).

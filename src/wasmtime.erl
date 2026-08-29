@@ -20,11 +20,12 @@ on an instance at a time; concurrent callers are queued.
 
 -export([
     compile/1, compile/2,
-    validate/1,
+    validate/1, validate/2,
+    module_options/1,
     imports/1,
     exports/1,
     serialize/1,
-    deserialize/1,
+    deserialize/1, deserialize/2,
     instantiate/1, instantiate/2,
     call/3, call/4,
     call_async/3,
@@ -53,6 +54,8 @@ on an instance at a time; concurrent callers are queued.
     frame/0,
     host_fun/0,
     options/0,
+    compile_options/0,
+    proposal/0,
     features/0
 ]).
 
@@ -107,6 +110,47 @@ may have no `wat` or `wasi`. See building.md, "Runtime-only builds".
 """.
 -type features() :: #{compiler := boolean(), wat := boolean(), wasi := boolean()}.
 
+-doc """
+Options for `compile/2`, `validate/2` and `deserialize/2`.
+
+- `fuel`: compile with fuel metering (see `call/4`).
+- `opt_level`: Cranelift's optimization level, `speed` by default; `none`
+  compiles fastest, `speed_and_size` trades some speed for smaller code.
+- `proposals`: WebAssembly proposals to enable or disable on top of
+  Wasmtime's defaults. Disabling one makes validation refuse modules that
+  use it: `#{simd => false, threads => false}` for a plugin format that
+  must not need them.
+
+Of these, only `fuel` is part of a precompiled module's compatibility
+check: give it again to `deserialize/2` (or rely on `deserialize/1`, which
+tries the fuel engine too). The optimization level and disabled proposals
+need nothing at load time. Each distinct option set is one Wasmtime engine,
+created on first use and kept; at most 32 exist per VM.
+""".
+-type compile_options() :: #{
+    fuel => boolean(),
+    opt_level => none | speed | speed_and_size,
+    proposals => #{proposal() => boolean()}
+}.
+
+-doc "A WebAssembly proposal that `compile_options()` can turn on or off.".
+-type proposal() ::
+    simd
+    | relaxed_simd
+    | relaxed_simd_deterministic
+    | bulk_memory
+    | multi_value
+    | multi_memory
+    | memory64
+    | tail_call
+    | wide_arithmetic
+    | custom_page_sizes
+    | threads
+    | reference_types
+    | function_references
+    | gc
+    | exceptions.
+
 -doc "A host function. Returns the results the guest expects, or `{error, Reason}` which traps the guest.".
 -type host_fun() :: fun((instance(), [value()]) -> {ok, [value()]} | {error, term()}).
 
@@ -156,25 +200,12 @@ A runtime-only build has no compiler: this returns
 -spec compile(binary() | {wat, iodata()}) -> {ok, module_ref()} | error().
 compile(Source) -> compile(Source, #{}).
 
--doc """
-Compile with options.
-
-- `fuel => true`: compile with fuel metering, so calls on instances of this
-  module can be bounded by an instruction count (`fuel` option of `call/4`,
-  `fuel_remaining/1`). Metering costs a few percent of speed, and a module
-  compiled this way is only compatible with precompiled modules of the same
-  kind.
-""".
--spec compile(binary() | {wat, iodata()}, #{fuel => boolean()}) -> {ok, module_ref()} | error().
+-doc "Compile with `t:compile_options/0`.".
+-spec compile(binary() | {wat, iodata()}, compile_options()) -> {ok, module_ref()} | error().
 compile({wat, Text}, Opts) ->
-    wasmtime_nif:compile(iolist_to_binary(Text), true, fuel_option(Opts));
+    with_key(Opts, fun(Key) -> wasmtime_nif:compile(iolist_to_binary(Text), true, Key) end);
 compile(Bin, Opts) when is_binary(Bin) ->
-    wasmtime_nif:compile(Bin, false, fuel_option(Opts)).
-
-fuel_option(Opts) ->
-    Fuel = maps:get(fuel, Opts, false),
-    true = is_boolean(Fuel),
-    Fuel.
+    with_key(Opts, fun(Key) -> wasmtime_nif:compile(Bin, false, Key) end).
 
 -doc """
 Decode and validate a binary module without compiling it.
@@ -183,7 +214,86 @@ Cheaper than `compile/1` when the question is only whether the bytes are a
 well-formed module; the errors have the same shape.
 """.
 -spec validate(binary()) -> ok | error().
-validate(Bin) when is_binary(Bin) -> wasmtime_nif:validate(Bin).
+validate(Bin) -> validate(Bin, #{}).
+
+-doc "Validate against `t:compile_options/0`: with proposals disabled, a module using one is refused.".
+-spec validate(binary(), compile_options()) -> ok | error().
+validate(Bin, Opts) when is_binary(Bin) ->
+    with_key(Opts, fun(Key) -> wasmtime_nif:validate(Bin, Key) end).
+
+-doc "The `t:compile_options/0` a module was compiled or deserialized with.".
+-spec module_options(module_ref()) -> compile_options().
+module_options(Mod) -> key_to_options(wasmtime_nif:module_options(Mod)).
+
+with_key(Opts, Fun) ->
+    case compile_key(Opts) of
+        {ok, Key} -> Fun(Key);
+        {error, _} = Error -> Error
+    end.
+
+%% The engine key the NIF reads: {Fuel, OptLevel, [{Proposal, Bool}]} with
+%% the overrides sorted, so equal maps mean the same engine. Malformed
+%% options raise; a set Wasmtime would refuse when the engine is created
+%% (which it does by aborting the process) is returned as an error here.
+compile_key(Opts) when is_map(Opts) ->
+    Fuel = maps:get(fuel, Opts, false),
+    OptLevel = maps:get(opt_level, Opts, speed),
+    Proposals = maps:get(proposals, Opts, #{}),
+    true = is_boolean(Fuel),
+    true = lists:member(OptLevel, [none, speed, speed_and_size]),
+    case proposal_overrides(Proposals) of
+        {ok, Overrides} -> {ok, {Fuel, OptLevel, Overrides}};
+        {error, _} = Error -> Error
+    end.
+
+%% Sorted, checked, with the implications Wasmtime insists on: relaxed SIMD
+%% sits on SIMD, so turning SIMD off turns relaxed SIMD off too, and asking
+%% for the opposite is refused.
+proposal_overrides(Proposals) when is_map(Proposals) ->
+    Overrides = lists:sort(maps:to_list(Proposals)),
+    lists:foreach(
+        fun({P, V}) ->
+            true = is_proposal(P),
+            true = is_boolean(V)
+        end,
+        Overrides
+    ),
+    Simd = maps:get(simd, Proposals, true),
+    Relaxed = maps:get(relaxed_simd, Proposals, false),
+    if
+        not Simd andalso Relaxed ->
+            {error, #{
+                class => compile,
+                kind => badarg,
+                message => ~"relaxed_simd needs simd: disable both or neither"
+            }};
+        not Simd ->
+            {ok, lists:usort([{relaxed_simd, false} | Overrides])};
+        true ->
+            {ok, Overrides}
+    end.
+
+key_to_options({Fuel, OptLevel, Overrides}) ->
+    #{fuel => Fuel, opt_level => OptLevel, proposals => maps:from_list(Overrides)}.
+
+is_proposal(P) ->
+    lists:member(P, [
+        simd,
+        relaxed_simd,
+        relaxed_simd_deterministic,
+        bulk_memory,
+        multi_value,
+        multi_memory,
+        memory64,
+        tail_call,
+        wide_arithmetic,
+        custom_page_sizes,
+        threads,
+        reference_types,
+        function_references,
+        gc,
+        exceptions
+    ]).
 
 -doc """
 Serialize a compiled module into Wasmtime's precompiled form.
@@ -204,7 +314,17 @@ from a source you trust, may be passed here; a `.wasm` file goes to
 `compile/1`.
 """.
 -spec deserialize(binary()) -> {ok, module_ref()} | error().
-deserialize(Bin) when is_binary(Bin) -> wasmtime_nif:deserialize(Bin).
+deserialize(Bin) when is_binary(Bin) -> wasmtime_nif:deserialize(Bin, undefined).
+
+-doc """
+Load a module produced by `serialize/1` onto the engine for these
+`t:compile_options/0`. Needed for `fuel => true` (`deserialize/1` covers
+the defaults and the fuel engine on its own); the loaded module then
+belongs to that engine, which `module_options/1` reports.
+""".
+-spec deserialize(binary(), compile_options()) -> {ok, module_ref()} | error().
+deserialize(Bin, Opts) when is_binary(Bin) ->
+    with_key(Opts, fun(Key) -> wasmtime_nif:deserialize(Bin, Key) end).
 
 -doc "List what the module imports, as `{Module, Name, Kind}`.".
 -spec imports(module_ref()) -> [{binary(), binary(), func | global | table | memory | tag}].

@@ -102,6 +102,17 @@ basic_wat() ->
     """.
 
 instance(Config) -> instance(Config, #{}).
+
+wait_idle(Inst, 0) ->
+    wasmtime:interrupt(Inst);
+wait_idle(Inst, N) ->
+    case wasmtime:interrupt(Inst) of
+        not_running ->
+            not_running;
+        ok ->
+            timer:sleep(10),
+            wait_idle(Inst, N - 1)
+    end.
 instance(Config, Opts) ->
     Log = fun(_Ctx, [X]) -> {ok, [X * 2]} end,
     Imports = maps:merge(#{{~"env", ~"log"} => Log}, maps:get(imports, Opts, #{})),
@@ -296,13 +307,13 @@ timeout_and_interrupt(Config) ->
     {error, #{class := trap, kind := timeout}} = wasmtime:call(Inst, ~"loop", [], #{timeout => 100}),
     Elapsed = erlang:monotonic_time(millisecond) - T0,
     ?assert(Elapsed >= 100 andalso Elapsed < 1000, Elapsed),
-    %% the result was dropped in the NIF; within a tick the instance is idle
-    timer:sleep(50),
+    %% the result was dropped in the NIF; within a tick or two the instance
+    %% is idle (a loaded CI runner can delay the ticker thread)
+    not_running = wait_idle(Inst, 100),
     receive
         {wasmtime_result, _, _, _} = M -> ct:fail({stale, M})
     after 0 -> ok
     end,
-    not_running = wasmtime:interrupt(Inst),
     {ok, [3]} = wasmtime:call(Inst, ~"add", [1, 2]),
     ok.
 

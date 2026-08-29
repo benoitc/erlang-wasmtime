@@ -11,7 +11,8 @@ SRC="$ROOT/c_src/wasmtime_nif.c"
 OUT="$ROOT/priv/wasmtime_nif.so"
 VERSION_FILE="$ROOT/scripts/wasmtime.version"
 
-if [ -f "$OUT" ] && [ "$OUT" -nt "$SRC" ] && [ "$OUT" -nt "$VERSION_FILE" ] && [ "$OUT" -nt "$0" ]; then
+# Up to date when nothing the NIF depends on is newer than it.
+if [ -f "$OUT" ] && [ -z "$(find "$SRC" "$VERSION_FILE" "$0" -newer "$OUT")" ]; then
     exit 0
 fi
 

@@ -47,10 +47,15 @@ WASMTIME_NIF_SANITIZE=address rebar3 compile     # ASan build of the NIF
   values, instance state, host calls, worker thread, resources, NIF entry
   points, load/unload. One OS thread per instance owns the Wasmtime store.
   Calls are queued and answered with `enif_send`
-  (`{wasmtime_result, Inst, Id, Result}`); host functions send
-  `{wasmtime_host_call, Inst, Id, {Module, Name}, Args}` to the caller and
-  wait, bounded, for `host_reply/3`. Interruption is epoch based: a ticker
-  thread bumps the engine epoch every 10 ms.
+  (`{wasmtime_result, Ref, Id, Result}`); host functions send
+  `{wasmtime_host_call, Ref, HostId, {Module, Name}, Args}` to the caller and
+  wait, bounded, for `host_reply/3`. `Ref` is an Erlang reference made at
+  instantiate time, never a resource term, so worker threads cannot resurrect
+  a resource. Two resource types: the handle Erlang holds (its destructor
+  only signals) and the instance, owned by the handle and by its detached
+  worker thread. Interruption is epoch based: a ticker thread bumps the
+  engine epoch every 10 ms; `cancel/2` ends one request by id and drops its
+  result.
 - `src/wasmtime.erl`: public API and the `receive` loop that serves host calls
   while a call runs. Normalises options into the tuples the NIF expects.
 - `src/wasmtime_nif.erl`: NIF stubs and `on_load`.

@@ -28,6 +28,13 @@ feature is missing the runtime says so with an error; it does not approximate.
   while the guest runs, so schedulers are not held.
 - Host functions run in the calling process.
 - One shared engine compiles every module; instances share nothing else.
+- Erlang holds a handle; the instance itself is owned jointly by that handle
+  and its thread. Dropping the handle tells the thread to stop and never
+  blocks a scheduler. A caller that dies has its running call interrupted and
+  its queued calls dropped.
+- `timeout` cancels the request by id: its result is dropped in the NIF, so
+  nothing lands in the mailbox afterwards. A result that arrived just as the
+  timeout fired is returned as the answer.
 
 ## Refused explicitly
 
@@ -40,6 +47,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Memory access on an instance without memory | `kind => no_memory` |
 | Out of range memory access | `kind => out_of_bounds` |
 | Wrong argument count or type | `kind => badarity`, `kind => badarg` |
+| A host function calling the instance it runs on | `kind => reentrant` |
 
 ## Deferred
 

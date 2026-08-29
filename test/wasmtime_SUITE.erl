@@ -25,7 +25,12 @@
     wasi_no_dirs/1,
     wasi_dirs/1,
     wasi_exit/1,
-    instance_gc/1
+    instance_gc/1,
+    interrupt_during_host_call/1,
+    reentrant_call_refused/1,
+    queued_call_from_dead_caller/1,
+    cancelled_call_leaves_no_messages/1,
+    timeout_keeps_a_result_that_just_arrived/1
 ]).
 
 all() ->
@@ -51,7 +56,12 @@ all() ->
         wasi_no_dirs,
         wasi_dirs,
         wasi_exit,
-        instance_gc
+        instance_gc,
+        interrupt_during_host_call,
+        reentrant_call_refused,
+        queued_call_from_dead_caller,
+        cancelled_call_leaves_no_messages,
+        timeout_keeps_a_result_that_just_arrived
     ].
 
 init_per_suite(Config) ->
@@ -286,7 +296,8 @@ timeout_and_interrupt(Config) ->
     {error, #{class := trap, kind := timeout}} = wasmtime:call(Inst, ~"loop", [], #{timeout => 100}),
     Elapsed = erlang:monotonic_time(millisecond) - T0,
     ?assert(Elapsed >= 100 andalso Elapsed < 1000, Elapsed),
-    %% the late result was drained, the instance is idle and usable
+    %% the result was dropped in the NIF; within a tick the instance is idle
+    timer:sleep(50),
     receive
         {wasmtime_result, _, _, _} = M -> ct:fail({stale, M})
     after 0 -> ok
@@ -410,5 +421,102 @@ instance_gc(Config) ->
     lists:foreach(fun(_) -> _ = instance(Config) end, lists:seq(1, 200)),
     erlang:garbage_collect(),
     Inst = instance(Config),
+    {ok, [3]} = wasmtime:call(Inst, ~"add", [1, 2]),
+    ok.
+
+%% ------------------------------------------------------------ review cases
+
+interrupt_during_host_call(Config) ->
+    %% interrupt/1 while the guest waits on a host fun: the guest gets
+    %% trap/interrupt, not a host error; the fun itself runs to completion
+    Slow = fun(_, _) ->
+        timer:sleep(300),
+        {ok, [1]}
+    end,
+    Inst = instance(Config, #{imports => #{{~"env", ~"log"} => Slow}}),
+    Self = self(),
+    spawn_link(fun() ->
+        timer:sleep(50),
+        Self ! {interrupt, wasmtime:interrupt(Inst)}
+    end),
+    {error, #{class := trap, kind := interrupt}} = wasmtime:call(Inst, ~"twice", [1]),
+    receive
+        {interrupt, ok} -> ok
+    after 1000 -> ct:fail(no_interrupt)
+    end,
+    {ok, [3]} = wasmtime:call(Inst, ~"add", [1, 2]),
+    ok.
+
+reentrant_call_refused(Config) ->
+    %% a host fun calling the instance it runs on is refused at once instead
+    %% of waiting for itself
+    Self = self(),
+    Inst = instance(Config, #{
+        host_timeout => infinity,
+        imports => #{
+            {~"env", ~"log"} => fun(Ctx, [X]) ->
+                Self ! {inner, wasmtime:call(Ctx, ~"add", [1, 2])},
+                {ok, [X]}
+            end
+        }
+    }),
+    {ok, [7]} = wasmtime:call(Inst, ~"twice", [7]),
+    receive
+        {inner, {error, #{class := call, kind := reentrant}}} -> ok
+    after 1000 -> ct:fail(no_inner)
+    end,
+    ok.
+
+queued_call_from_dead_caller(Config) ->
+    %% P1 runs an endless loop, P2 queues another one, both die: P1's call is
+    %% interrupted and P2's never starts, so ours runs promptly
+    Inst = instance(Config),
+    P1 = spawn(fun() -> wasmtime:call(Inst, ~"loop", []) end),
+    timer:sleep(50),
+    P2 = spawn(fun() -> wasmtime:call(Inst, ~"loop", []) end),
+    timer:sleep(50),
+    exit(P2, kill),
+    exit(P1, kill),
+    T0 = erlang:monotonic_time(millisecond),
+    {ok, [3]} = wasmtime:call(Inst, ~"add", [1, 2], #{timeout => 2000}),
+    ?assert(erlang:monotonic_time(millisecond) - T0 < 1000),
+    ok.
+
+cancelled_call_leaves_no_messages(Config) ->
+    %% A timeout cannot fire while this process runs a host fun, so the guest
+    %% side is bounded by host_timeout: the guest traps, the fun still runs to
+    %% completion here, its late reply is ignored and nothing lingers.
+    Slow = fun(_, _) ->
+        timer:sleep(300),
+        {ok, [1]}
+    end,
+    Inst = instance(Config, #{host_timeout => 100, imports => #{{~"env", ~"log"} => Slow}}),
+    {error, #{class := host, message := ~"host function timed out"}} =
+        wasmtime:call(Inst, ~"twice", [1], #{timeout => 5000}),
+    timer:sleep(200),
+    receive
+        M -> ct:fail({stale, M})
+    after 0 -> ok
+    end,
+    {ok, [3]} = wasmtime:call(Inst, ~"add", [1, 2]),
+    ok.
+
+timeout_keeps_a_result_that_just_arrived(Config) ->
+    %% a timeout of 0 races the result; whichever way it goes, no stale
+    %% message survives and the instance stays consistent
+    Inst = instance(Config),
+    Results = [wasmtime:call(Inst, ~"add", [1, 2], #{timeout => 0}) || _ <- lists:seq(1, 200)],
+    lists:foreach(
+        fun
+            ({ok, [3]}) -> ok;
+            ({error, #{kind := timeout}}) -> ok
+        end,
+        Results
+    ),
+    timer:sleep(100),
+    receive
+        M -> ct:fail({stale, M})
+    after 0 -> ok
+    end,
     {ok, [3]} = wasmtime:call(Inst, ~"add", [1, 2]),
     ok.

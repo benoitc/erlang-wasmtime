@@ -5,10 +5,11 @@
     compile/2,
     module_imports/1,
     module_exports/1,
-    instantiate/3,
+    instantiate/4,
     call/4,
     host_reply/3,
     interrupt/1,
+    cancel/2,
     read_memory/3,
     write_memory/3,
     memory_size/1,
@@ -18,10 +19,11 @@
     compile/2,
     module_imports/1,
     module_exports/1,
-    instantiate/3,
+    instantiate/4,
     call/4,
     host_reply/3,
     interrupt/1,
+    cancel/2,
     read_memory/3,
     write_memory/3,
     memory_size/1,
@@ -42,11 +44,12 @@ init() ->
 compile(_Bin, _IsWat) -> erlang:nif_error(not_loaded).
 module_imports(_Mod) -> erlang:nif_error(not_loaded).
 module_exports(_Mod) -> erlang:nif_error(not_loaded).
-instantiate(_Mod, _Opts, _Id) -> erlang:nif_error(not_loaded).
-call(_Inst, _Name, _Args, _Id) -> erlang:nif_error(not_loaded).
-host_reply(_Inst, _Id, _Reply) -> erlang:nif_error(not_loaded).
-interrupt(_Inst) -> erlang:nif_error(not_loaded).
-read_memory(_Inst, _Ptr, _Len) -> erlang:nif_error(not_loaded).
-write_memory(_Inst, _Ptr, _Bin) -> erlang:nif_error(not_loaded).
-memory_size(_Inst) -> erlang:nif_error(not_loaded).
+instantiate(_Mod, _Opts, _Ref, _Id) -> erlang:nif_error(not_loaded).
+call(_Handle, _Name, _Args, _Id) -> erlang:nif_error(not_loaded).
+host_reply(_Handle, _Id, _Reply) -> erlang:nif_error(not_loaded).
+interrupt(_Handle) -> erlang:nif_error(not_loaded).
+cancel(_Handle, _Id) -> erlang:nif_error(not_loaded).
+read_memory(_Handle, _Ptr, _Len) -> erlang:nif_error(not_loaded).
+write_memory(_Handle, _Ptr, _Bin) -> erlang:nif_error(not_loaded).
+memory_size(_Handle) -> erlang:nif_error(not_loaded).
 version() -> erlang:nif_error(not_loaded).

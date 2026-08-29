@@ -50,8 +50,9 @@ This is the erlang-python model: the caller is the callback handler. Consequence
 
 - The fun can use the caller's state, dictionary and links.
 - The fun can read and write guest memory through `Ctx`; the guest is stopped.
-- The fun can call `wasmtime:call` on another instance, not on the same one
-  (that call would queue behind the one waiting for you).
+- The fun can call `wasmtime:call` on another instance. Calling the instance
+  it runs on is refused with `{error, #{kind := reentrant}}`: the guest is
+  parked waiting for this fun, so that call could never run.
 
 ## Bound the wait
 
@@ -63,6 +64,11 @@ If a host function has not returned after `host_timeout` milliseconds (default
 30000), the guest traps with `message => ~"host function timed out"`. The Erlang
 fun itself is not killed; it runs to completion and its late result is dropped.
 
+A `timeout` on `wasmtime:call/4` does not help here: it fires from the calling
+process's `receive`, which is not running while that process executes the
+host fun. Use `host_timeout` for the guest side and keep host funs short, or
+hand long work to another process.
+
 ## Notes
 
 - Only function imports can be provided from Erlang. A memory, table or global
@@ -73,4 +79,5 @@ fun itself is not killed; it runs to completion and its late result is dropped.
   with `class => link`. Extra keys in the map are ignored, so one map can serve
   several modules.
 - If the calling process dies during a host call, the instance is interrupted
-  and the next queued call proceeds.
+  and the next queued call proceeds. `wasmtime:interrupt/1` from another
+  process during a host call ends the guest with `kind => interrupt` at once.

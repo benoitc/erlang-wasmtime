@@ -35,9 +35,14 @@ on an instance at a time; concurrent callers are queued.
 
 -define(DEFAULT_MEMORY_LIMIT, 256 * 1024 * 1024).
 -define(DEFAULT_HOST_TIMEOUT, 30000).
--define(GRACE_MS, 5000).
 
--record(instance, {ref :: reference() | term(), imports :: #{{binary(), binary()} => host_fun()}}).
+%% `handle` is the NIF resource, `ref` the reference carried by every message
+%% the instance thread sends to a caller.
+-record(instance, {
+    handle :: reference(),
+    ref :: reference(),
+    imports :: #{{binary(), binary()} => host_fun()}
+}).
 
 -opaque module_ref() :: reference().
 -opaque instance() :: #instance{}.
@@ -122,7 +127,9 @@ memory at most. Options:
 - `host_timeout`: how long a host function may run before the guest traps
   (default 30 s).
 
-A start function or a WASI `_start` is not run here; call it explicitly.
+The module's start section runs during instantiation and may call host
+functions; a trap there is reported as `class => trap`. A WASI `_start` is an
+ordinary export and is not run here: call it.
 """.
 -spec instantiate(module_ref(), options()) -> {ok, instance()} | error().
 instantiate(Mod, Opts) when is_map(Opts) ->
@@ -139,10 +146,11 @@ instantiate(Mod, Opts) when is_map(Opts) ->
             T when is_integer(T), T >= 0 -> T
         end,
     NifOpts = {maps:keys(Imports), wasi_options(maps:get(wasi, Opts, none)), Limits, HostTimeout},
+    Ref = make_ref(),
     Id = erlang:unique_integer([positive, monotonic]),
-    case wasmtime_nif:instantiate(Mod, NifOpts, Id) of
-        {ok, Ref} ->
-            Inst = #instance{ref = Ref, imports = Imports},
+    case wasmtime_nif:instantiate(Mod, NifOpts, Ref, Id) of
+        {ok, Handle} ->
+            Inst = #instance{handle = Handle, ref = Ref, imports = Imports},
             case await(Inst, Id, infinity) of
                 ok -> {ok, Inst};
                 {error, _} = Error -> Error
@@ -188,11 +196,15 @@ Call an exported function and wait for its results.
 Host functions the guest calls run in this process, so it must be able to
 receive messages until the call returns. With `timeout` the guest is
 interrupted when the time is up and `{error, #{kind := timeout}}` is returned.
+
+`timeout` covers guest execution and the wait for it. It cannot fire while
+this process is inside one of its own host functions; `host_timeout` (an
+instantiate option) is what bounds the guest there.
 """.
 -spec call(instance(), iodata(), [value()], #{timeout => timeout()}) -> {ok, [value()]} | error().
-call(#instance{ref = Ref} = Inst, Name, Args, Opts) when is_list(Args), is_map(Opts) ->
+call(#instance{handle = H} = Inst, Name, Args, Opts) when is_list(Args), is_map(Opts) ->
     Id = erlang:unique_integer([positive, monotonic]),
-    case wasmtime_nif:call(Ref, iolist_to_binary(Name), Args, Id) of
+    case wasmtime_nif:call(H, iolist_to_binary(Name), Args, Id) of
         enqueued -> await(Inst, Id, maps:get(timeout, Opts, infinity));
         {error, _} = Error -> Error
     end.
@@ -201,39 +213,51 @@ call(#instance{ref = Ref} = Inst, Name, Args, Opts) when is_list(Args), is_map(O
 Interrupt the call running on the instance, from any process.
 
 The call fails with `{error, #{class := trap, kind := interrupt}}` within one
-epoch tick (10 ms). Returns `not_running` when the instance is idle.
+epoch tick (10 ms), or at once if it is waiting inside a host function.
+Returns `not_running` when the instance is idle.
 """.
 -spec interrupt(instance()) -> ok | not_running.
-interrupt(#instance{ref = Ref}) -> wasmtime_nif:interrupt(Ref).
+interrupt(#instance{handle = H}) -> wasmtime_nif:interrupt(H).
 
 %% Wait for the result of request Id, serving host calls meanwhile.
-await(#instance{ref = Ref, imports = Imports} = Inst, Id, Timeout) ->
+await(#instance{handle = H, ref = Ref, imports = Imports} = Inst, Id, Timeout) ->
     receive
         {wasmtime_result, Ref, Id, Result} ->
             Result;
         {wasmtime_host_call, Ref, HostId, Key, Args} ->
-            wasmtime_nif:host_reply(Ref, HostId, run_host(Imports, Key, Inst, Args)),
+            _ = wasmtime_nif:host_reply(H, HostId, run_host(Imports, Key, Inst, Args)),
             await(Inst, Id, Timeout)
     after Timeout ->
-        wasmtime_nif:interrupt(Ref),
-        drain(Inst, Id),
-        {error, #{class => trap, kind => timeout, message => ~"call timed out"}}
+        %% cancel/2 ends request Id and drops its result. `not_running` means
+        %% it had already finished: the result is in the mailbox, so it is
+        %% the answer after all.
+        case wasmtime_nif:cancel(H, Id) of
+            ok ->
+                settle(Inst, Id),
+                {error, #{class => trap, kind => timeout, message => ~"call timed out"}};
+            not_running ->
+                receive
+                    {wasmtime_result, Ref, Id, Result} -> Result
+                after 0 ->
+                    {error, #{class => trap, kind => timeout, message => ~"call timed out"}}
+                end
+        end
     end.
 
-%% After an interrupt the late result must not stay in the mailbox.
-drain(#instance{ref = Ref} = Inst, Id) ->
+%% After a cancel no result message follows, but a host call sent before the
+%% cancel may still be queued; answer it so nothing lingers.
+settle(#instance{handle = H, ref = Ref} = Inst, Id) ->
     receive
         {wasmtime_result, Ref, Id, _} ->
             ok;
         {wasmtime_host_call, Ref, HostId, _, _} ->
-            wasmtime_nif:host_reply(Ref, HostId, {error, ~"interrupted"}),
-            drain(Inst, Id)
-    after ?GRACE_MS -> ok
+            _ = wasmtime_nif:host_reply(H, HostId, {error, ~"interrupted"}),
+            settle(Inst, Id)
+    after 0 -> ok
     end.
 
 run_host(Imports, Key, Inst, Args) ->
-    Fun = maps:get(Key, Imports),
-    try Fun(Inst, Args) of
+    try (maps:get(Key, Imports))(Inst, Args) of
         {ok, Results} when is_list(Results) -> {ok, Results};
         {error, Reason} -> {error, format_reason(Reason)};
         Other -> {error, format_reason({bad_return, Other})}
@@ -255,15 +279,15 @@ instance the host fun received). Fails with `kind => busy` if the guest is
 executing.
 """.
 -spec read_memory(instance(), non_neg_integer(), non_neg_integer()) -> {ok, binary()} | error().
-read_memory(#instance{ref = Ref}, Ptr, Len) -> wasmtime_nif:read_memory(Ref, Ptr, Len).
+read_memory(#instance{handle = H}, Ptr, Len) -> wasmtime_nif:read_memory(H, Ptr, Len).
 
 -doc "Write `Data` at `Ptr` in the instance's exported memory. Same rules as `read_memory/3`.".
 -spec write_memory(instance(), non_neg_integer(), iodata()) -> ok | error().
-write_memory(#instance{ref = Ref}, Ptr, Data) -> wasmtime_nif:write_memory(Ref, Ptr, Data).
+write_memory(#instance{handle = H}, Ptr, Data) -> wasmtime_nif:write_memory(H, Ptr, Data).
 
 -doc "Size of the exported memory as `{Pages, Bytes}`.".
 -spec memory_size(instance()) -> {ok, {non_neg_integer(), non_neg_integer()}} | error().
-memory_size(#instance{ref = Ref}) -> wasmtime_nif:memory_size(Ref).
+memory_size(#instance{handle = H}) -> wasmtime_nif:memory_size(H).
 
 -doc "Version of the linked Wasmtime library.".
 -spec version() -> binary().

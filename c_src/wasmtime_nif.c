@@ -8,16 +8,26 @@
  *     around execution.
  *   - Erlang never blocks inside a NIF while a guest runs. `call` enqueues a
  *     request and returns; the worker thread replies with enif_send:
- *         {wasmtime_result, Inst, Id, {ok, Results} | {error, Map}}
+ *         {wasmtime_result, Ref, Id, {ok, Results} | {error, Map}}
  *   - A host function (an import provided by an Erlang fun) sends
- *         {wasmtime_host_call, Inst, Id, {Module, Name}, Args}
+ *         {wasmtime_host_call, Ref, HostId, {Module, Name}, Args}
  *     to the calling process and waits, bounded, for host_reply/3.
  *   - Interruption uses Wasmtime epochs. One ticker thread bumps the engine
  *     epoch every 10 ms; each store's deadline callback checks the instance's
  *     interrupt flag and either extends the deadline or fails the call.
  *
+ * Ownership. Two resource types:
+ *   - handle_t is what Erlang holds. Its destructor only tells the instance
+ *     to stop; it never blocks.
+ *   - instance_t is internal. It is kept alive by the handle and by its own
+ *     worker thread (one reference each). The thread is detached and drops
+ *     its reference as its last act, so the instance destructor never runs
+ *     while the thread can still touch the instance, and never joins.
+ *   Messages carry an Erlang reference (`Ref`, created by the Erlang side),
+ *   not a resource term, so a worker thread never resurrects a resource.
+ *
  * Sections: atoms and errors, values, instance state, host calls, worker
- * thread, NIF entry points, load/unload.
+ * thread, resources, NIF entry points, load/unload.
  */
 /* clock_gettime, nanosleep and pthread_cond_timedwait under -std=c11 */
 #define _POSIX_C_SOURCE 200809L
@@ -41,11 +51,11 @@
 
 /* ---------------------------------------------------------------- atoms -- */
 
-static ERL_NIF_TERM atom_ok, atom_error, atom_true, atom_false, atom_none, atom_undefined,
-    atom_inherit, atom_file, atom_read, atom_write, atom_nan, atom_infinity, atom_neg_infinity,
-    atom_class, atom_kind, atom_message, atom_status, atom_not_running, atom_busy, atom_func,
-    atom_global, atom_table, atom_memory, atom_tag, atom_shared_memory, atom_wasmtime_result,
-    atom_wasmtime_host_call, atom_no_pending_host_call, atom_enqueued;
+static ERL_NIF_TERM atom_ok, atom_error, atom_true, atom_none, atom_undefined, atom_inherit,
+    atom_file, atom_read, atom_write, atom_nan, atom_infinity, atom_neg_infinity, atom_class,
+    atom_kind, atom_message, atom_status, atom_not_running, atom_func, atom_global, atom_table,
+    atom_memory, atom_tag, atom_wasmtime_result, atom_wasmtime_host_call, atom_no_pending_host_call,
+    atom_enqueued;
 
 static ERL_NIF_TERM mk_atom(ErlNifEnv *env, const char *s) {
   ERL_NIF_TERM a;
@@ -91,10 +101,8 @@ static const char *trap_kind(wasmtime_trap_code_t code) {
   }
 }
 
-struct instance;
-
-/* Consumes `trap`. `host_failed` tells a trap raised by a failed host call. */
-static ERL_NIF_TERM trap_to_term(ErlNifEnv *env, wasm_trap_t *trap, int host_failed) {
+/* Consumes `trap`. */
+static ERL_NIF_TERM trap_to_term(ErlNifEnv *env, wasm_trap_t *trap) {
   wasm_message_t msg;
   wasm_trap_message(trap, &msg);
   wasmtime_trap_code_t code;
@@ -103,8 +111,6 @@ static ERL_NIF_TERM trap_to_term(ErlNifEnv *env, wasm_trap_t *trap, int host_fai
   size_t len = msg.size && msg.data[msg.size - 1] == 0 ? msg.size - 1 : msg.size;
   if (wasmtime_trap_code(trap, &code))
     t = mk_error(env, "trap", trap_kind(code), msg.data, len);
-  else if (host_failed)
-    t = mk_error(env, "host", "host_error", msg.data, len);
   else
     t = mk_error(env, "trap", "trap", msg.data, len);
   wasm_byte_vec_delete(&msg);
@@ -112,9 +118,8 @@ static ERL_NIF_TERM trap_to_term(ErlNifEnv *env, wasm_trap_t *trap, int host_fai
   return t;
 }
 
-/* Consumes `err`. `interrupted` tells the epoch callback fired. */
-static ERL_NIF_TERM error_to_term(ErlNifEnv *env, wasmtime_error_t *err, const char *cls,
-                                  int interrupted) {
+/* Consumes `err`. */
+static ERL_NIF_TERM error_to_term(ErlNifEnv *env, wasmtime_error_t *err, const char *cls) {
   int status;
   ERL_NIF_TERM t;
   if (wasmtime_error_exit_status(err, &status)) {
@@ -133,10 +138,7 @@ static ERL_NIF_TERM error_to_term(ErlNifEnv *env, wasmtime_error_t *err, const c
   } else {
     wasm_name_t msg;
     wasmtime_error_message(err, &msg);
-    if (interrupted)
-      t = mk_error(env, "trap", "interrupt", msg.data, msg.size);
-    else
-      t = mk_error(env, cls, cls, msg.data, msg.size);
+    t = mk_error(env, cls, cls, msg.data, msg.size);
     wasm_byte_vec_delete(&msg);
   }
   wasmtime_error_delete(err);
@@ -161,7 +163,9 @@ static int ref_kind(uint8_t k) {
 
 /* Values cross the boundary as wasmtime_val_raw_t: the typed wasmtime_val_t
  * path of the C API aborts the process on v128, the raw one supports it. The
- * kind always comes from the function type, never from the value. */
+ * kind always comes from the function type, never from the value. Reference
+ * kinds never reach these two functions: they are refused when a function
+ * type is inspected. */
 static ERL_NIF_TERM raw_to_term(ErlNifEnv *env, uint8_t kind, const wasmtime_val_raw_t *v) {
   double d;
   switch (kind) {
@@ -169,9 +173,7 @@ static ERL_NIF_TERM raw_to_term(ErlNifEnv *env, uint8_t kind, const wasmtime_val
   case WASMTIME_VALTYPE_KIND_I64: return enif_make_int64(env, v->i64);
   case WASMTIME_VALTYPE_KIND_F32: d = v->f32; goto flt;
   case WASMTIME_VALTYPE_KIND_F64: d = v->f64; goto flt;
-  default:
-    if (ref_kind(kind)) return atom_undefined;
-    return mk_binary(env, v->v128, 16);
+  default: return mk_binary(env, v->v128, 16);
   }
 flt:
   if (isnan(d)) return atom_nan;
@@ -201,7 +203,6 @@ static int term_to_double(ErlNifEnv *env, ERL_NIF_TERM t, double *d) {
   return 0;
 }
 
-/* `kind` is a WASMTIME_VALTYPE_KIND_* from a functype. */
 static int term_to_raw(ErlNifEnv *env, ERL_NIF_TERM t, uint8_t kind, wasmtime_val_raw_t *v) {
   ErlNifSInt64 i;
   ErlNifUInt64 u;
@@ -232,8 +233,6 @@ static int term_to_raw(ErlNifEnv *env, ERL_NIF_TERM t, uint8_t kind, wasmtime_va
     v->f64 = d;
     return 1;
   default:
-    if (ref_kind(kind)) return 0;
-    /* v128 comes through the C API as its own valkind. */
     if (!enif_inspect_binary(env, t, &bin) || bin.size != 16) return 0;
     memcpy(v->v128, bin.data, 16);
     return 1;
@@ -256,6 +255,7 @@ typedef struct req {
   ERL_NIF_TERM name, args, opts;
   ErlNifMonitor mon;
   int monitored;
+  int cancelled; /* caller died or gave up: run nothing, send nothing */
   struct req *next;
 } req_t;
 
@@ -263,6 +263,8 @@ typedef struct {
   char *module, *name;
   wasm_functype_t *type;
 } hostfn_t;
+
+struct instance;
 
 typedef struct {
   struct instance *inst;
@@ -272,10 +274,11 @@ typedef struct {
 enum state { ST_IDLE, ST_RUNNING, ST_IN_HOST };
 
 typedef struct instance {
-  pthread_t tid;
-  int thread_started;
   pthread_mutex_t mu;
   pthread_cond_t cv;
+
+  ErlNifEnv *ref_env; /* owns ref, the Erlang reference carried by messages */
+  ERL_NIF_TERM ref;
 
   req_t *head, *tail;
   req_t *current;
@@ -289,11 +292,12 @@ typedef struct instance {
   ERL_NIF_TERM reply;
   unsigned host_timeout_ms;
 
-  /* set by interrupt/1 or a caller's death, read by the epoch callback */
+  /* set under mu by interrupt/cancel/down, read by the epoch callback */
   volatile int interrupt;
-  int interrupted_fired; /* epoch callback failed the running call */
-  int host_failed;       /* the running call trapped inside a host fun */
-  char *host_msg;        /* why, for the error report */
+  /* worker-thread only: how the running request ended */
+  int interrupted_fired; /* the interrupt flag ended it */
+  int host_failed;       /* a host function failed it */
+  char *host_msg;        /* the host function's reason */
 
   wasmtime_store_t *store;
   wasmtime_context_t *ctx;
@@ -307,7 +311,11 @@ typedef struct instance {
   size_t nhostfns;
 } instance_t;
 
-static ErlNifResourceType *module_type, *instance_type;
+typedef struct {
+  instance_t *inst;
+} handle_t;
+
+static ErlNifResourceType *module_type, *instance_type, *handle_type;
 static wasm_engine_t *engine;
 static pthread_t ticker;
 static volatile int ticker_stop;
@@ -315,6 +323,13 @@ static volatile int ticker_stop;
 static void req_free(req_t *r) {
   if (r->env) enif_free_env(r->env);
   enif_free(r);
+}
+
+/* Build and send {wasmtime_result, Ref, Id, Result}. `env` owns `result`. */
+static void send_result(instance_t *inst, req_t *req, ErlNifEnv *env, ERL_NIF_TERM result) {
+  ERL_NIF_TERM msg = enif_make_tuple4(env, atom_wasmtime_result, enif_make_copy(env, inst->ref),
+                                      enif_make_uint64(env, req->id), result);
+  enif_send(NULL, &req->caller, env, msg);
 }
 
 /* ------------------------------------------------------------ host calls -- */
@@ -337,10 +352,20 @@ static void set_host_failure(instance_t *inst, const char *msg, size_t len) {
   inst->host_failed = 1;
 }
 
-/* A failed host function surfaces as a Wasmtime error wrapping a backtrace;
- * report the host's own message instead. */
-static ERL_NIF_TERM host_failure_term(ErlNifEnv *env, instance_t *inst) {
-  return mk_error_s(env, "host", "host_error", inst->host_msg ? inst->host_msg : "host error");
+/* How the request that just ran ended, in priority order. Consumes `e` and
+ * `trap`. A trap raised by a host callback comes back from Wasmtime as an
+ * error wrapping a backtrace; the instance flags tell the real cause. */
+static ERL_NIF_TERM outcome(instance_t *inst, ErlNifEnv *out, wasmtime_error_t *e,
+                            wasm_trap_t *trap, const char *cls) {
+  if (inst->interrupted_fired || inst->host_failed) {
+    if (e) wasmtime_error_delete(e);
+    if (trap) wasm_trap_delete(trap);
+    if (inst->interrupted_fired) return mk_error_s(out, "trap", "interrupt", "interrupted");
+    return mk_error_s(out, "host", "host_error", inst->host_msg ? inst->host_msg : "host error");
+  }
+  if (e) return error_to_term(out, e, cls);
+  if (trap) return trap_to_term(out, trap);
+  return atom_ok;
 }
 
 /* Runs on the instance thread, inside wasmtime_func_call. The mutex is not
@@ -353,8 +378,8 @@ static wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtim
   const wasm_valtype_vec_t *pt = wasm_functype_params(fn->type);
   const wasm_valtype_vec_t *rt = wasm_functype_results(fn->type);
   size_t nargs = pt->size, nresults = rt->size;
-  wasm_trap_t *trap = NULL;
   const char *fail = NULL;
+  int interrupted = 0;
 
   /* Read every argument before any result is written: they share `vals`. */
   ErlNifEnv *menv = enif_alloc_env();
@@ -364,13 +389,19 @@ static wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtim
         enif_make_list_cell(menv, raw_to_term(menv, kind_of(pt->data[i - 1]), &vals[i - 1]), list);
 
   pthread_mutex_lock(&inst->mu);
+  if (inst->abort || inst->current->cancelled) {
+    /* interrupted or cancelled before we got here: do not even ask */
+    pthread_mutex_unlock(&inst->mu);
+    enif_free_env(menv);
+    inst->interrupted_fired = 1;
+    return wasmtime_trap_new("interrupted", 11);
+  }
   inst->state = ST_IN_HOST;
   inst->host_id = ++inst->host_seq;
   inst->has_reply = 0;
-  inst->abort = 0;
   enif_clear_env(inst->reply_env);
   ERL_NIF_TERM msg =
-      enif_make_tuple5(menv, atom_wasmtime_host_call, enif_make_resource(menv, inst),
+      enif_make_tuple5(menv, atom_wasmtime_host_call, enif_make_copy(menv, inst->ref),
                        enif_make_uint64(menv, inst->host_id),
                        enif_make_tuple2(menv, mk_binary(menv, fn->module, strlen(fn->module)),
                                         mk_binary(menv, fn->name, strlen(fn->name))),
@@ -388,11 +419,11 @@ static wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtim
         break;
       }
     }
-    if (!fail && inst->abort) fail = "interrupted";
+    if (!fail && inst->abort) interrupted = 1;
   }
   inst->state = ST_RUNNING;
 
-  if (!fail) {
+  if (!fail && !interrupted) {
     /* {ok, Results} | {error, Message :: binary()} */
     ErlNifEnv *renv = inst->reply_env;
     const ERL_NIF_TERM *tup;
@@ -406,7 +437,6 @@ static wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtim
         bin.size = 10;
       }
       set_host_failure(inst, (const char *)bin.data, bin.size);
-      trap = wasmtime_trap_new((const char *)bin.data, bin.size);
     } else {
       ERL_NIF_TERM l = tup[1], h;
       size_t i = 0;
@@ -423,11 +453,13 @@ static wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtim
   }
   pthread_mutex_unlock(&inst->mu);
 
-  if (fail) {
-    set_host_failure(inst, fail, strlen(fail));
-    trap = wasmtime_trap_new(fail, strlen(fail));
+  if (interrupted) {
+    inst->interrupted_fired = 1;
+    return wasmtime_trap_new("interrupted", 11);
   }
-  return trap;
+  if (fail) set_host_failure(inst, fail, strlen(fail));
+  if (inst->host_failed) return wasmtime_trap_new(inst->host_msg, strlen(inst->host_msg));
+  return NULL;
 }
 
 /* --------------------------------------------------------- worker thread -- */
@@ -453,10 +485,6 @@ static char *bin_to_cstr(ErlNifEnv *env, ERL_NIF_TERM t) {
   return s;
 }
 
-static int list_length(ErlNifEnv *env, ERL_NIF_TERM l, unsigned *n) {
-  return enif_get_list_length(env, l, n);
-}
-
 /* Wasi :: none | {Args, Env, Dirs, Stdin, Stdout, Stderr}
  * Std   :: none | inherit | {file, Path}
  * Dirs  :: [{GuestPath, HostPath, read | write}] */
@@ -474,7 +502,7 @@ static const char *configure_wasi(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM
   int ar;
 
   /* argv */
-  if (!list_length(env, t[0], &n)) {
+  if (!enif_get_list_length(env, t[0], &n)) {
     err = "wasi args must be a list";
     goto done;
   }
@@ -493,7 +521,7 @@ static const char *configure_wasi(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM
     }
   }
   /* env */
-  if (!list_length(env, t[1], &n)) {
+  if (!enif_get_list_length(env, t[1], &n)) {
     err = "wasi env must be a list";
     goto done;
   }
@@ -685,29 +713,25 @@ static ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out)
     he->inst = inst;
     he->idx = inst->nhostfns;
     inst->nhostfns++;
+    /* The linker owns `he` from here and frees it with enif_free, on the
+     * error path too. */
     wasmtime_error_t *e =
         wasmtime_linker_define_func_unchecked(inst->linker, module, strlen(module), name,
                                               strlen(name), fn->type, host_callback, he, enif_free);
     if (e) {
-      result = error_to_term(out, e, "link", 0);
+      result = error_to_term(out, e, "link");
       break;
     }
   }
   wasm_importtype_vec_delete(&imports);
   if (!enif_is_identical(result, atom_ok)) return result;
 
-  inst->interrupted_fired = 0;
-  inst->host_failed = 0;
+  /* This runs the module's start section, which may call host functions. */
   wasm_trap_t *trap = NULL;
   wasmtime_error_t *e =
       wasmtime_linker_instantiate(inst->linker, inst->ctx, inst->mod->mod, &inst->instance, &trap);
-  if (inst->host_failed) {
-    if (e) wasmtime_error_delete(e);
-    if (trap) wasm_trap_delete(trap);
-    return host_failure_term(out, inst);
-  }
-  if (e) return error_to_term(out, e, "link", inst->interrupted_fired);
-  if (trap) return trap_to_term(out, trap, 0);
+  result = outcome(inst, out, e, trap, "link");
+  if (!enif_is_identical(result, atom_ok)) return result;
   inst->instantiated = 1;
 
   /* Cache the exported memory, "memory" by name or the first one exported. */
@@ -778,49 +802,51 @@ static ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
       }
     }
   }
-  inst->interrupted_fired = 0;
-  inst->host_failed = 0;
   wasmtime_context_set_epoch_deadline(inst->ctx, 1);
   {
     wasm_trap_t *trap = NULL;
     size_t nvals = ps->size > rs->size ? ps->size : rs->size;
     wasmtime_error_t *e = wasmtime_func_call_unchecked(inst->ctx, &ext.of.func, vals, nvals, &trap);
-    if (inst->host_failed) {
-      if (e) wasmtime_error_delete(e);
-      if (trap) wasm_trap_delete(trap);
-      result = host_failure_term(out, inst);
-      goto done;
+    result = outcome(inst, out, e, trap, "call");
+    if (enif_is_identical(result, atom_ok)) {
+      ERL_NIF_TERM list = enif_make_list(out, 0);
+      for (size_t i = rs->size; i > 0; i--)
+        list = enif_make_list_cell(out, raw_to_term(out, kind_of(rs->data[i - 1]), &vals[i - 1]),
+                                   list);
+      result = enif_make_tuple2(out, atom_ok, list);
     }
-    if (e) {
-      result = error_to_term(out, e, "call", inst->interrupted_fired);
-      goto done;
-    }
-    if (trap) {
-      result = trap_to_term(out, trap, 0);
-      goto done;
-    }
-    ERL_NIF_TERM list = enif_make_list(out, 0);
-    for (size_t i = rs->size; i > 0; i--)
-      list =
-          enif_make_list_cell(out, raw_to_term(out, kind_of(rs->data[i - 1]), &vals[i - 1]), list);
-    result = enif_make_tuple2(out, atom_ok, list);
   }
 done:
   wasm_functype_delete(ft);
   return result;
 }
 
+/* Called with the mutex held. Removes the request's monitor and frees it. */
+static void req_done(instance_t *inst, req_t *req) {
+  if (req->monitored) enif_demonitor_process(NULL, inst, &req->mon);
+  req_free(req);
+}
+
 static void *worker_main(void *arg) {
   instance_t *inst = arg;
   pthread_mutex_lock(&inst->mu);
-  for (;;) {
-    while (!inst->head && !inst->stopping) pthread_cond_wait(&inst->cv, &inst->mu);
-    if (inst->stopping) break;
+  while (!inst->stopping) {
+    if (!inst->head) {
+      pthread_cond_wait(&inst->cv, &inst->mu);
+      continue;
+    }
     req_t *req = inst->head;
     inst->head = req->next;
     if (!inst->head) inst->tail = NULL;
+    if (req->cancelled) {
+      req_done(inst, req);
+      continue;
+    }
     inst->current = req;
     inst->state = ST_RUNNING;
+    inst->abort = 0;
+    inst->interrupted_fired = 0;
+    inst->host_failed = 0;
     __atomic_store_n(&inst->interrupt, 0, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&inst->mu);
 
@@ -831,18 +857,27 @@ static void *worker_main(void *arg) {
     pthread_mutex_lock(&inst->mu);
     inst->state = ST_IDLE;
     inst->current = NULL;
-    if (req->monitored) enif_demonitor_process(NULL, inst, &req->mon);
-    if (!inst->stopping) {
-      ERL_NIF_TERM msg = enif_make_tuple4(out, atom_wasmtime_result, enif_make_resource(out, inst),
-                                          enif_make_uint64(out, req->id), result);
-      enif_send(NULL, &req->caller, out, msg);
-    }
+    if (!req->cancelled) send_result(inst, req, out, result);
     enif_free_env(out);
     int failed_instantiate = req->kind == REQ_INSTANTIATE && !inst->instantiated;
-    req_free(req);
-    if (failed_instantiate) break;
+    req_done(inst, req);
+    if (failed_instantiate) inst->stopping = 1;
   }
+  /* Nothing more runs. Tell whoever is still waiting. */
+  while (inst->head) {
+    req_t *req = inst->head;
+    inst->head = req->next;
+    if (!req->cancelled) {
+      ErlNifEnv *out = enif_alloc_env();
+      send_result(inst, req, out, mk_error_s(out, "call", "stopped", "instance is stopped"));
+      enif_free_env(out);
+    }
+    req_done(inst, req);
+  }
+  inst->tail = NULL;
   pthread_mutex_unlock(&inst->mu);
+  /* The thread's own reference; nothing below may touch `inst`. */
+  enif_release_resource(inst);
   return NULL;
 }
 
@@ -862,17 +897,10 @@ static void module_dtor(ErlNifEnv *env, void *obj) {
   if (m->mod) wasmtime_module_delete(m->mod);
 }
 
+/* Runs once the handle and the worker thread have both let go: the thread
+ * has exited (or never started), so nothing else can be using the instance. */
 static void instance_dtor(ErlNifEnv *env, void *obj) {
   instance_t *inst = obj;
-  if (inst->thread_started) {
-    pthread_mutex_lock(&inst->mu);
-    inst->stopping = 1;
-    inst->abort = 1;
-    __atomic_store_n(&inst->interrupt, 1, __ATOMIC_RELEASE);
-    pthread_cond_broadcast(&inst->cv);
-    pthread_mutex_unlock(&inst->mu);
-    pthread_join(inst->tid, NULL);
-  }
   while (inst->head) {
     req_t *r = inst->head;
     inst->head = r->next;
@@ -887,21 +915,44 @@ static void instance_dtor(ErlNifEnv *env, void *obj) {
   }
   enif_free(inst->hostfns);
   if (inst->reply_env) enif_free_env(inst->reply_env);
+  if (inst->ref_env) enif_free_env(inst->ref_env);
   enif_free(inst->host_msg);
   if (inst->mod) enif_release_resource(inst->mod);
   pthread_mutex_destroy(&inst->mu);
   pthread_cond_destroy(&inst->cv);
 }
 
-/* The process that issued the running request died: end the request. */
+/* Ask the running request to end. Called with the mutex held. */
+static void stop_current(instance_t *inst) {
+  inst->abort = 1;
+  __atomic_store_n(&inst->interrupt, 1, __ATOMIC_RELEASE);
+  pthread_cond_broadcast(&inst->cv);
+}
+
+/* Erlang dropped its last reference: stop the thread, never wait for it. */
+static void handle_dtor(ErlNifEnv *env, void *obj) {
+  handle_t *h = obj;
+  instance_t *inst = h->inst;
+  if (!inst) return;
+  pthread_mutex_lock(&inst->mu);
+  inst->stopping = 1;
+  if (inst->current) inst->current->cancelled = 1;
+  stop_current(inst);
+  pthread_mutex_unlock(&inst->mu);
+  enif_release_resource(inst);
+}
+
+/* A process with a request on this instance died. Its running request is
+ * interrupted and its queued requests are dropped before they start. */
 static void instance_down(ErlNifEnv *env, void *obj, ErlNifPid *pid, ErlNifMonitor *mon) {
   instance_t *inst = obj;
   pthread_mutex_lock(&inst->mu);
   if (inst->current && enif_compare_pids(&inst->current->caller, pid) == 0) {
-    inst->abort = 1;
-    __atomic_store_n(&inst->interrupt, 1, __ATOMIC_RELEASE);
-    pthread_cond_broadcast(&inst->cv);
+    inst->current->cancelled = 1;
+    stop_current(inst);
   }
+  for (req_t *r = inst->head; r; r = r->next)
+    if (enif_compare_pids(&r->caller, pid) == 0) r->cancelled = 1;
   pthread_mutex_unlock(&inst->mu);
 }
 
@@ -916,14 +967,14 @@ static ERL_NIF_TERM nif_compile(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
   size_t size = bin.size;
   if (is_wat) {
     wasmtime_error_t *e = wasmtime_wat2wasm((const char *)bin.data, bin.size, &wasm);
-    if (e) return error_to_term(env, e, "compile", 0);
+    if (e) return error_to_term(env, e, "compile");
     data = (const uint8_t *)wasm.data;
     size = wasm.size;
   }
   wasmtime_module_t *mod = NULL;
   wasmtime_error_t *e = wasmtime_module_new(engine, data, size, &mod);
   if (is_wat) wasm_byte_vec_delete(&wasm);
-  if (e) return error_to_term(env, e, "compile", 0);
+  if (e) return error_to_term(env, e, "compile");
   module_res_t *m = enif_alloc_resource(module_type, sizeof *m);
   m->mod = mod;
   ERL_NIF_TERM t = enif_make_resource(env, m);
@@ -937,8 +988,7 @@ static ERL_NIF_TERM extern_kind_atom(wasm_externkind_t k) {
   case WASM_EXTERN_GLOBAL: return atom_global;
   case WASM_EXTERN_TABLE: return atom_table;
   case WASM_EXTERN_MEMORY: return atom_memory;
-  case WASM_EXTERN_TAG: return atom_tag;
-  default: return atom_undefined;
+  default: return atom_tag; /* WASM_EXTERN_TAG, the last kind in wasm.h */
   }
 }
 
@@ -981,6 +1031,13 @@ static ERL_NIF_TERM nif_module_exports(ErlNifEnv *env, int argc, const ERL_NIF_T
   return list;
 }
 
+static int get_handle(ErlNifEnv *env, ERL_NIF_TERM t, instance_t **out) {
+  handle_t *h;
+  if (!enif_get_resource(env, t, handle_type, (void **)&h)) return 0;
+  *out = h->inst;
+  return 1;
+}
+
 /* Enqueue a request for the instance thread. Called on a scheduler thread. */
 static ERL_NIF_TERM enqueue(ErlNifEnv *env, instance_t *inst, enum req_kind kind, ERL_NIF_TERM id,
                             ERL_NIF_TERM name, ERL_NIF_TERM args, ERL_NIF_TERM opts) {
@@ -996,7 +1053,6 @@ static ERL_NIF_TERM enqueue(ErlNifEnv *env, instance_t *inst, enum req_kind kind
   r->name = enif_make_copy(r->env, name);
   r->args = enif_make_copy(r->env, args);
   r->opts = enif_make_copy(r->env, opts);
-  r->monitored = enif_monitor_process(env, inst, &r->caller, &r->mon) == 0;
 
   pthread_mutex_lock(&inst->mu);
   if (inst->stopping) {
@@ -1004,6 +1060,16 @@ static ERL_NIF_TERM enqueue(ErlNifEnv *env, instance_t *inst, enum req_kind kind
     req_free(r);
     return mk_error_s(env, "call", "stopped", "instance is stopped");
   }
+  /* A host function calling back into the instance it runs on would wait for
+   * itself: the guest is parked until this process answers the host call. */
+  if (inst->state == ST_IN_HOST && inst->current &&
+      enif_compare_pids(&inst->current->caller, &r->caller) == 0) {
+    pthread_mutex_unlock(&inst->mu);
+    req_free(r);
+    return mk_error_s(env, "call", "reentrant",
+                      "a host function cannot call the instance it is running on");
+  }
+  r->monitored = enif_monitor_process(env, inst, &r->caller, &r->mon) == 0;
   if (inst->tail)
     inst->tail->next = r;
   else
@@ -1014,45 +1080,65 @@ static ERL_NIF_TERM enqueue(ErlNifEnv *env, instance_t *inst, enum req_kind kind
   return atom_enqueued;
 }
 
-/* instantiate(Module, Opts, Id) -> {ok, Inst}; result arrives as a message */
+/* instantiate(Module, Opts, Ref, Id) -> {ok, Handle}; result arrives as a message */
 static ERL_NIF_TERM nif_instantiate(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   module_res_t *m;
-  if (!enif_get_resource(env, argv[0], module_type, (void **)&m)) return enif_make_badarg(env);
+  if (!enif_get_resource(env, argv[0], module_type, (void **)&m) || !enif_is_ref(env, argv[2]))
+    return enif_make_badarg(env);
+
   instance_t *inst = enif_alloc_resource(instance_type, sizeof *inst);
   memset(inst, 0, sizeof *inst);
   pthread_mutex_init(&inst->mu, NULL);
   pthread_cond_init(&inst->cv, NULL);
   inst->reply_env = enif_alloc_env();
+  inst->ref_env = enif_alloc_env();
+  inst->ref = enif_make_copy(inst->ref_env, argv[2]);
   inst->mod = m;
   enif_keep_resource(m);
   inst->host_timeout_ms = 30000;
 
-  ERL_NIF_TERM t = enif_make_resource(env, inst);
-  enif_release_resource(inst);
+  /* The handle holds one reference to the instance, the thread the other
+   * (the one enif_alloc_resource returned). */
+  handle_t *h = enif_alloc_resource(handle_type, sizeof *h);
+  h->inst = inst;
+  enif_keep_resource(inst);
+  ERL_NIF_TERM ht = enif_make_resource(env, h);
+  enif_release_resource(h);
+
   ERL_NIF_TERM r =
-      enqueue(env, inst, REQ_INSTANTIATE, argv[2], atom_undefined, atom_undefined, argv[1]);
-  if (!enif_is_identical(r, atom_enqueued)) return r;
-  if (pthread_create(&inst->tid, NULL, worker_main, inst) != 0)
+      enqueue(env, inst, REQ_INSTANTIATE, argv[3], atom_undefined, atom_undefined, argv[1]);
+  if (!enif_is_identical(r, atom_enqueued)) {
+    enif_release_resource(inst);
+    return r;
+  }
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  pthread_t tid;
+  int rc = pthread_create(&tid, &attr, worker_main, inst);
+  pthread_attr_destroy(&attr);
+  if (rc != 0) {
+    pthread_mutex_lock(&inst->mu);
+    inst->stopping = 1;
+    pthread_mutex_unlock(&inst->mu);
+    enif_release_resource(inst); /* the thread's reference, never taken */
     return mk_error_s(env, "link", "thread", "could not start instance thread");
-  inst->thread_started = 1;
-  return enif_make_tuple2(env, atom_ok, t);
+  }
+  return enif_make_tuple2(env, atom_ok, ht);
 }
 
-/* call(Inst, Name, Args, Id) -> enqueued; result arrives as a message */
+/* call(Handle, Name, Args, Id) -> enqueued; result arrives as a message */
 static ERL_NIF_TERM nif_call(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   instance_t *inst;
-  if (!enif_get_resource(env, argv[0], instance_type, (void **)&inst) ||
-      !enif_is_list(env, argv[2]))
-    return enif_make_badarg(env);
+  if (!get_handle(env, argv[0], &inst) || !enif_is_list(env, argv[2])) return enif_make_badarg(env);
   return enqueue(env, inst, REQ_CALL, argv[3], argv[1], argv[2], atom_undefined);
 }
 
-/* host_reply(Inst, Id, {ok, Results} | {error, Message}) -> ok */
+/* host_reply(Handle, HostId, {ok, Results} | {error, Message}) -> ok */
 static ERL_NIF_TERM nif_host_reply(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   instance_t *inst;
   ErlNifUInt64 id;
-  if (!enif_get_resource(env, argv[0], instance_type, (void **)&inst) ||
-      !enif_get_uint64(env, argv[1], &id))
+  if (!get_handle(env, argv[0], &inst) || !enif_get_uint64(env, argv[1], &id))
     return enif_make_badarg(env);
   pthread_mutex_lock(&inst->mu);
   ERL_NIF_TERM r;
@@ -1068,27 +1154,53 @@ static ERL_NIF_TERM nif_host_reply(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
   return r;
 }
 
-/* interrupt(Inst) -> ok | not_running */
+/* interrupt(Handle) -> ok | not_running: end whatever runs, keep its result */
 static ERL_NIF_TERM nif_interrupt(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   instance_t *inst;
-  if (!enif_get_resource(env, argv[0], instance_type, (void **)&inst)) return enif_make_badarg(env);
+  if (!get_handle(env, argv[0], &inst)) return enif_make_badarg(env);
   pthread_mutex_lock(&inst->mu);
   ERL_NIF_TERM r = atom_not_running;
-  if (inst->state != ST_IDLE) {
-    __atomic_store_n(&inst->interrupt, 1, __ATOMIC_RELEASE);
-    if (inst->state == ST_IN_HOST) inst->abort = 1;
-    pthread_cond_broadcast(&inst->cv);
+  if (inst->current) {
+    stop_current(inst);
     r = atom_ok;
   }
   pthread_mutex_unlock(&inst->mu);
   return r;
 }
 
-/* Memory is reachable from Erlang only while the guest is not executing:
- * when the instance is idle, or while it waits inside a host function. */
-static ERL_NIF_TERM with_memory(ErlNifEnv *env, ERL_NIF_TERM inst_t, instance_t **out) {
+/* cancel(Handle, Id) -> ok | not_running: end request Id and drop its result.
+ * `ok` means no result message will follow; `not_running` means the request
+ * already finished and its result is in the caller's mailbox. */
+static ERL_NIF_TERM nif_cancel(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   instance_t *inst;
-  if (!enif_get_resource(env, inst_t, instance_type, (void **)&inst)) return enif_make_badarg(env);
+  ErlNifUInt64 id;
+  if (!get_handle(env, argv[0], &inst) || !enif_get_uint64(env, argv[1], &id))
+    return enif_make_badarg(env);
+  pthread_mutex_lock(&inst->mu);
+  ERL_NIF_TERM r = atom_not_running;
+  if (inst->current && inst->current->id == id) {
+    inst->current->cancelled = 1;
+    stop_current(inst);
+    r = atom_ok;
+  } else {
+    for (req_t *q = inst->head; q; q = q->next) {
+      if (q->id == id) {
+        q->cancelled = 1;
+        r = atom_ok;
+        break;
+      }
+    }
+  }
+  pthread_mutex_unlock(&inst->mu);
+  return r;
+}
+
+/* Memory is reachable from Erlang only while the guest is not executing:
+ * when the instance is idle, or while it waits inside a host function. On
+ * success the caller holds inst->mu. */
+static ERL_NIF_TERM with_memory(ErlNifEnv *env, ERL_NIF_TERM handle, instance_t **out) {
+  instance_t *inst;
+  if (!get_handle(env, handle, &inst)) return enif_make_badarg(env);
   pthread_mutex_lock(&inst->mu);
   if (inst->state == ST_RUNNING) {
     pthread_mutex_unlock(&inst->mu);
@@ -1099,7 +1211,7 @@ static ERL_NIF_TERM with_memory(ErlNifEnv *env, ERL_NIF_TERM inst_t, instance_t 
     return mk_error_s(env, "memory", "no_memory", "instance exports no memory");
   }
   *out = inst;
-  return 0; /* caller holds inst->mu */
+  return 0;
 }
 
 static ERL_NIF_TERM nif_read_memory(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
@@ -1164,7 +1276,6 @@ static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
   A(atom_ok, "ok");
   A(atom_error, "error");
   A(atom_true, "true");
-  A(atom_false, "false");
   A(atom_none, "none");
   A(atom_undefined, "undefined");
   A(atom_inherit, "inherit");
@@ -1179,13 +1290,11 @@ static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
   A(atom_message, "message");
   A(atom_status, "status");
   A(atom_not_running, "not_running");
-  A(atom_busy, "busy");
   A(atom_func, "func");
   A(atom_global, "global");
   A(atom_table, "table");
   A(atom_memory, "memory");
   A(atom_tag, "tag");
-  A(atom_shared_memory, "shared_memory");
   A(atom_wasmtime_result, "wasmtime_result");
   A(atom_wasmtime_host_call, "wasmtime_host_call");
   A(atom_no_pending_host_call, "no_pending_host_call");
@@ -1194,19 +1303,27 @@ static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
 
   ErlNifResourceTypeInit mi = {.dtor = module_dtor};
   ErlNifResourceTypeInit ii = {.dtor = instance_dtor, .down = instance_down};
+  ErlNifResourceTypeInit hi = {.dtor = handle_dtor};
   module_type = enif_open_resource_type_x(env, "wasmtime_module", &mi, ERL_NIF_RT_CREATE, NULL);
   instance_type = enif_open_resource_type_x(env, "wasmtime_instance", &ii, ERL_NIF_RT_CREATE, NULL);
-  if (!module_type || !instance_type) return -1;
+  handle_type = enif_open_resource_type_x(env, "wasmtime_handle", &hi, ERL_NIF_RT_CREATE, NULL);
+  if (!module_type || !instance_type || !handle_type) return -1;
 
   wasm_config_t *cfg = wasm_config_new();
   wasmtime_config_epoch_interruption_set(cfg, true);
   engine = wasm_engine_new_with_config(cfg); /* consumes cfg */
   if (!engine) return -1;
   ticker_stop = 0;
-  if (pthread_create(&ticker, NULL, ticker_main, NULL) != 0) return -1;
+  if (pthread_create(&ticker, NULL, ticker_main, NULL) != 0) {
+    wasm_engine_delete(engine);
+    engine = NULL;
+    return -1;
+  }
   return 0;
 }
 
+/* Instances still alive at unload keep their own engine reference through
+ * their store; deleting ours here only drops the handle taken at load. */
 static void unload(ErlNifEnv *env, void *priv) {
   __atomic_store_n(&ticker_stop, 1, __ATOMIC_RELEASE);
   pthread_join(ticker, NULL);
@@ -1218,10 +1335,11 @@ static ErlNifFunc funcs[] = {
     {"compile", 2, nif_compile, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"module_imports", 1, nif_module_imports, 0},
     {"module_exports", 1, nif_module_exports, 0},
-    {"instantiate", 3, nif_instantiate, 0},
+    {"instantiate", 4, nif_instantiate, 0},
     {"call", 4, nif_call, 0},
     {"host_reply", 3, nif_host_reply, 0},
     {"interrupt", 1, nif_interrupt, 0},
+    {"cancel", 2, nif_cancel, 0},
     {"read_memory", 3, nif_read_memory, 0},
     {"write_memory", 3, nif_write_memory, 0},
     {"memory_size", 1, nif_memory_size, 0},

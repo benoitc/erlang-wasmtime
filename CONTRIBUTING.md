@@ -57,10 +57,22 @@ The order the code enforces, with one file per step:
    validation live here, the NIF only checks shapes. Export it.
 5. **Docs**: a row in `docs/features.md` (implemented, or refused with its
    `kind`), the guide the feature belongs to, `CHANGELOG.md`.
-6. **Tests**: a case in the suite for the mechanism (`test/wasmtime_*_SUITE.erl`),
-   named after the behaviour (`stream_blocked_recv_caller_dies`), asserting
-   the error kinds, not only the happy path. Helpers are in
-   `test/wasmtime_test.erl`.
+6. **Tests**: a case in the suite for the mechanism, named after the
+   behaviour (`stream_blocked_recv_caller_dies`), asserting the error kinds,
+   not only the happy path. Helpers (compiling WAT, the hand-assembled
+   binaries, `needs/2` for capability skips) are in `test/wasmtime_test.erl`.
+
+   | Suite | Covers |
+   |---|---|
+   | `wasmtime_SUITE` | behaviour that spans mechanisms: interruption, caller death, timeouts, error shapes |
+   | `wasmtime_module_SUITE` | compile, validate, inspect, precompiled modules, engine options |
+   | `wasmtime_call_SUITE` | values, traps and traces, fuel, async calls, globals and tables |
+   | `wasmtime_memory_SUITE` | linear memory access, store limits, instance lifetime |
+   | `wasmtime_host_SUITE` | host functions, the `host` process |
+   | `wasmtime_wasi_SUITE` | WASI arguments, environment, directories, stdio |
+   | `wasmtime_stream_SUITE` | the inbox, streamed stdio, the `erlang` imports, the shim files |
+   | `wasmtime_ref_SUITE` | references: funcref, externref, GC values |
+   | `wasmtime_runtime_only_SUITE` | the runtime-only build against precompiled fixtures |
 7. `make check`, then ASan if the C changed.
 
 ## Add a value kind or a reference kind

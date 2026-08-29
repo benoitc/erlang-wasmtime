@@ -11,7 +11,7 @@
 # interruption on, concurrency support off, the DRC collector, fuel per
 # variant, opt level speed, and every proposal off so the module's features
 # are a subset of any engine's. Rerun after a Wasmtime bump; the files are
-# committed and test/wasmtime_api_SUITE.erl checks the host's.
+# committed and shim_files_load in test/wasmtime_stream_SUITE.erl checks the host's.
 #
 # WASMTIME_CLI=/path/to/wasmtime skips the download.
 set -eu

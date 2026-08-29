@@ -148,23 +148,9 @@ x86_64) and FreeBSD (x86_64, in a VM), plus the full FreeBSD library, with
 
 ## Upgrade Wasmtime
 
-1. Edit `scripts/wasmtime.version`.
-2. Download the six upstream archives and replace their lines in
-   `scripts/wasmtime.sha256`.
-3. Run the `wasmtime-runtime` workflow (`gh workflow run wasmtime-runtime.yml`);
-   paste its `SHA256SUMS` into `scripts/wasmtime-runtime.sha256` and the
-   FreeBSD line into `scripts/wasmtime.sha256`.
-4. `rebar3 compile && rebar3 ct`, then the same with `WASMTIME_RUNTIME_ONLY=1`
-   and the fixtures from `scripts/precompile-fixtures.escript`.
-5. Check the engine settings the NIF sets at load still make full and
-   runtime builds accept the same precompiled modules: the runtime-only CI
-   job proves it on the same runner.
-6. Pin the new CLI archives in `scripts/wasmtime-cli.sha256` and run
-   `scripts/precompile-shims.sh`: it downloads the pinned Wasmtime CLI and
-   rewrites `priv/shims/*.cwasm`, the stdin stream forwarder runtime-only
-   builds load. The engine flags it passes must match `make_config()` in
-   `c_src/wasmtime_nif.c`; `shim_files_load` in the API suite fails when
-   they drift.
+See [RELEASING.md](../RELEASING.md): the pinned version ties together the
+upstream archives, this repo's runtime archives, the CLI that compiles the
+stdin shims and the precompiled fixtures.
 
 ## Sanitizers
 

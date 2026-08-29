@@ -26,7 +26,7 @@ jobs:
       - name: Install clang-format and shellcheck
         run: sudo apt-get update && sudo apt-get install -y clang-format shellcheck
       - run: rebar3 fmt --check
-      - run: clang-format --dry-run -Werror c_src/*.c
+      - run: clang-format --dry-run -Werror c_src/*.c c_src/*.h
       - run: shellcheck scripts/*.sh
       - name: fetch-wasmtime.sh, every branch, offline
         run: scripts/test-fetch.sh

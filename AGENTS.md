@@ -48,65 +48,22 @@ WASMTIME_NIF_SANITIZE=address rebar3 compile     # ASan build of the NIF
 
 ## Architecture
 
-- `c_src/wasmtime_nif.c`: one file, sections in order: atoms and errors,
-  values, instance state, host calls, streams, worker thread, resources, NIF
-  entry points, load/unload. One OS thread per instance owns the Wasmtime store.
-  Calls are queued and answered with `enif_send`
-  (`{wasmtime_result, Ref, Id, Result}`); host functions send
-  `{wasmtime_host_call, Ref, HostId, {Module, Name}, Args}` to the caller and
-  wait, bounded, for `host_reply/3`. Streams: `send/2` queues bytes in the
-  instance inbox, read by the guest through `stdin => stream` (an `fd_read`
-  in front of Wasmtime's, forwarding other fds through a shim compiled on
-  first use, or loaded from `priv/shims` on runtime-only builds: rerun
-  `scripts/precompile-shims.sh` on a Wasmtime bump) or
-  the `erlang.recv` import; guest writes to a `stream` stdio or
-  `erlang.send` arrive as `{wasmtime_stream, Ref, Kind, Bytes}`. `Ref` is an Erlang reference made at
-  instantiate time, never a resource term, so worker threads cannot resurrect
-  a resource. Three resource types: the handle Erlang holds (its destructor
-  only signals), the instance, owned by the handle and by its detached
-  worker thread, and `wasmtime_ref`, a reference the guest handed out (an
-  owned GC root or a funcref; its destructor unroots, which needs no store
-  and no thread, and releases the instance it keeps alive). Calls and host
-  functions with references use Wasmtime's typed API, everything else the
-  raw one (the typed one aborts on v128). Interruption is epoch based: a ticker thread bumps the
-  engine epoch every 10 ms; `cancel/2` ends one request by id and drops its
-  result.
-- `src/wasmtime.erl`: public API and the `receive` loop that serves host calls
-  while a call runs. Normalises options into the tuples the NIF expects.
-- `src/wasmtime_nif.erl`: NIF stubs and `on_load`.
-- `scripts/fetch-wasmtime.sh`: resolves the C API (`WASMTIME_C_API_DIR`, a
-  prebuilt archive from upstream or from this repository's releases, else a
-  source build through `scripts/build-wasmtime.sh`). `scripts/build-nif.sh`
-  probes the library for compiler/WAT/WASI, passes `NIF_HAVE_*` to the C,
-  links statically or copies a shared library into `priv/`, and keeps a
-  stamp so a variant switch relinks. `scripts/precompile-fixtures.escript`
-  makes the `.cwasm` fixtures for the runtime-only suite.
-  `.github/workflows/wasmtime-runtime.yml` publishes the runtime-only and
-  FreeBSD archives; their checksums are pasted into `scripts/*.sha256`.
-- `test/wasmtime_SUITE.erl`: behaviour of the binding (host calls, interrupts,
-  isolation, WASI, lifetime).
-- `test/wasmtime_api_SUITE.erl`: API coverage in the style of wasmtime-py's
-  tests (values, traps, memory, imports, WASI details, precompiled modules,
-  named memories, host process, async calls, stdio capture, fuel, traces,
-  globals, tables, compile options).
-- `test/wasmtime_runtime_only_SUITE.erl`: the binding on a build without a
-  compiler, from precompiled fixtures. The other two suites skip there.
+`docs/design.md` is the design note: ownership, the instance state machine,
+message contracts, the two value paths, precompiled compatibility, the
+build pipeline and the reasons behind every number. `CONTRIBUTING.md` says
+how to add a NIF function end to end and how to run the sanitizer and
+runtime-only checks. The C lives in `c_src/nif_*.c`, one file per
+mechanism, with `c_src/nif.h` for the shared types and prototypes; the
+design note's first table says which file to open for which task.
 
 ## Conventions
 
 - Guest failures never raise. Return `{error, #{class, kind, message}}`; add a
-  `kind` atom for every new failure and document it in `docs/features.md`.
-- Nothing is granted by default. A new capability is opt-in through
-  `instantiate/2` options and refused explicitly when absent.
-- A feature that is not implemented is refused with an error, not approximated,
-  and listed under "Deferred" in `docs/features.md` with the reason.
-- The C stays in one file with the section order above. Take the mutex for any
-  access to instance state from a scheduler thread; the worker thread releases
-  it while the guest runs.
-- Docs are task-oriented, second person, what/when/how/notes, no hype. No
-  "comprehensive", no em dashes.
-- Commits and pull requests: concise, no generated-by or co-authored-by lines,
-  no test plan section.
-- Bumping Wasmtime: edit `scripts/wasmtime.version`, replace every line in
-  `scripts/wasmtime.sha256`, run the full checks. The C ABI changes between
-  majors.
+  `trace` for traps. New `kind`s go into `docs/features.md`.
+- Anything not implemented is refused with an error and listed under
+  "Deferred" in `docs/features.md` with the reason.
+- Docs are task-oriented: what it is, when you need it, the code, short notes.
+  No hype, no "comprehensive", no em dashes.
+- Commits and pull requests are short and carry no generated-by lines.
+- A rule a later edit could break gets a comment where it is relied on and a
+  line in `docs/design.md`; change both in the same commit.

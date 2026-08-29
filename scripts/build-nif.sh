@@ -12,7 +12,7 @@
 # Set WASMTIME_NIF_SANITIZE=address (or thread) to build under a sanitizer.
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="$ROOT/c_src/wasmtime_nif.c"
+SRCDIR="$ROOT/c_src"
 OUT="$ROOT/priv/wasmtime_nif.so"
 STAMP="$ROOT/_build/wasmtime_nif.stamp"
 
@@ -85,7 +85,7 @@ HAVE_WAT="$(capability wat wasmtime_wat2wasm 'WASMTIME_FEATURE_WAT')"
 HAVE_WASI="$(capability wasi wasmtime_linker_define_wasi 'WASMTIME_FEATURE_WASI')"
 FEATURE_FLAGS="-DNIF_HAVE_COMPILER=$HAVE_COMPILER -DNIF_HAVE_WAT=$HAVE_WAT -DNIF_HAVE_WASI=$HAVE_WASI"
 
-CFLAGS="-O2 -g -fPIC -Wall -Wextra -Wno-unused-parameter -std=c11 -I$INC -I$API/include $FEATURE_FLAGS"
+CFLAGS="-O2 -g -fPIC -fvisibility=hidden -Wall -Wextra -Wno-unused-parameter -std=c11 -I$INC -I$API/include $FEATURE_FLAGS"
 if [ -n "${WASMTIME_NIF_SANITIZE:-}" ]; then
     CFLAGS="$CFLAGS -fsanitize=${WASMTIME_NIF_SANITIZE} -fno-omit-frame-pointer -O1"
 fi
@@ -94,7 +94,7 @@ fi
 # and flags were used last time (the stamp).
 WANT="$LIBFILE $CFLAGS"
 if [ -f "$OUT" ] && [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$WANT" ] &&
-   [ -z "$(find "$SRC" "$0" -newer "$OUT")" ]; then
+   [ -z "$(find "$SRCDIR" "$0" -newer "$OUT")" ]; then
     exit 0
 fi
 
@@ -107,5 +107,5 @@ rm -f "$ROOT/priv/libwasmtime.so" "$ROOT/priv/libwasmtime.dylib"
 echo "wasmtime: building $OUT (compiler=$HAVE_COMPILER wat=$HAVE_WAT wasi=$HAVE_WASI)" >&2
 [ -n "${WASMTIME_NIF_SANITIZE:-}" ] && echo "wasmtime: NIF instrumented with ${WASMTIME_NIF_SANITIZE}" >&2
 # shellcheck disable=SC2086 # CFLAGS, LIB and LDFLAGS are word lists on purpose
-"$CC" $CFLAGS -o "$OUT" "$SRC" $LIB $LDFLAGS
+"$CC" $CFLAGS -o "$OUT" "$SRCDIR"/nif_*.c $LIB $LDFLAGS
 echo "$WANT" > "$STAMP"

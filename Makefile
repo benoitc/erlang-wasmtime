@@ -12,11 +12,11 @@ test:
 
 fmt:
 	rebar3 fmt
-	clang-format -i c_src/*.c
+	clang-format -i c_src/*.c c_src/*.h
 
 fmt-check:
 	rebar3 fmt --check
-	clang-format --dry-run -Werror c_src/*.c
+	clang-format --dry-run -Werror c_src/*.c c_src/*.h
 	shellcheck scripts/*.sh
 	scripts/test-fetch.sh
 

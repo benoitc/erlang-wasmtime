@@ -67,6 +67,8 @@ Requires OTP 27 or later.
 - [References](docs/references.md): funcref, externref and GC values as terms
 - [Precompiled modules](docs/precompiled.md): compile once, load in milliseconds
 - [Building and shipping](docs/building.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Design](docs/design.md): how the NIF is put together, for contributors; see also [CONTRIBUTING.md](CONTRIBUTING.md)
 - [Features](docs/features.md): what is implemented, what is refused, what is deferred
 - [Examples](examples/README.md): a guest that reads ETS, logs and notifies processes
 

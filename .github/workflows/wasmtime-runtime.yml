@@ -78,8 +78,9 @@ jobs:
           {
             echo "WASMTIME_TARGET=${{ matrix.target }}"
             echo "WASMTIME_TARGET_LINKER=$PWD/zigw/cc"
-            echo "CC_${{ matrix.target }}=$PWD/zigw/cc"
-            echo "AR_${{ matrix.target }}=$PWD/zigw/ar"
+            U="$(echo '${{ matrix.target }}' | tr '-' '_')"
+            echo "CC_${U}=$PWD/zigw/cc"
+            echo "AR_${U}=$PWD/zigw/ar"
             echo "CARGO_TARGET_${T}_LINKER=$PWD/zigw/cc"
             # musl targets default to crt-static, which forbids a shared library
             echo "RUSTFLAGS=-C target-feature=-crt-static"

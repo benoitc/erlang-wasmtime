@@ -39,6 +39,21 @@ RELEASE_URL="${WASMTIME_RELEASE_URL:-https://github.com/benoitc/erlang-wasmtime/
 UPSTREAM_URL="${WASMTIME_UPSTREAM_URL:-https://github.com/bytecodealliance/wasmtime/releases/download/$VERSION}"
 BUILD_SCRIPT="${WASMTIME_BUILD_SCRIPT:-$ROOT/scripts/build-wasmtime.sh}"
 
+# Platform: ARCH-OS as the archive names spell it; empty when unknown.
+ARCH=""; OS=""
+case "$(uname -m)" in
+    arm64|aarch64) ARCH=aarch64 ;;
+    x86_64|amd64)  ARCH=x86_64 ;;
+esac
+case "$(uname -s)" in
+    Darwin)  OS=macos ;;
+    Linux)   if ldd --version 2>&1 | grep -qi musl; then OS=musl; else OS=linux; fi ;;
+    FreeBSD) OS=freebsd ;;
+esac
+
+# `fetch-wasmtime.sh --platform` only prints the name (build-nif.sh records it).
+if [ "${1:-}" = --platform ]; then echo "$ARCH-$OS"; exit 0; fi
+
 if [ -n "${WASMTIME_C_API_DIR:-}" ]; then
     [ -f "$WASMTIME_C_API_DIR/include/wasmtime.h" ] ||
         { echo "wasmtime: WASMTIME_C_API_DIR=$WASMTIME_C_API_DIR has no include/wasmtime.h" >&2; exit 1; }
@@ -54,18 +69,6 @@ esac
 source_build() {
     "$BUILD_SCRIPT" "$1" "$CACHE/source-$1"
 }
-
-# Platform: ARCH-OS as the archive names spell it; empty when unknown.
-ARCH=""; OS=""
-case "$(uname -m)" in
-    arm64|aarch64) ARCH=aarch64 ;;
-    x86_64|amd64)  ARCH=x86_64 ;;
-esac
-case "$(uname -s)" in
-    Darwin)  OS=macos ;;
-    Linux)   if ldd --version 2>&1 | grep -qi musl; then OS=musl; else OS=linux; fi ;;
-    FreeBSD) OS=freebsd ;;
-esac
 
 # Which archive, from where, checked against which list.
 if [ "$VARIANT" = runtime ]; then

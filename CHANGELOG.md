@@ -41,7 +41,8 @@ First release.
 - Streams: `send/2` and `close/1` feed a running guest; `stdin`, `stdout`,
   `stderr => stream` and the `erlang.send`/`erlang.recv` imports; output
   arrives as `{wasmtime_stream, Ref, Kind, Bytes}` in the `stream` process;
-  `inbox_limit`; `ref/1`.
+  `inbox_limit`; `ref/1`. Runtime-only builds load the stdin forwarding
+  shim precompiled per platform from `priv/shims`.
 - Runtime-only builds (`WASMTIME_RUNTIME_ONLY=1`): no compiler, a 4 MB shared
   library; `features/0` reports the linked library's capabilities and
   `compile/1`, `{wat, _}`, `serialize/1` and the `wasi` option answer

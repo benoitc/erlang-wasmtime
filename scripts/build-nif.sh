@@ -99,6 +99,9 @@ if [ -f "$OUT" ] && [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$WANT" ] &&
 fi
 
 mkdir -p "$ROOT/priv" "$ROOT/_build"
+# The platform name, so wasmtime.erl finds the precompiled stdin shim for
+# it in priv/shims on a runtime-only build.
+"$ROOT/scripts/fetch-wasmtime.sh" --platform > "$ROOT/priv/wasmtime_platform"
 rm -f "$ROOT/priv/libwasmtime.so" "$ROOT/priv/libwasmtime.dylib"
 [ -n "$SHARED" ] && cp "$SHARED" "$ROOT/priv/"
 echo "wasmtime: building $OUT (compiler=$HAVE_COMPILER wat=$HAVE_WAT wasi=$HAVE_WASI)" >&2

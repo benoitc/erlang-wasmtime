@@ -133,11 +133,22 @@ streams(Config) ->
         {wasmtime_stream, Ref, channel, ~"hi"} -> ok
     after 2000 -> error(no_message)
     end,
-    %% stdin => stream forwards through a module compiled on first use
+    %% stdin => stream forwards other fds through the shim precompiled in
+    %% priv/shims for this platform
     case wasmtime:features() of
         #{wasi := true} ->
-            {error, #{kind := unavailable}} =
-                wasmtime:instantiate(load(Config, "wasi"), #{wasi => #{stdin => stream}});
+            {ok, Cat} = wasmtime:instantiate(load(Config, "wasi"), #{
+                wasi => #{stdin => stream, stdout => stream}
+            }),
+            CatRef = wasmtime:ref(Cat),
+            ok = wasmtime:send(Cat, ~"abc"),
+            {ok, [3]} = wasmtime:call(Cat, ~"cat", []),
+            receive
+                {wasmtime_stream, CatRef, stdout, ~"abc"} -> ok
+            after 2000 -> error(no_stdout)
+            end,
+            ok = wasmtime:close(Cat),
+            {ok, [0]} = wasmtime:call(Cat, ~"cat", []);
         _ ->
             ok
     end.

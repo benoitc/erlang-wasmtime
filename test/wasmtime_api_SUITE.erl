@@ -103,7 +103,8 @@
     wasi_stdin_stream/1,
     wasi_stdin_stream_blocked/1,
     wasi_stdin_stream_other_fds/1,
-    wasi_stdout_stream/1
+    wasi_stdout_stream/1,
+    shim_files_load/1
 ]).
 
 all() ->
@@ -238,7 +239,8 @@ groups() ->
             stream_reserved_import,
             stream_bad_import_type,
             stream_other_process,
-            stream_dead_receiver
+            stream_dead_receiver,
+            shim_files_load
         ]}
     ].
 
@@ -1869,4 +1871,24 @@ wasi_stdout_stream(_) ->
     end,
     %% nothing was captured
     {ok, {<<>>, <<>>, {0, 0}}} = wasmtime:read_output(Inst),
+    ok.
+
+shim_files_load(_) ->
+    %% the committed shims for this platform (scripts/precompile-shims.sh)
+    %% match the engines a runtime-only build creates: exact tunables per
+    %% fuel variant, features a subset of any proposal set
+    Priv = code:priv_dir(erlang_wasmtime),
+    {ok, Platform} = file:read_file(filename:join(Priv, "wasmtime_platform")),
+    Path = fun(V) ->
+        filename:join([Priv, "shims", string:trim(binary_to_list(Platform)) ++ "-" ++ V ++ ".cwasm"])
+    end,
+    {ok, Plain} = file:read_file(Path("plain")),
+    {ok, Fuel} = file:read_file(Path("fuel")),
+    {ok, M1} = wasmtime:deserialize(Plain),
+    [{~"memory", memory}, {~"fd_read", func}] = wasmtime:exports(M1),
+    {ok, _} = wasmtime:deserialize(Plain, #{
+        proposals => #{simd => false, threads => false, gc => false}
+    }),
+    {ok, _} = wasmtime:deserialize(Fuel, #{fuel => true}),
+    {error, #{class := compile}} = wasmtime:deserialize(Plain, #{fuel => true}),
     ok.

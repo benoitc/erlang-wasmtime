@@ -68,7 +68,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | `send/2` past `inbox_limit`, or after `close/1` | `kind => inbox_full`, `kind => closed` |
 | An `imports` entry for `erlang.send` or `erlang.recv` | `kind => reserved_import` |
 | `erlang.send` or `erlang.recv` imported with another type | `kind => unsupported_type` |
-| `stdin => stream` on a runtime-only build | `kind => unavailable` (its forwarder is compiled on first use) |
+| `stdin => stream` on a runtime-only build of a platform without a shim in `priv/shims` | `kind => unavailable` |
 | Reading a reference-typed global | `kind => unsupported_type` |
 
 ## Deferred

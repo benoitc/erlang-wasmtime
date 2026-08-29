@@ -56,7 +56,9 @@ WASMTIME_NIF_SANITIZE=address rebar3 compile     # ASan build of the NIF
   `{wasmtime_host_call, Ref, HostId, {Module, Name}, Args}` to the caller and
   wait, bounded, for `host_reply/3`. Streams: `send/2` queues bytes in the
   instance inbox, read by the guest through `stdin => stream` (an `fd_read`
-  in front of Wasmtime's, forwarding other fds through a compiled shim) or
+  in front of Wasmtime's, forwarding other fds through a shim compiled on
+  first use, or loaded from `priv/shims` on runtime-only builds: rerun
+  `scripts/precompile-shims.sh` on a Wasmtime bump) or
   the `erlang.recv` import; guest writes to a `stream` stdio or
   `erlang.send` arrive as `{wasmtime_stream, Ref, Kind, Bytes}`. `Ref` is an Erlang reference made at
   instantiate time, never a resource term, so worker threads cannot resurrect

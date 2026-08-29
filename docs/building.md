@@ -159,6 +159,12 @@ x86_64) and FreeBSD (x86_64, in a VM), plus the full FreeBSD library, with
 5. Check the engine settings the NIF sets at load still make full and
    runtime builds accept the same precompiled modules: the runtime-only CI
    job proves it on the same runner.
+6. Pin the new CLI archives in `scripts/wasmtime-cli.sha256` and run
+   `scripts/precompile-shims.sh`: it downloads the pinned Wasmtime CLI and
+   rewrites `priv/shims/*.cwasm`, the stdin stream forwarder runtime-only
+   builds load. The engine flags it passes must match `make_config()` in
+   `c_src/wasmtime_nif.c`; `shim_files_load` in the API suite fails when
+   they drift.
 
 ## Sanitizers
 

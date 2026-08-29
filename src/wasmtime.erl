@@ -376,7 +376,7 @@ instantiate(Mod, Opts) when is_map(Opts) ->
     Imports = maps:get(imports, Opts, #{}),
     Ref = make_ref(),
     Id = erlang:unique_integer([positive, monotonic]),
-    case wasmtime_nif:instantiate(Mod, nif_options(Imports, Opts), Ref, Id) of
+    case wasmtime_nif:instantiate(Mod, nif_options(Mod, Imports, Opts), Ref, Id) of
         {ok, Handle} ->
             Inst = #instance{handle = Handle, ref = Ref, imports = Imports},
             case wait_result(Inst, Id, infinity) of
@@ -388,7 +388,7 @@ instantiate(Mod, Opts) when is_map(Opts) ->
     end.
 
 %% The tuple the NIF reads; see do_instantiate in wasmtime_nif.c.
-nif_options(Imports, Opts) ->
+nif_options(Mod, Imports, Opts) ->
     Limits = {
         limit(memory_limit, Opts, ?DEFAULT_MEMORY_LIMIT),
         limit(max_tables, Opts, 100),
@@ -406,15 +406,69 @@ nif_options(Imports, Opts) ->
     true = is_pid(StreamPid),
     InboxLimit = maps:get(inbox_limit, Opts, ?DEFAULT_INBOX_LIMIT),
     true = is_integer(InboxLimit) andalso InboxLimit > 0,
+    Wasi = wasi_options(maps:get(wasi, Opts, none)),
     {
         maps:keys(Imports),
-        wasi_options(maps:get(wasi, Opts, none)),
+        Wasi,
         Limits,
         HostTimeout,
         HostPid,
         StreamPid,
-        InboxLimit
+        InboxLimit,
+        stdin_shim(Mod, Wasi)
     }.
+
+%% `stdin => stream` forwards reads of other fds through a small module.
+%% A full build compiles it; a runtime-only build loads the precompiled
+%% copy for this platform and the module's fuel setting from priv/shims
+%% (scripts/precompile-shims.escript), or `undefined` when there is none.
+stdin_shim(Mod, {_, _, _, stream, _, _, _}) ->
+    case wasmtime:features() of
+        #{compiler := true} ->
+            undefined;
+        _ ->
+            Fuel =
+                case module_options(Mod) of
+                    #{fuel := true} -> "fuel";
+                    _ -> "plain"
+                end,
+            shim_file(Fuel)
+    end;
+stdin_shim(_, _) ->
+    undefined.
+
+shim_file(Fuel) ->
+    Key = {?MODULE, shim, Fuel},
+    try
+        persistent_term:get(Key)
+    catch
+        error:badarg ->
+            Shim = read_shim(Fuel),
+            persistent_term:put(Key, Shim),
+            Shim
+    end.
+
+read_shim(Fuel) ->
+    Priv = priv_dir(),
+    Dir = filename:join(Priv, "shims"),
+    case file:read_file(filename:join(Priv, "wasmtime_platform")) of
+        {ok, Platform} ->
+            Name = string:trim(binary_to_list(Platform)) ++ "-" ++ Fuel ++ ".cwasm",
+            case file:read_file(filename:join(Dir, Name)) of
+                {ok, Bin} -> Bin;
+                {error, _} -> undefined
+            end;
+        {error, _} ->
+            undefined
+    end.
+
+priv_dir() ->
+    case code:priv_dir(erlang_wasmtime) of
+        {error, bad_name} ->
+            filename:join(filename:dirname(filename:dirname(code:which(?MODULE))), "priv");
+        Dir ->
+            Dir
+    end.
 
 limit(Key, Opts, Default) ->
     case maps:get(Key, Opts, Default) of

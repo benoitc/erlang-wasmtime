@@ -537,6 +537,38 @@ static const char *apply_proposal(wasm_config_t *cfg, int i, int on) {
 
 /* Find or create the engine for a key. Returns the entry, or 0 with *err
  * set to an error term in `env`. */
+/* The engine config for a key. NULL with *missing set when a proposal in
+ * the key cannot be set on this build. scripts/precompile-shims.sh mirrors
+ * these settings; keep the two in step. */
+static wasm_config_t *make_config(const engine_t *want, const char **missing) {
+  wasm_config_t *cfg = wasm_config_new();
+  wasmtime_config_epoch_interruption_set(cfg, true);
+  wasmtime_config_consume_fuel_set(cfg, want->fuel);
+  /* Engine settings are part of a precompiled module's compatibility check.
+   * Runtime-only builds have no component model, so the full build must not
+   * compile modules with the concurrency support it would otherwise enable
+   * by default; nothing here uses components. */
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  wasmtime_config_concurrency_support_set(cfg, false);
+#endif
+#if NIF_HAVE_COMPILER
+  wasmtime_config_cranelift_opt_level_set(cfg, want->opt_level == 0 ? WASMTIME_OPT_LEVEL_NONE
+                                               : want->opt_level == 1
+                                                   ? WASMTIME_OPT_LEVEL_SPEED
+                                                   : WASMTIME_OPT_LEVEL_SPEED_AND_SIZE);
+#endif
+  for (int i = 0; i < NPROPOSALS; i++) {
+    if (!(want->set_mask & (1u << i))) continue;
+    const char *m = apply_proposal(cfg, i, (want->val_mask >> i) & 1);
+    if (m) {
+      wasm_config_delete(cfg);
+      *missing = m;
+      return NULL;
+    }
+  }
+  return cfg;
+}
+
 static engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err) {
   engine_t want;
   if (!parse_key(env, key, &want)) {
@@ -564,34 +596,14 @@ static engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err)
     return 0;
   }
 #endif
-  wasm_config_t *cfg = wasm_config_new();
-  wasmtime_config_epoch_interruption_set(cfg, true);
-  wasmtime_config_consume_fuel_set(cfg, want.fuel);
-  /* Engine settings are part of a precompiled module's compatibility check.
-   * Runtime-only builds have no component model, so the full build must not
-   * compile modules with the concurrency support it would otherwise enable
-   * by default; nothing here uses components. */
-#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
-  wasmtime_config_concurrency_support_set(cfg, false);
-#endif
-#if NIF_HAVE_COMPILER
-  wasmtime_config_cranelift_opt_level_set(cfg, want.opt_level == 0 ? WASMTIME_OPT_LEVEL_NONE
-                                               : want.opt_level == 1
-                                                   ? WASMTIME_OPT_LEVEL_SPEED
-                                                   : WASMTIME_OPT_LEVEL_SPEED_AND_SIZE);
-#endif
-  for (int i = 0; i < NPROPOSALS; i++) {
-    if (!(want.set_mask & (1u << i))) continue;
-    const char *missing = apply_proposal(cfg, i, (want.val_mask >> i) & 1);
-    if (missing) {
-      wasm_config_delete(cfg);
-      pthread_mutex_unlock(&engines_mu);
-      char msg[96];
-      snprintf(msg, sizeof msg, "this build of erlang_wasmtime cannot set the %s proposal",
-               missing);
-      *err = mk_error_s(env, "compile", "unavailable", msg);
-      return 0;
-    }
+  const char *missing = NULL;
+  wasm_config_t *cfg = make_config(&want, &missing);
+  if (!cfg) {
+    pthread_mutex_unlock(&engines_mu);
+    char msg[96];
+    snprintf(msg, sizeof msg, "this build of erlang_wasmtime cannot set the %s proposal", missing);
+    *err = mk_error_s(env, "compile", "unavailable", msg);
+    return 0;
   }
   engine_t *e = enif_alloc(sizeof *e);
   *e = want;
@@ -1004,29 +1016,42 @@ static const uint8_t SHIM_WASM[] = {
     0x0e, 0x01, 0x0c, 0x00, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x20, 0x03, 0x10, 0x00, 0x0b};
 #endif
 
-/* The shim compiled once per engine. NULL without a compiler. */
-static wasmtime_module_t *engine_shim(engine_t *e) {
-#if NIF_HAVE_COMPILER
+/* The shim, once per engine: compiled here when the build can, otherwise
+ * deserialized from the bytes Erlang read from priv/shims (produced by
+ * scripts/precompile-shims.sh). NULL with *why set on failure. */
+static wasmtime_module_t *engine_shim(engine_t *e, ErlNifEnv *env, ERL_NIF_TERM shim,
+                                      const char **why) {
   pthread_mutex_lock(&engines_mu);
   if (!e->shim) {
     wasmtime_module_t *m = NULL;
-    wasmtime_error_t *err = wasmtime_module_new(e->engine, SHIM_WASM, sizeof SHIM_WASM, &m);
+    wasmtime_error_t *err = NULL;
+#if NIF_HAVE_COMPILER
+    (void)env;
+    (void)shim;
+    err = wasmtime_module_new(e->engine, SHIM_WASM, sizeof SHIM_WASM, &m);
+    if (err) *why = "the stdin shim did not compile";
+#else
+    ErlNifBinary bin;
+    if (!enif_inspect_binary(env, shim, &bin)) {
+      *why = "no precompiled stdin shim for this platform: see docs/streams.md";
+    } else {
+      err = wasmtime_module_deserialize(e->engine, bin.data, bin.size, &m);
+      if (err) *why = "the precompiled stdin shim does not match this engine";
+    }
+#endif
     if (err) wasmtime_error_delete(err);
     e->shim = m;
   }
   pthread_mutex_unlock(&engines_mu);
   return e->shim;
-#else
-  (void)e;
-  return NULL;
-#endif
 }
 
 /* Called once the guest is instantiated and its memory is known. */
-static ERL_NIF_TERM link_stdin_shim(instance_t *inst, ErlNifEnv *out) {
-  wasmtime_module_t *shim = engine_shim(inst->mod->engine);
-  if (!shim)
-    return mk_error_s(out, "wasi", "unavailable", "stdin => stream needs a build with a compiler");
+static ERL_NIF_TERM link_stdin_shim(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM shim_bytes,
+                                    ErlNifEnv *out) {
+  const char *why = "stdin shim";
+  wasmtime_module_t *shim = engine_shim(inst->mod->engine, env, shim_bytes, &why);
+  if (!shim) return mk_error_s(out, "wasi", "unavailable", why);
   if (!inst->has_memory)
     return mk_error_s(out, "wasi", "config", "stdin => stream needs an exported memory");
   wasmtime_extern_t real = {.kind = WASMTIME_EXTERN_FUNC, .of.func = inst->real_fd_read};
@@ -1325,14 +1350,14 @@ done:
 }
 
 /* Opts :: {Imports :: [{Module, Name}], Wasi, Limits, HostTimeoutMs, HostPid,
- *          StreamPid, InboxLimit}
+ *          StreamPid, InboxLimit, Shim :: binary() | undefined}
  * Limits :: {MemoryBytes, Tables, TableElements, Instances}, -1 = unlimited
  * HostPid :: pid() | undefined */
 static ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
   ErlNifEnv *env = req->env;
   const ERL_NIF_TERM *o, *lim;
   int arity;
-  if (!enif_get_tuple(env, req->opts, &arity, &o) || arity != 7 ||
+  if (!enif_get_tuple(env, req->opts, &arity, &o) || arity != 8 ||
       !enif_get_tuple(env, o[2], &arity, &lim) || arity != 4)
     return mk_error_s(out, "link", "badarg", "malformed options");
   inst->has_host_pid = enif_get_local_pid(env, o[4], &inst->host_pid);
@@ -1480,7 +1505,7 @@ static ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out)
     }
   }
   if (inst->stdin_stream) {
-    ERL_NIF_TERM r = link_stdin_shim(inst, out);
+    ERL_NIF_TERM r = link_stdin_shim(inst, env, o[7], out);
     if (r) return r;
   }
   inst->instantiated = 1;

@@ -117,10 +117,11 @@ dropped and the guest does not notice, the same as `none`.
 - The inbox is per instance and shared by stdin and `erlang.recv`; a module
   using both would compete with itself, so use one.
 - `stdin => stream` puts an `fd_read` in front of Wasmtime's own for fd 0
-  and forwards every other fd through a small module compiled on first use,
-  so it needs a build with a compiler: a runtime-only build answers
-  `kind => unavailable`. The `erlang` imports and `stdout`/`stderr =>
-  stream` work on every build.
+  and forwards every other fd through a small module (`scripts/stdin-shim.wat`).
+  A build with a compiler compiles it on first use; a runtime-only build
+  loads the precompiled copy for its platform from `priv/shims`, produced
+  by `scripts/precompile-shims.sh` for every platform with a runtime
+  archive. A platform without one answers `kind => unavailable`.
 - Reads by the guest with nothing queued and no `close/1` wait for as long
   as the caller lets them: bound them with `timeout` on `call/4` or
   `await/3`.

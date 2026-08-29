@@ -11,3 +11,4 @@ rebar3.crashdump
 c_src/*.o
 priv/*.dSYM/
 priv/*.wasm
+priv/wasmtime_platform

@@ -22,6 +22,7 @@ rebar3 dialyzer
 rebar3 ct                   # Both suites
 clang-format --dry-run -Werror c_src/*.c
 shellcheck scripts/*.sh
+scripts/test-fetch.sh       # fetch-wasmtime.sh branches, offline
 ```
 
 `rebar3 check` runs the Erlang ones in sequence. `make check` runs everything.

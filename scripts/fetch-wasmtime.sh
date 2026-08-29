@@ -27,12 +27,17 @@
 # Other overrides:
 #   WASMTIME_CACHE_DIR          where to store downloads and builds
 #                               (default: _build/wasmtime)
+#   WASMTIME_RELEASE_URL, WASMTIME_UPSTREAM_URL, WASMTIME_BUILD_SCRIPT
+#                               where archives come from and what builds from
+#                               source; scripts/test-fetch.sh uses them to
+#                               drive every branch offline
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(tr -d '[:space:]' < "$ROOT/scripts/wasmtime.version")"
 CACHE="${WASMTIME_CACHE_DIR:-$ROOT/_build/wasmtime}/$VERSION"
-RELEASE_URL="https://github.com/benoitc/erlang-wasmtime/releases/download/wasmtime-runtime-$VERSION"
-UPSTREAM_URL="https://github.com/bytecodealliance/wasmtime/releases/download/$VERSION"
+RELEASE_URL="${WASMTIME_RELEASE_URL:-https://github.com/benoitc/erlang-wasmtime/releases/download/wasmtime-runtime-$VERSION}"
+UPSTREAM_URL="${WASMTIME_UPSTREAM_URL:-https://github.com/bytecodealliance/wasmtime/releases/download/$VERSION}"
+BUILD_SCRIPT="${WASMTIME_BUILD_SCRIPT:-$ROOT/scripts/build-wasmtime.sh}"
 
 if [ -n "${WASMTIME_C_API_DIR:-}" ]; then
     [ -f "$WASMTIME_C_API_DIR/include/wasmtime.h" ] ||
@@ -47,7 +52,7 @@ case "${WASMTIME_RUNTIME_ONLY:-}" in
 esac
 
 source_build() {
-    "$ROOT/scripts/build-wasmtime.sh" "$1" "$CACHE/source-$1"
+    "$BUILD_SCRIPT" "$1" "$CACHE/source-$1"
 }
 
 # Platform: ARCH-OS as the archive names spell it; empty when unknown.

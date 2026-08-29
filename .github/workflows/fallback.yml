@@ -1,0 +1,53 @@
+name: fallback
+
+# The source-build fallback is what a platform without a prebuilt archive
+# gets. Once archives exist nobody in CI takes that path, so this runs it on
+# a schedule: full and runtime-only C API from source, then the suites.
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  source-build:
+    name: Source build on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Erlang (Linux)
+        if: runner.os == 'Linux'
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          rebar3-version: "3.24.0"
+      - name: Install Erlang (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install erlang@28 rebar3
+          echo "$(brew --prefix erlang@28)/bin" >> "$GITHUB_PATH"
+      - name: Install Rust and cmake
+        run: |
+          rustup toolchain install stable --profile minimal && rustup default stable
+          which cmake >/dev/null || (sudo apt-get update && sudo apt-get install -y cmake)
+      - name: Full library from source, all suites
+        run: |
+          WASMTIME_SOURCE_BUILD=1 rebar3 compile
+          WASMTIME_SOURCE_BUILD=1 rebar3 ct
+          escript scripts/precompile-fixtures.escript test/wasmtime_runtime_only_SUITE_data _build/cwasm
+      - name: Runtime-only library from source, runtime suite
+        run: |
+          WASMTIME_SOURCE_BUILD=1 WASMTIME_RUNTIME_ONLY=1 rebar3 compile
+          ls -la priv
+          WASMTIME_SOURCE_BUILD=1 WASMTIME_RUNTIME_ONLY=1 WASMTIME_CWASM_DIR="$PWD/_build/cwasm" rebar3 ct
+      - name: Upload CT logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ct-logs-fallback-${{ matrix.os }}
+          path: _build/test/logs

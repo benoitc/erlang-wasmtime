@@ -18,6 +18,7 @@ fmt-check:
 	rebar3 fmt --check
 	clang-format --dry-run -Werror c_src/*.c
 	shellcheck scripts/*.sh
+	scripts/test-fetch.sh
 
 lint:
 	rebar3 lint

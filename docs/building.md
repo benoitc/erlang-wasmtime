@@ -149,8 +149,16 @@ x86_64) and FreeBSD (x86_64, in a VM), plus the full FreeBSD library, with
 ## Upgrade Wasmtime
 
 1. Edit `scripts/wasmtime.version`.
-2. Download the six archives and replace `scripts/wasmtime.sha256`.
-3. `rebar3 compile && rebar3 ct`.
+2. Download the six upstream archives and replace their lines in
+   `scripts/wasmtime.sha256`.
+3. Run the `wasmtime-runtime` workflow (`gh workflow run wasmtime-runtime.yml`);
+   paste its `SHA256SUMS` into `scripts/wasmtime-runtime.sha256` and the
+   FreeBSD line into `scripts/wasmtime.sha256`.
+4. `rebar3 compile && rebar3 ct`, then the same with `WASMTIME_RUNTIME_ONLY=1`
+   and the fixtures from `scripts/precompile-fixtures.escript`.
+5. Check the engine settings the NIF sets at load still make full and
+   runtime builds accept the same precompiled modules: the runtime-only CI
+   job proves it on the same runner.
 
 ## Sanitizers
 

@@ -28,7 +28,25 @@ jobs:
       - run: rebar3 fmt --check
       - run: clang-format --dry-run -Werror c_src/*.c
       - run: shellcheck scripts/*.sh
+      - name: fetch-wasmtime.sh, every branch, offline
+        run: scripts/test-fetch.sh
       - run: rebar3 compile
+      - name: build-nif.sh refuses headers and library from different builds
+        run: |
+          API="$(scripts/fetch-wasmtime.sh)"
+          mkdir -p mixed && ln -s "$API/include" mixed/include && ln -s "$API/min/lib" mixed/lib
+          if WASMTIME_C_API_DIR="$PWD/mixed" scripts/build-nif.sh 2>err; then
+            echo "expected a failure"; exit 1
+          fi
+          grep -q "disagree about compiler" err
+      - name: build-nif.sh probes the library without nm
+        run: |
+          mkdir -p nonm
+          for t in cc erl find grep head cat mkdir printf tr rm cp uname ls sh env dirname basename awk sed xz tar curl mv sha256sum test; do
+            p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "nonm/$t" || true
+          done
+          touch c_src/wasmtime_nif.c
+          PATH="$PWD/nonm" scripts/build-nif.sh 2>&1 | grep "compiler=1 wat=1 wasi=1"
       - run: rebar3 lint
       - run: rebar3 xref
       - run: rebar3 dialyzer

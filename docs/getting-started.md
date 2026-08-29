@@ -77,6 +77,20 @@ Or from another process while it runs:
 ok = wasmtime:interrupt(Inst).
 ```
 
+## Run a call without blocking
+
+```erlang
+{ok, Ref} = wasmtime:call_async(Inst, ~"work", [Arg]),
+... do something else ...
+{ok, [Result]} = wasmtime:await(Inst, Ref, 5000).
+```
+
+The call runs on the instance thread while this process continues. `await`
+must run in the process that started the call, because host functions are
+served there, while it waits; a guest that calls the host earlier waits for
+`await` (within `host_timeout`), or use a `host` process. Two async calls on
+one instance run one after the other.
+
 ## Read and write memory
 
 ```erlang

@@ -66,7 +66,16 @@
     memory_by_name/1,
     host_process_serves_calls/1,
     host_process_reentrancy_refused/1,
-    host_process_gone/1
+    host_process_gone/1,
+    async_call_and_await/1,
+    async_two_instances/1,
+    async_await_timeout/1,
+    async_host_served_in_await/1,
+    wasi_stdin_binary/1,
+    wasi_capture_output/1,
+    wasi_capture_limit/1,
+    wasi_inherit_args_env/1,
+    wasi_read_output_while_running/1
 ]).
 
 all() ->
@@ -155,6 +164,19 @@ groups() ->
             host_process_serves_calls,
             host_process_reentrancy_refused,
             host_process_gone
+        ]},
+        {async, [parallel], [
+            async_call_and_await,
+            async_two_instances,
+            async_await_timeout,
+            async_host_served_in_await
+        ]},
+        {wasi_stdio, [], [
+            wasi_stdin_binary,
+            wasi_capture_output,
+            wasi_capture_limit,
+            wasi_inherit_args_env,
+            wasi_read_output_while_running
         ]}
     ].
 
@@ -166,7 +188,7 @@ init_per_suite(Config) ->
 
 end_per_suite(_) -> ok.
 
-init_per_group(wasi, Config) ->
+init_per_group(G, Config) when G =:= wasi; G =:= wasi_stdio ->
     case wasmtime:features() of
         #{wasi := true} -> Config;
         _ -> {skip, "needs a build with WASI"}
@@ -1092,4 +1114,177 @@ host_process_gone(_) ->
     T0 = erlang:monotonic_time(millisecond),
     {error, #{class := host, message := ~"host process is gone"}} = wasmtime:call(Inst, ~"run", [1]),
     ?assert(erlang:monotonic_time(millisecond) - T0 < 1000),
+    ok.
+
+%% ----------------------------------------------------------------- async
+
+async_wat() ->
+    ~"""
+    (module
+      (import "env" "twice" (func $twice (param i32) (result i32)))
+      (func (export "add") (param i32 i32) (result i32) local.get 0 local.get 1 i32.add)
+      (func (export "loop") (loop br 0))
+      (func (export "run") (param i32) (result i32) local.get 0 call $twice))
+    """.
+
+async_inst() ->
+    instance(async_wat(), #{imports => #{{~"env", ~"twice"} => fun(_, [X]) -> {ok, [X * 2]} end}}).
+
+async_call_and_await(_) ->
+    Inst = async_inst(),
+    {ok, R1} = wasmtime:call_async(Inst, ~"add", [1, 2]),
+    {ok, R2} = wasmtime:call_async(Inst, ~"add", [10, 20]),
+    %% queued in order, awaited in any order
+    {ok, [30]} = wasmtime:await(Inst, R2),
+    {ok, [3]} = wasmtime:await(Inst, R1),
+    %% the reference is single-use: nothing is left for it
+    {error, #{kind := timeout}} = wasmtime:await(Inst, R1, 50),
+    ok.
+
+async_two_instances(_) ->
+    A = async_inst(),
+    B = async_inst(),
+    {ok, RA} = wasmtime:call_async(A, ~"add", [1, 1]),
+    {ok, RB} = wasmtime:call_async(B, ~"add", [2, 2]),
+    {ok, [4]} = wasmtime:await(B, RB),
+    {ok, [2]} = wasmtime:await(A, RA),
+    ok.
+
+async_await_timeout(_) ->
+    Inst = async_inst(),
+    {ok, R} = wasmtime:call_async(Inst, ~"loop", []),
+    {error, #{kind := timeout}} = wasmtime:await(Inst, R, 100),
+    timer:sleep(50),
+    {ok, [3]} = wasmtime:call(Inst, ~"add", [1, 2]),
+    ok.
+
+async_host_served_in_await(_) ->
+    %% the host call waits for this process to reach await
+    Inst = async_inst(),
+    {ok, R} = wasmtime:call_async(Inst, ~"run", [21]),
+    timer:sleep(50),
+    receive
+        {wasmtime_host_call, _, _, _, _} = M ->
+            %% still in the mailbox: served below
+            self() ! M
+    after 0 -> ok
+    end,
+    {ok, [42]} = wasmtime:await(Inst, R),
+    ok.
+
+%% ------------------------------------------------------------ wasi stdio
+
+stdio_wat() ->
+    ~"""
+    (module
+      (import "wasi_snapshot_preview1" "fd_read" (func $fd_read (param i32 i32 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (param i32 i32 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "args_sizes_get" (func $args_sizes (param i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "environ_sizes_get" (func $env_sizes (param i32 i32) (result i32)))
+      (memory (export "memory") 1)
+      ;; copy stdin to stdout (up to 1000 bytes), write "err" to stderr,
+      ;; return the byte count
+      (func (export "cat") (result i32)
+        (i32.store (i32.const 0) (i32.const 3000))
+        (i32.store (i32.const 4) (i32.const 1000))
+        (drop (call $fd_read (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 8)))
+        (i32.store (i32.const 4) (i32.load (i32.const 8)))
+        (drop (call $fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 12)))
+        (i32.store (i32.const 16) (i32.const 40))
+        (i32.store (i32.const 20) (i32.const 3))
+        (drop (call $fd_write (i32.const 2) (i32.const 16) (i32.const 1) (i32.const 12)))
+        (i32.load (i32.const 8)))
+      (data (i32.const 40) "err")
+      ;; write N times "0123456789" to stdout
+      (func (export "spam") (param $n i32)
+        (i32.store (i32.const 0) (i32.const 60))
+        (i32.store (i32.const 4) (i32.const 10))
+        (block (loop
+          (br_if 1 (i32.eqz (local.get $n)))
+          (drop (call $fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 12)))
+          (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+          (br 0))))
+      (data (i32.const 60) "0123456789")
+      (func (export "argc") (result i32)
+        (drop (call $args_sizes (i32.const 100) (i32.const 104))) (i32.load (i32.const 100)))
+      (func (export "envc") (result i32)
+        (drop (call $env_sizes (i32.const 100) (i32.const 104))) (i32.load (i32.const 100))))
+    """.
+
+wasi_stdin_binary(_) ->
+    Inst = instance(stdio_wat(), #{
+        wasi => #{stdin => {binary, ~"from a binary"}, stdout => capture, stderr => capture}
+    }),
+    {ok, [13]} = wasmtime:call(Inst, ~"cat", []),
+    {ok, {~"from a binary", ~"err", {0, 0}}} = wasmtime:read_output(Inst),
+    %% read_output empties the buffers
+    {ok, {<<>>, <<>>, {0, 0}}} = wasmtime:read_output(Inst),
+    %% stdin was consumed
+    {ok, [0]} = wasmtime:call(Inst, ~"cat", []),
+    ok.
+
+wasi_capture_output(_) ->
+    Inst = instance(stdio_wat(), #{wasi => #{stdout => capture}}),
+    {ok, []} = wasmtime:call(Inst, ~"spam", [3]),
+    {ok, {~"012345678901234567890123456789", <<>>, {0, 0}}} = wasmtime:read_output(Inst),
+    %% output accumulates across calls until read
+    {ok, []} = wasmtime:call(Inst, ~"spam", [1]),
+    {ok, []} = wasmtime:call(Inst, ~"spam", [1]),
+    {ok, {~"01234567890123456789", <<>>, _}} = wasmtime:read_output(Inst),
+    %% nothing captured without the option
+    Quiet = instance(stdio_wat(), #{wasi => #{}}),
+    {ok, []} = wasmtime:call(Quiet, ~"spam", [3]),
+    {ok, {<<>>, <<>>, {0, 0}}} = wasmtime:read_output(Quiet),
+    ok.
+
+wasi_capture_limit(_) ->
+    Inst = instance(stdio_wat(), #{wasi => #{stdout => capture, output_limit => 25}}),
+    {ok, []} = wasmtime:call(Inst, ~"spam", [10]),
+    {ok, {Kept, <<>>, {75, 0}}} = wasmtime:read_output(Inst),
+    25 = byte_size(Kept),
+    ok.
+
+wasi_inherit_args_env(_) ->
+    Own = instance(stdio_wat(), #{wasi => #{args => [~"a", ~"b"], env => [{~"K", ~"V"}]}}),
+    {ok, [2]} = wasmtime:call(Own, ~"argc", []),
+    {ok, [1]} = wasmtime:call(Own, ~"envc", []),
+    None = instance(stdio_wat(), #{wasi => #{}}),
+    {ok, [0]} = wasmtime:call(None, ~"argc", []),
+    {ok, [0]} = wasmtime:call(None, ~"envc", []),
+    Inherited = instance(stdio_wat(), #{wasi => #{args => inherit, env => inherit}}),
+    {ok, [Argc]} = wasmtime:call(Inherited, ~"argc", []),
+    {ok, [Envc]} = wasmtime:call(Inherited, ~"envc", []),
+    ?assert(Argc >= 1),
+    ?assert(Envc >= 1),
+    ok.
+
+wasi_read_output_while_running(_) ->
+    %% a slow guest's output can be drained while it runs
+    Slow =
+        ~"""
+        (module
+          (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (param i32 i32 i32 i32) (result i32)))
+          (import "env" "pause" (func $pause))
+          (memory (export "memory") 1)
+          (data (i32.const 60) "tick")
+          (func (export "run")
+            (i32.store (i32.const 0) (i32.const 60))
+            (i32.store (i32.const 4) (i32.const 4))
+            (drop (call $fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 12)))
+            (call $pause)
+            (drop (call $fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 12)))))
+        """,
+    Self = self(),
+    Pause = fun(Ctx, []) ->
+        %% inside the host call the guest is parked: read what it wrote so far
+        Self ! {mid, wasmtime:read_output(Ctx)},
+        {ok, []}
+    end,
+    Inst = instance(Slow, #{wasi => #{stdout => capture}, imports => #{{~"env", ~"pause"} => Pause}}),
+    {ok, []} = wasmtime:call(Inst, ~"run", []),
+    receive
+        {mid, {ok, {~"tick", <<>>, _}}} -> ok
+    after 1000 -> ct:fail(no_mid)
+    end,
+    {ok, {~"tick", <<>>, _}} = wasmtime:read_output(Inst),
     ok.

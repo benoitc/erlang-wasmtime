@@ -34,14 +34,13 @@ fresh (1 ms) and mounts the unpacked directory read-only at `/` so the
 interpreter finds `lib/`:
 
 ```erlang
-Out = "/tmp/py-out",
 {ok, Inst} = wasmtime:instantiate(Python, #{
     wasi => #{args => [~"python", ~"-c", ~"import json; print(json.dumps({'a': [1, 2, 3]}))"],
               dirs => [{~"/", "/opt/python-wasi", read}],
-              stdout => {file, Out}},
+              stdout => capture, stderr => capture},
     memory_limit => 512 * 1024 * 1024}),
 {ok, []} = wasmtime:call(Inst, ~"_start", [], #{timeout => 30000}),
-{ok, ~"{\"a\": [1, 2, 3]}\n"} = file:read_file(Out).
+{ok, {~"{\"a\": [1, 2, 3]}\n", <<>>, _}} = wasmtime:read_output(Inst).
 ```
 
 Interpreter start-up dominates a small script: about 100 ms for the run
@@ -58,9 +57,9 @@ Grant a second directory for the script and give it arguments:
                        {~"/app", "/srv/scripts", read},
                        {~"/out", "/srv/output", write}],
               env => [{~"GREETING", ~"hi"}],
-              stdout => {file, Out},
-              stderr => {file, Err}}}),
-{ok, []} = wasmtime:call(Inst, ~"_start", [], #{timeout => 30000}).
+              stdout => capture, stderr => capture}}),
+{ok, []} = wasmtime:call(Inst, ~"_start", [], #{timeout => 30000}),
+{ok, {Out, Err, _}} = wasmtime:read_output(Inst).
 ```
 
 ```python
@@ -82,7 +81,7 @@ An uncaught exception exits with status 1 and its traceback on stderr;
 
 ```erlang
 {error, #{class := exit, status := 1}} = wasmtime:call(Inst, ~"_start", []),
-{ok, Traceback} = file:read_file(Err).
+{ok, {_, Traceback, _}} = wasmtime:read_output(Inst).
 ```
 
 An endless loop is stopped by the `timeout`:
@@ -112,10 +111,11 @@ An endless loop is stopped by the `timeout`:
 
 ## Notes
 
-- Input goes in through `args`, `env`, `stdin => {file, Path}` or a granted
-  directory; output comes back through `stdout`/`stderr` files or a
-  directory granted with `write`. CPython has no imports of its own beyond
-  WASI, so `imports` host functions do not apply.
+- Input goes in through `args`, `env`, `stdin => {binary, Bytes}` or a
+  granted directory; output comes back with `stdout`/`stderr => capture` and
+  `read_output/1`, through files, or a directory granted with `write`.
+  CPython has no imports of its own beyond WASI, so `imports` host
+  functions do not apply.
 - No sockets, no subprocesses, no threads: `socket`, `subprocess` and
   `threading` import but fail at use. `time.sleep` works (WASI
   `poll_oneoff`).

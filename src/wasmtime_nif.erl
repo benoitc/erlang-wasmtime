@@ -15,6 +15,7 @@
     read_memory/4,
     write_memory/4,
     memory_size/2,
+    read_output/1,
     features/0,
     version/0
 ]).
@@ -32,6 +33,7 @@
     read_memory/4,
     write_memory/4,
     memory_size/2,
+    read_output/1,
     features/0,
     version/0
 ]).
@@ -60,5 +62,6 @@ cancel(_Handle, _Id) -> erlang:nif_error(not_loaded).
 read_memory(_Handle, _Name, _Ptr, _Len) -> erlang:nif_error(not_loaded).
 write_memory(_Handle, _Name, _Ptr, _Bin) -> erlang:nif_error(not_loaded).
 memory_size(_Handle, _Name) -> erlang:nif_error(not_loaded).
+read_output(_Handle) -> erlang:nif_error(not_loaded).
 features() -> erlang:nif_error(not_loaded).
 version() -> erlang:nif_error(not_loaded).

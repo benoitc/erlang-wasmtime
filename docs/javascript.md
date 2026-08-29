@@ -29,13 +29,12 @@ Compiling takes about 80 ms and happens once. Each run instantiates the engine
 fresh (2 ms) so nothing survives from one script to the next:
 
 ```erlang
-Out = "/tmp/js-out",
 {ok, Inst} = wasmtime:instantiate(Engine, #{
     wasi => #{args => [~"qjs", ~"-e", ~"console.log(1 + 2, JSON.stringify({a: [1, 2, 3]}))"],
-              stdout => {file, Out}},
+              stdout => capture, stderr => capture},
     memory_limit => 64 * 1024 * 1024}),
 {ok, []} = wasmtime:call(Inst, ~"_start", [], #{timeout => 5000}),
-{ok, ~"3 {\"a\":[1,2,3]}\n"} = file:read_file(Out).
+{ok, {~"3 {\"a\":[1,2,3]}\n", <<>>, _}} = wasmtime:read_output(Inst).
 ```
 
 `args` is the engine's command line. `-e` evaluates a string; a path runs a
@@ -50,9 +49,9 @@ Grant the directory holding the script, read only:
     wasi => #{args => [~"qjs", ~"/app/main.js"],
               dirs => [{~"/app", "/srv/scripts", read}],
               env => [{~"GREETING", ~"hi"}],
-              stdout => {file, Out},
-              stderr => {file, Err}}}),
-{ok, []} = wasmtime:call(Inst, ~"_start", [], #{timeout => 5000}).
+              stdout => capture, stderr => capture}}),
+{ok, []} = wasmtime:call(Inst, ~"_start", [], #{timeout => 5000}),
+{ok, {Out, Err, _}} = wasmtime:read_output(Inst).
 ```
 
 ```js
@@ -71,7 +70,7 @@ A thrown exception exits with status 1 and its message on stderr:
 
 ```erlang
 {error, #{class := exit, status := 1}} = wasmtime:call(Inst, ~"_start", []),
-{ok, ~"Error: boom\n    at <anonymous> (<cmdline>:1:11)\n\n"} = file:read_file(Err).
+{ok, {<<>>, ~"Error: boom\n    at <anonymous> (<cmdline>:1:11)\n\n", _}} = wasmtime:read_output(Inst).
 ```
 
 An endless loop is stopped by the `timeout`:
@@ -103,9 +102,10 @@ clean.
 
 ## Notes
 
-- Input goes in through `args`, `env`, `stdin => {file, Path}` or a granted
-  directory; output comes back through `stdout`/`stderr` files. QuickJS has no
-  imports of its own, so `imports` host functions do not apply to it. For
+- Input goes in through `args`, `env`, `stdin => {binary, Bytes}` or a
+  granted directory; output comes back with `stdout`/`stderr => capture` and
+  `read_output/1`, or through files. QuickJS has no imports of its own, so
+  `imports` host functions do not apply to it. For
   guest code that should call Erlang directly, see
   [host functions](host-functions.md) with a module you build.
 - Use the `qjs-wasi.wasm` build. `qjs-wasi-reactor.wasm` has no `_start`.

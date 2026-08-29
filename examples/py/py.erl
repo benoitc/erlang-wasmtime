@@ -21,8 +21,8 @@ load(Dir) ->
 
 eval(Py, Code) -> eval(Py, Code, #{}).
 
-%% Opts: timeout (ms), env ([{Name, Value}]), memory_limit (bytes),
-%% dirs (extra [{Guest, Host, read | write}] the script may reach).
+%% Opts: timeout (ms), env ([{Name, Value}]), memory_limit (bytes), stdin
+%% (bytes the script reads), dirs (extra [{Guest, Host, read | write}]).
 eval(Py, Code, Opts) ->
     run(Py, [~"python", ~"-c", Code], Opts).
 
@@ -31,50 +31,29 @@ run_file(Py, Dir, File) ->
     run(Py, [~"python", filename:join(~"/app", File)], #{dirs => [{~"/app", Dir, read}]}).
 
 run(#{mod := Mod, dir := Dir}, Args, Opts) ->
-    Out = temp_file("out"),
-    Err = temp_file("err"),
-    Result =
-        case
-            wasmtime:instantiate(Mod, #{
-                wasi => #{
-                    args => Args,
-                    env => maps:get(env, Opts, []),
-                    dirs => [{~"/", Dir, read} | maps:get(dirs, Opts, [])],
-                    stdout => {file, Out},
-                    stderr => {file, Err}
-                },
-                memory_limit => maps:get(memory_limit, Opts, 512 * 1024 * 1024)
-            })
-        of
-            {ok, Inst} ->
-                case
-                    wasmtime:call(Inst, ~"_start", [], #{
-                        timeout => maps:get(timeout, Opts, ?DEFAULT_TIMEOUT)
-                    })
-                of
-                    {ok, []} ->
-                        {ok, read(Out)};
-                    {error, #{class := exit, status := Status}} ->
-                        {error, {exit, Status, read(Err)}};
-                    {error, #{kind := timeout}} ->
-                        {error, timeout};
-                    {error, Reason} ->
-                        {error, Reason}
-                end;
-            {error, Reason} ->
-                {error, Reason}
-        end,
-    file:delete(Out),
-    file:delete(Err),
-    Result.
-
-read(Path) ->
-    case file:read_file(Path) of
-        {ok, Bin} -> Bin;
-        _ -> <<>>
+    case
+        wasmtime:instantiate(Mod, #{
+            wasi => #{
+                args => Args,
+                env => maps:get(env, Opts, []),
+                dirs => [{~"/", Dir, read} | maps:get(dirs, Opts, [])],
+                stdin => {binary, maps:get(stdin, Opts, <<>>)},
+                stdout => capture,
+                stderr => capture
+            },
+            memory_limit => maps:get(memory_limit, Opts, 512 * 1024 * 1024)
+        })
+    of
+        {ok, Inst} ->
+            Timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
+            Result = wasmtime:call(Inst, ~"_start", [], #{timeout => Timeout}),
+            {ok, {Out, Err, _Dropped}} = wasmtime:read_output(Inst),
+            case Result of
+                {ok, []} -> {ok, Out};
+                {error, #{class := exit, status := Status}} -> {error, {exit, Status, Err}};
+                {error, #{kind := timeout}} -> {error, timeout};
+                {error, Reason} -> {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
     end.
-
-temp_file(Tag) ->
-    Dir = filename:basedir(user_cache, "erlang_wasmtime"),
-    ok = filelib:ensure_path(Dir),
-    filename:join(Dir, io_lib:format("py-~s-~p", [Tag, erlang:unique_integer([positive])])).

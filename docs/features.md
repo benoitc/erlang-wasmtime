@@ -18,6 +18,8 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Memory access from Erlang | `read_memory/3,4`, `write_memory/3,4`, `memory_size/1,2`: the export named `memory` (or the first exported memory) by default, any exported memory by name |
 | Precompiled modules | `serialize/1` and `deserialize/1`, Wasmtime's `.cwasm` form; see [precompiled](precompiled.md) |
 | Host functions in a dedicated process | `host => Pid` at instantiate, `handle_host_call/2` in that process |
+| Non-blocking calls | `call_async/3` and `await/2,3` |
+| WASI stdio in memory | `stdin => {binary, _}`, `stdout`/`stderr => capture` with `read_output/1` and `output_limit`; `args`/`env => inherit` |
 | Runtime-only builds | `WASMTIME_RUNTIME_ONLY=1`: no compiler, 4 MB; `features/0` reports the linked library's capabilities; see [building](building.md) |
 | Source build fallback | a platform without a prebuilt archive compiles the C API itself |
 | WASI preview 1 | args, env, preopened dirs with read or write, stdio to file or inherited |

@@ -28,6 +28,10 @@ First release.
 - `host => Pid` routes host calls to a dedicated process; `handle_host_call/2`
   serves them there.
 - Worker threads get a 4 MB stack on every platform.
+- `call_async/3` and `await/2,3`.
+- WASI stdio without files: `stdin => {binary, Bytes}`, `stdout`/`stderr =>
+  capture` read back with `read_output/1` under an `output_limit`;
+  `args`/`env => inherit`.
 - Runtime-only builds (`WASMTIME_RUNTIME_ONLY=1`): no compiler, a 4 MB shared
   library; `features/0` reports the linked library's capabilities and
   `compile/1`, `{wat, _}`, `serialize/1` and the `wasi` option answer

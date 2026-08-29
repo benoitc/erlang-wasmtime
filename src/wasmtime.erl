@@ -26,7 +26,10 @@ on an instance at a time; concurrent callers are queued.
     deserialize/1,
     instantiate/1, instantiate/2,
     call/3, call/4,
+    call_async/3,
+    await/2, await/3,
     interrupt/1,
+    read_output/1,
     handle_host_call/2,
     read_memory/3, read_memory/4,
     write_memory/3, write_memory/4,
@@ -35,10 +38,13 @@ on an instance at a time; concurrent callers are queued.
     version/0
 ]).
 
--export_type([module_ref/0, instance/0, value/0, error/0, host_fun/0, options/0, features/0]).
+-export_type([
+    module_ref/0, instance/0, call_ref/0, value/0, error/0, host_fun/0, options/0, features/0
+]).
 
 -define(DEFAULT_MEMORY_LIMIT, 256 * 1024 * 1024).
 -define(DEFAULT_HOST_TIMEOUT, 30000).
+-define(DEFAULT_OUTPUT_LIMIT, 16 * 1024 * 1024).
 
 %% `handle` is the NIF resource, `ref` the reference carried by every message
 %% the instance thread sends to a caller.
@@ -50,6 +56,7 @@ on an instance at a time; concurrent callers are queued.
 
 -opaque module_ref() :: reference().
 -opaque instance() :: #instance{}.
+-opaque call_ref() :: {call_ref, pos_integer()}.
 
 -doc """
 A WebAssembly value. `nan`, `infinity` and `neg_infinity` stand for the floats
@@ -76,13 +83,25 @@ may have no `wat` or `wasi`. See building.md, "Runtime-only builds".
 -doc "A host function. Returns the results the guest expects, or `{error, Reason}` which traps the guest.".
 -type host_fun() :: fun((instance(), [value()]) -> {ok, [value()]} | {error, term()}).
 
+-doc """
+WASI configuration. Nothing is granted by default.
+
+- `args`, `env`: what the guest sees, or `inherit` for the VM's own.
+- `dirs`: preopened directories, read-only unless `write`.
+- `stdin`: end of file by default; a file, the VM's stdin, or bytes.
+- `stdout`, `stderr`: discarded by default; a file, the VM's own, or
+  `capture` into memory, read with `read_output/1`.
+- `output_limit`: bytes kept per captured stream (default 16 MB); the guest
+  never sees a short write, `read_output/1` reports what was dropped.
+""".
 -type wasi_options() :: #{
-    args => [iodata()],
-    env => [{iodata(), iodata()}],
+    args => inherit | [iodata()],
+    env => inherit | [{iodata(), iodata()}],
     dirs => [{Guest :: iodata(), Host :: iodata(), read | write}],
-    stdin => none | inherit | {file, iodata()},
-    stdout => none | inherit | {file, iodata()},
-    stderr => none | inherit | {file, iodata()}
+    stdin => none | inherit | {file, iodata()} | {binary, iodata()},
+    stdout => none | inherit | {file, iodata()} | capture,
+    stderr => none | inherit | {file, iodata()} | capture,
+    output_limit => pos_integer()
 }.
 
 -type options() :: #{
@@ -180,7 +199,7 @@ instantiate(Mod, Opts) when is_map(Opts) ->
     case wasmtime_nif:instantiate(Mod, nif_options(Imports, Opts), Ref, Id) of
         {ok, Handle} ->
             Inst = #instance{handle = Handle, ref = Ref, imports = Imports},
-            case await(Inst, Id, infinity) of
+            case wait_result(Inst, Id, infinity) of
                 ok -> {ok, Inst};
                 {error, _} = Error -> Error
             end;
@@ -215,17 +234,26 @@ wasi_options(none) ->
     none;
 wasi_options(Wasi) when is_map(Wasi) ->
     {
-        [bin(A) || A <- maps:get(args, Wasi, [])],
-        [{bin(K), bin(V)} || {K, V} <- maps:get(env, Wasi, [])],
+        case maps:get(args, Wasi, []) of
+            inherit -> inherit;
+            Args -> [bin(A) || A <- Args]
+        end,
+        case maps:get(env, Wasi, []) of
+            inherit -> inherit;
+            Env -> [{bin(K), bin(V)} || {K, V} <- Env]
+        end,
         [{bin(Guest), bin(Host), Perm} || {Guest, Host, Perm} <- maps:get(dirs, Wasi, [])],
         stdio(maps:get(stdin, Wasi, none)),
         stdio(maps:get(stdout, Wasi, none)),
-        stdio(maps:get(stderr, Wasi, none))
+        stdio(maps:get(stderr, Wasi, none)),
+        maps:get(output_limit, Wasi, ?DEFAULT_OUTPUT_LIMIT)
     }.
 
 stdio(none) -> none;
 stdio(inherit) -> inherit;
-stdio({file, Path}) -> {file, bin(Path)}.
+stdio(capture) -> capture;
+stdio({file, Path}) -> {file, bin(Path)};
+stdio({binary, Bytes}) -> {binary, iolist_to_binary(Bytes)}.
 
 bin(B) when is_binary(B) -> B;
 bin(L) -> unicode:characters_to_binary(L).
@@ -251,7 +279,7 @@ instantiate option) is what bounds the guest there.
 call(#instance{handle = H} = Inst, Name, Args, Opts) when is_list(Args), is_map(Opts) ->
     Id = erlang:unique_integer([positive, monotonic]),
     case wasmtime_nif:call(H, iolist_to_binary(Name), Args, Id) of
-        enqueued -> await(Inst, Id, maps:get(timeout, Opts, infinity));
+        enqueued -> wait_result(Inst, Id, maps:get(timeout, Opts, infinity));
         {error, _} = Error -> Error
     end.
 
@@ -283,14 +311,44 @@ handle_host_call(
 handle_host_call(#instance{}, _) ->
     ignore.
 
+-doc """
+Start a call and return at once with a reference for `await/2,3`.
+
+The call runs on the instance thread while this process does other work.
+Host functions are still served by this process, and only while it is
+inside `await/2,3` (or by the `host` process when one was given), so a
+guest that calls back before `await` waits until then, within
+`host_timeout`.
+""".
+-spec call_async(instance(), iodata(), [value()]) -> {ok, call_ref()} | error().
+call_async(#instance{handle = H}, Name, Args) when is_list(Args) ->
+    Id = erlang:unique_integer([positive, monotonic]),
+    case wasmtime_nif:call(H, iolist_to_binary(Name), Args, Id) of
+        enqueued -> {ok, {call_ref, Id}};
+        {error, _} = Error -> Error
+    end.
+
+-doc #{equiv => await(Inst, Ref, infinity)}.
+-spec await(instance(), call_ref()) -> {ok, [value()]} | error().
+await(Inst, Ref) -> await(Inst, Ref, infinity).
+
+-doc """
+Wait for the result of `call_async/3`, serving host calls meanwhile.
+
+Must be called by the process that started the call. With a timeout the
+call is cancelled like in `call/4`.
+""".
+-spec await(instance(), call_ref(), timeout()) -> {ok, [value()]} | error().
+await(#instance{} = Inst, {call_ref, Id}, Timeout) -> wait_result(Inst, Id, Timeout).
+
 %% Wait for the result of request Id, serving host calls meanwhile.
-await(#instance{handle = H, ref = Ref, imports = Imports} = Inst, Id, Timeout) ->
+wait_result(#instance{handle = H, ref = Ref, imports = Imports} = Inst, Id, Timeout) ->
     receive
         {wasmtime_result, Ref, Id, Result} ->
             Result;
         {wasmtime_host_call, Ref, HostId, Key, Args} ->
             _ = wasmtime_nif:host_reply(H, HostId, run_host(Imports, Key, Inst, Args)),
-            await(Inst, Id, Timeout)
+            wait_result(Inst, Id, Timeout)
     after Timeout ->
         %% cancel/2 ends request Id and drops its result. `not_running` means
         %% it had already finished: the result is in the mailbox, so it is
@@ -336,6 +394,17 @@ format_reason(Bin) when is_binary(Bin) -> Bin;
 format_reason(Term) -> unicode:characters_to_binary(io_lib:format("~0p", [Term])).
 
 %% ------------------------------------------------------------------- memory
+
+-doc """
+Take what the captured `stdout` and `stderr` hold and empty them.
+
+Returns `{ok, {Stdout, Stderr, {DroppedOut, DroppedErr}}}`; the counters say
+how many bytes went past `output_limit`. Works while the guest runs, so a
+long-running guest's output can be drained from another process.
+""".
+-spec read_output(instance()) ->
+    {ok, {binary(), binary(), {non_neg_integer(), non_neg_integer()}}}.
+read_output(#instance{handle = H}) -> wasmtime_nif:read_output(H).
 
 -doc """
 Read `Len` bytes at `Ptr` from the instance's default memory: the export

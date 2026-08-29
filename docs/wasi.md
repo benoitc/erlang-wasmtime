@@ -42,19 +42,38 @@ all, not the working directory.
 
 ## Stdio
 
-Each of `stdin`, `stdout`, `stderr` is one of:
+| Value | `stdin` | `stdout`, `stderr` |
+|---|---|---|
+| `none` (default) | reads return end of file | writes are discarded |
+| `inherit` | the VM's own | the VM's own |
+| `{file, Path}` | read from that host file | appended to that host file |
+| `{binary, Bytes}` | the bytes, then end of file | |
+| `capture` | | kept in memory, read with `read_output/1` |
 
-| Value | Effect |
-|---|---|
-| `none` (default) | Reads return end of file, writes are discarded |
-| `inherit` | The VM's own stdin/stdout/stderr |
-| `{file, Path}` | Read from or write to that host file |
+Capture is the simplest way to get a script's output back:
+
+```erlang
+{ok, Inst} = wasmtime:instantiate(Mod, #{wasi => #{
+    args => [~"prog"], stdin => {binary, Input}, stdout => capture, stderr => capture}}),
+{ok, []} = wasmtime:call(Inst, ~"_start", []),
+{ok, {Stdout, Stderr, {0, 0}}} = wasmtime:read_output(Inst).
+```
+
+`read_output/1` returns what accumulated since the last call and empties the
+buffers; it works while the guest runs, so another process can drain a
+long-running guest. `output_limit` (default 16 MB per stream) caps what is
+kept: the guest still sees complete writes, and the two counters in the
+result say how many bytes were dropped.
+
+`args => inherit` and `env => inherit` hand the guest the VM's own command
+line and environment; the default is none of either.
 
 ## Notes
 
 - Preview 1 only. Components and WASI preview 2 are not exposed.
 - No network. The preview 1 surface Wasmtime exposes has no sockets, and no
   option here enables them.
-- The stdio capture is per instance, not per call: `{file, Path}` is opened at
-  instantiation and appended to by every call.
+- Stdio is per instance, not per call: `{file, Path}` is opened at
+  instantiation and appended to by every call, and captured output
+  accumulates until `read_output/1` takes it.
 - Paths and strings are binaries or charlists; both are accepted.

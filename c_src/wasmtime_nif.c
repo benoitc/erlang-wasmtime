@@ -87,9 +87,9 @@
 /* ---------------------------------------------------------------- atoms -- */
 
 static ERL_NIF_TERM atom_ok, atom_error, atom_true, atom_false, atom_compiler, atom_wat, atom_wasi,
-    atom_none, atom_undefined, atom_inherit, atom_file, atom_read, atom_write, atom_nan,
-    atom_infinity, atom_neg_infinity, atom_class, atom_kind, atom_message, atom_status,
-    atom_not_running, atom_func, atom_global, atom_table, atom_memory, atom_tag,
+    atom_none, atom_capture, atom_binary, atom_undefined, atom_inherit, atom_file, atom_read,
+    atom_write, atom_nan, atom_infinity, atom_neg_infinity, atom_class, atom_kind, atom_message,
+    atom_status, atom_not_running, atom_func, atom_global, atom_table, atom_memory, atom_tag,
     atom_wasmtime_result, atom_wasmtime_host_call, atom_no_pending_host_call, atom_enqueued;
 
 static ERL_NIF_TERM mk_atom(ErlNifEnv *env, const char *s) {
@@ -325,6 +325,14 @@ typedef struct instance {
   int has_reply, abort;
   ErlNifPid host_pid; /* serves host calls for REQ_CALL when has_host_pid */
   int has_host_pid;
+
+  /* WASI stdout/stderr captured in memory (stdio option `capture`) */
+  struct {
+    unsigned char *data;
+    size_t len, cap;
+  } capture[2];
+  size_t output_limit; /* bytes kept per stream; the rest is counted */
+  size_t dropped[2];
   ErlNifPid host_target; /* who the in-flight host call was sent to */
   ErlNifEnv *reply_env;
   ERL_NIF_TERM reply;
@@ -528,15 +536,50 @@ static char *bin_to_cstr(ErlNifEnv *env, ERL_NIF_TERM t) {
   return s;
 }
 
-/* Wasi :: none | {Args, Env, Dirs, Stdin, Stdout, Stderr}
- * Std   :: none | inherit | {file, Path}
+#if NIF_HAVE_WASI
+typedef struct {
+  instance_t *inst;
+  int which; /* 0 stdout, 1 stderr */
+} capture_env_t;
+
+/* Runs on the instance thread inside a WASI write. Appends under the mutex
+ * so read_output/1 can copy the buffer from a scheduler thread meanwhile. */
+static ptrdiff_t capture_write(void *envp, const unsigned char *data, size_t len) {
+  capture_env_t *ce = envp;
+  instance_t *inst = ce->inst;
+  pthread_mutex_lock(&inst->mu);
+  size_t room = inst->output_limit > inst->capture[ce->which].len
+                    ? inst->output_limit - inst->capture[ce->which].len
+                    : 0;
+  size_t keep = len < room ? len : room;
+  if (keep) {
+    size_t need = inst->capture[ce->which].len + keep;
+    if (need > inst->capture[ce->which].cap) {
+      size_t cap = inst->capture[ce->which].cap ? inst->capture[ce->which].cap * 2 : 4096;
+      while (cap < need) cap *= 2;
+      inst->capture[ce->which].data = enif_realloc(inst->capture[ce->which].data, cap);
+      inst->capture[ce->which].cap = cap;
+    }
+    memcpy(inst->capture[ce->which].data + inst->capture[ce->which].len, data, keep);
+    inst->capture[ce->which].len += keep;
+  }
+  inst->dropped[ce->which] += len - keep;
+  pthread_mutex_unlock(&inst->mu);
+  return (ptrdiff_t)len; /* the guest sees a complete write either way */
+}
+#endif
+
+/* Wasi :: none | {Args, Env, Dirs, Stdin, Stdout, Stderr, OutputLimit}
+ * Args  :: inherit | [binary()]     Env :: inherit | [{binary(), binary()}]
+ * Stdin :: none | inherit | {file, Path} | {binary, Bytes}
+ * Stdout, Stderr :: none | inherit | {file, Path} | capture
  * Dirs  :: [{GuestPath, HostPath, read | write}] */
 static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *out,
                                    ERL_NIF_TERM wasi) {
   const ERL_NIF_TERM *t;
   int arity;
   if (enif_is_identical(wasi, atom_none)) return 0;
-  if (!enif_get_tuple(env, wasi, &arity, &t) || arity != 6)
+  if (!enif_get_tuple(env, wasi, &arity, &t) || arity != 7)
     return mk_error_s(out, "wasi", "config", "wasi option is malformed");
 #if !NIF_HAVE_WASI
   return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
@@ -549,12 +592,19 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
   const ERL_NIF_TERM *tt;
   int ar;
 
-  /* argv */
-  if (!enif_get_list_length(env, t[0], &n)) {
-    err = "wasi args must be a list";
+  ErlNifUInt64 limit;
+  if (!enif_get_uint64(env, t[6], &limit)) {
+    err = "wasi output_limit must be an integer";
     goto done;
   }
-  {
+  inst->output_limit = limit;
+  /* argv */
+  if (enif_is_identical(t[0], atom_inherit)) {
+    wasi_config_inherit_argv(cfg);
+  } else if (!enif_get_list_length(env, t[0], &n)) {
+    err = "wasi args must be a list or inherit";
+    goto done;
+  } else {
     const char **argv = enif_alloc(sizeof(char *) * (n + 1));
     size_t i = 0;
     for (l = t[0]; enif_get_list_cell(env, l, &h, &l); i++) argv[i] = bin_to_cstr(env, h);
@@ -569,11 +619,12 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
     }
   }
   /* env */
-  if (!enif_get_list_length(env, t[1], &n)) {
-    err = "wasi env must be a list";
+  if (enif_is_identical(t[1], atom_inherit)) {
+    wasi_config_inherit_env(cfg);
+  } else if (!enif_get_list_length(env, t[1], &n)) {
+    err = "wasi env must be a list or inherit";
     goto done;
-  }
-  {
+  } else {
     const char **names = enif_alloc(sizeof(char *) * (n + 1));
     const char **values = enif_alloc(sizeof(char *) * (n + 1));
     size_t i = 0;
@@ -628,6 +679,25 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
         wasi_config_inherit_stderr(cfg);
       continue;
     }
+    if (fd > 0 && enif_is_identical(s, atom_capture)) {
+      capture_env_t *ce = enif_alloc(sizeof *ce);
+      ce->inst = inst;
+      ce->which = fd - 1;
+      if (fd == 1)
+        wasi_config_set_stdout_custom(cfg, capture_write, ce, enif_free);
+      else
+        wasi_config_set_stderr_custom(cfg, capture_write, ce, enif_free);
+      continue;
+    }
+    ErlNifBinary bytes;
+    if (fd == 0 && enif_get_tuple(env, s, &ar, &tt) && ar == 2 &&
+        enif_is_identical(tt[0], atom_binary) &&
+        enif_inspect_iolist_as_binary(env, tt[1], &bytes)) {
+      wasm_byte_vec_t vec;
+      wasm_byte_vec_new(&vec, bytes.size, (const wasm_byte_t *)bytes.data);
+      wasi_config_set_stdin_bytes(cfg, &vec); /* consumes vec */
+      continue;
+    }
     if (enif_get_tuple(env, s, &ar, &tt) && ar == 2 && enif_is_identical(tt[0], atom_file)) {
       char *path = bin_to_cstr(env, tt[1]);
       int ok = path && (fd == 0   ? wasi_config_set_stdin_file(cfg, path)
@@ -640,7 +710,8 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
       }
       continue;
     }
-    err = "wasi stdio must be none, inherit or {file, Path}";
+    err = fd == 0 ? "wasi stdin must be none, inherit, {file, Path} or {binary, Bytes}"
+                  : "wasi stdout and stderr must be none, inherit, {file, Path} or capture";
     goto done;
   }
 
@@ -967,6 +1038,8 @@ static void instance_dtor(ErlNifEnv *env, void *obj) {
   enif_free(inst->hostfns);
   if (inst->reply_env) enif_free_env(inst->reply_env);
   if (inst->ref_env) enif_free_env(inst->ref_env);
+  enif_free(inst->capture[0].data);
+  enif_free(inst->capture[1].data);
   enif_free(inst->host_msg);
   if (inst->mod) enif_release_resource(inst->mod);
   pthread_mutex_destroy(&inst->mu);
@@ -1389,6 +1462,22 @@ static ERL_NIF_TERM nif_memory_size(ErlNifEnv *env, int argc, const ERL_NIF_TERM
   return r;
 }
 
+/* read_output(Handle) -> {ok, {Stdout, Stderr, {DroppedOut, DroppedErr}}}: takes what
+ * the captured streams hold and empties them; safe while the guest runs. */
+static ERL_NIF_TERM nif_read_output(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  instance_t *inst;
+  if (!get_handle(env, argv[0], &inst)) return enif_make_badarg(env);
+  pthread_mutex_lock(&inst->mu);
+  ERL_NIF_TERM out = mk_binary(env, inst->capture[0].data, inst->capture[0].len);
+  ERL_NIF_TERM err = mk_binary(env, inst->capture[1].data, inst->capture[1].len);
+  ERL_NIF_TERM dropped = enif_make_tuple2(env, enif_make_uint64(env, inst->dropped[0]),
+                                          enif_make_uint64(env, inst->dropped[1]));
+  inst->capture[0].len = inst->capture[1].len = 0;
+  inst->dropped[0] = inst->dropped[1] = 0;
+  pthread_mutex_unlock(&inst->mu);
+  return enif_make_tuple2(env, atom_ok, enif_make_tuple3(env, out, err, dropped));
+}
+
 /* features() -> #{compiler => bool, wat => bool, wasi => bool} */
 static ERL_NIF_TERM nif_features(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   ERL_NIF_TERM keys[3] = {atom_compiler, atom_wat, atom_wasi};
@@ -1416,6 +1505,8 @@ static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
   A(atom_wat, "wat");
   A(atom_wasi, "wasi");
   A(atom_none, "none");
+  A(atom_capture, "capture");
+  A(atom_binary, "binary");
   A(atom_undefined, "undefined");
   A(atom_inherit, "inherit");
   A(atom_file, "file");
@@ -1491,6 +1582,7 @@ static ErlNifFunc funcs[] = {
     {"read_memory", 4, nif_read_memory, 0},
     {"write_memory", 4, nif_write_memory, 0},
     {"memory_size", 2, nif_memory_size, 0},
+    {"read_output", 1, nif_read_output, 0},
     {"features", 0, nif_features, 0},
     {"version", 0, nif_version, 0},
 };

@@ -42,7 +42,7 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
     err = "wasi output_limit must be an integer";
     goto done;
   }
-  inst->output_limit = limit;
+  inst->capture.limit = limit;
   /* argv */
   if (enif_is_identical(t[0], atom_inherit)) {
     wasi_config_inherit_argv(cfg);
@@ -125,7 +125,7 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
       continue;
     }
     if (fd == 0 && enif_is_identical(s, atom_stream)) {
-      inst->stdin_stream = 1; /* fd_read is put in front of WASI's below */
+      inst->inbox.stdin = 1; /* fd_read is put in front of WASI's below */
       continue;
     }
     if (fd > 0 && (enif_is_identical(s, atom_capture) || enif_is_identical(s, atom_stream))) {
@@ -171,17 +171,17 @@ done:
     wasi_config_delete(cfg);
     return mk_error_s(out, "wasi", "config", err);
   }
-  wasmtime_error_t *werr = wasmtime_context_set_wasi(inst->ctx, cfg); /* consumes cfg */
+  wasmtime_error_t *werr = wasmtime_context_set_wasi(inst->wasm.ctx, cfg); /* consumes cfg */
   if (werr) {
     wasmtime_error_delete(werr);
     return mk_error_s(out, "wasi", "config", "wasi could not be configured");
   }
-  werr = wasmtime_linker_define_wasi(inst->linker);
+  werr = wasmtime_linker_define_wasi(inst->wasm.linker);
   if (werr) {
     wasmtime_error_delete(werr);
     return mk_error_s(out, "wasi", "config", "wasi could not be linked");
   }
-  if (inst->stdin_stream) return define_stdin_stream(inst, out);
+  if (inst->inbox.stdin) return define_stdin_stream(inst, out);
   return 0;
 #endif
 }
@@ -197,7 +197,7 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
   if (!enif_get_tuple(env, req->opts, &arity, &o) || arity != 8 ||
       !enif_get_tuple(env, o[2], &arity, &lim) || arity != 4)
     return mk_error_s(out, "link", "badarg", "malformed options");
-  inst->has_host_pid = enif_get_local_pid(env, o[4], &inst->host_pid);
+  inst->host.has_pid = enif_get_local_pid(env, o[4], &inst->host.pid);
 
   ErlNifSInt64 mem, tables, elems, instances;
   unsigned host_timeout;
@@ -205,18 +205,18 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
   if (!enif_get_int64(env, lim[0], &mem) || !enif_get_int64(env, lim[1], &tables) ||
       !enif_get_int64(env, lim[2], &elems) || !enif_get_int64(env, lim[3], &instances) ||
       !enif_get_uint(env, o[3], &host_timeout) ||
-      !enif_get_local_pid(env, o[5], &inst->stream_pid) ||
+      !enif_get_local_pid(env, o[5], &inst->inbox.stream_pid) ||
       !enif_get_uint64(env, o[6], &inbox_limit))
     return mk_error_s(out, "link", "badarg", "malformed limits");
-  inst->host_timeout_ms = host_timeout;
-  inst->inbox_limit = inbox_limit;
+  inst->host.timeout_ms = host_timeout;
+  inst->inbox.limit = inbox_limit;
 
-  inst->store = wasmtime_store_new(inst->mod->engine->engine, NULL, NULL);
-  inst->ctx = wasmtime_store_context(inst->store);
-  wasmtime_store_limiter(inst->store, mem, elems, instances, tables, -1);
-  wasmtime_store_epoch_deadline_callback(inst->store, epoch_callback, inst, NULL);
-  wasmtime_context_set_epoch_deadline(inst->ctx, 1);
-  inst->linker = wasmtime_linker_new(inst->mod->engine->engine);
+  inst->wasm.store = wasmtime_store_new(inst->wasm.mod->engine->engine, NULL, NULL);
+  inst->wasm.ctx = wasmtime_store_context(inst->wasm.store);
+  wasmtime_store_limiter(inst->wasm.store, mem, elems, instances, tables, -1);
+  wasmtime_store_epoch_deadline_callback(inst->wasm.store, epoch_callback, inst, NULL);
+  wasmtime_context_set_epoch_deadline(inst->wasm.ctx, 1);
+  inst->wasm.linker = wasmtime_linker_new(inst->wasm.mod->engine->engine);
 
   ERL_NIF_TERM wasi_err = configure_wasi(inst, env, out, o[1]);
   if (wasi_err) return wasi_err;
@@ -226,11 +226,11 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
   unsigned nimports;
   if (!enif_get_list_length(env, o[0], &nimports))
     return mk_error_s(out, "link", "badarg", "imports must be a list");
-  inst->hostfns = enif_alloc(sizeof(hostfn_t) * (nimports + 1));
-  memset(inst->hostfns, 0, sizeof(hostfn_t) * (nimports + 1));
+  inst->wasm.hostfns = enif_alloc(sizeof(hostfn_t) * (nimports + 1));
+  memset(inst->wasm.hostfns, 0, sizeof(hostfn_t) * (nimports + 1));
 
   wasm_importtype_vec_t imports;
-  wasmtime_module_imports(inst->mod->mod, &imports);
+  wasmtime_module_imports(inst->wasm.mod->mod, &imports);
   ERL_NIF_TERM l = o[0], h;
   ERL_NIF_TERM result = atom_ok;
   while (enif_get_list_cell(env, l, &h, &l)) {
@@ -291,24 +291,24 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
                                     : "too many results");
       break;
     }
-    hostfn_t *fn = &inst->hostfns[inst->nhostfns];
+    hostfn_t *fn = &inst->wasm.hostfns[inst->wasm.nhostfns];
     fn->module = module;
     fn->name = name;
     fn->type = wasm_functype_copy(ft);
     fn->typed = sh.refs;
     hostfn_env_t *he = enif_alloc(sizeof *he);
     he->inst = inst;
-    he->idx = inst->nhostfns;
-    inst->nhostfns++;
+    he->idx = inst->wasm.nhostfns;
+    inst->wasm.nhostfns++;
     /* The linker owns `he` from here and frees it with enif_free, on the
      * error path too. */
     wasmtime_error_t *e =
-        fn->typed
-            ? wasmtime_linker_define_func(inst->linker, module, strlen(module), name, strlen(name),
-                                          fn->type, host_callback_typed, he, enif_free)
-            : wasmtime_linker_define_func_unchecked(inst->linker, module, strlen(module), name,
-                                                    strlen(name), fn->type, host_callback, he,
-                                                    enif_free);
+        fn->typed ? wasmtime_linker_define_func(inst->wasm.linker, module, strlen(module), name,
+                                                strlen(name), fn->type, host_callback_typed, he,
+                                                enif_free)
+                  : wasmtime_linker_define_func_unchecked(inst->wasm.linker, module, strlen(module),
+                                                          name, strlen(name), fn->type,
+                                                          host_callback, he, enif_free);
     if (e) {
       result = error_to_term(out, e, "link");
       break;
@@ -323,33 +323,34 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
 
   /* This runs the module's start section, which may call host functions. */
   wasm_trap_t *trap = NULL;
-  wasmtime_error_t *e =
-      wasmtime_linker_instantiate(inst->linker, inst->ctx, inst->mod->mod, &inst->instance, &trap);
+  wasmtime_error_t *e = wasmtime_linker_instantiate(
+      inst->wasm.linker, inst->wasm.ctx, inst->wasm.mod->mod, &inst->wasm.instance, &trap);
   result = outcome(inst, out, e, trap, "link");
   if (!enif_is_identical(result, atom_ok)) return result;
 
   /* Cache the exported memory, "memory" by name or the first one exported. */
   wasmtime_extern_t ext;
-  if (wasmtime_instance_export_get(inst->ctx, &inst->instance, "memory", 6, &ext) &&
+  if (wasmtime_instance_export_get(inst->wasm.ctx, &inst->wasm.instance, "memory", 6, &ext) &&
       ext.kind == WASMTIME_EXTERN_MEMORY) {
-    inst->memory = ext.of.memory;
-    inst->has_memory = 1;
+    inst->wasm.memory = ext.of.memory;
+    inst->wasm.has_memory = 1;
   } else {
     char *nm;
     size_t nlen;
     for (size_t i = 0;
-         wasmtime_instance_export_nth(inst->ctx, &inst->instance, i, &nm, &nlen, &ext); i++) {
+         wasmtime_instance_export_nth(inst->wasm.ctx, &inst->wasm.instance, i, &nm, &nlen, &ext);
+         i++) {
       if (ext.kind == WASMTIME_EXTERN_MEMORY) {
-        inst->memory = ext.of.memory;
-        inst->has_memory = 1;
+        inst->wasm.memory = ext.of.memory;
+        inst->wasm.has_memory = 1;
         break;
       }
     }
   }
-  if (inst->stdin_stream) {
+  if (inst->inbox.stdin) {
     ERL_NIF_TERM r = link_stdin_shim(inst, env, o[7], out);
     if (r) return r;
   }
-  inst->instantiated = 1;
+  inst->wasm.instantiated = 1;
   return atom_ok;
 }

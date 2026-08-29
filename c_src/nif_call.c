@@ -15,7 +15,7 @@ static ERL_NIF_TERM call_raw(instance_t *inst, req_t *req, ErlNifEnv *out, wasmt
       return mk_error_s(out, "call", "badarg", "argument does not match the parameter type");
   wasm_trap_t *trap = NULL;
   size_t nvals = ps->size > rs->size ? ps->size : rs->size;
-  wasmtime_error_t *e = wasmtime_func_call_unchecked(inst->ctx, func, vals, nvals, &trap);
+  wasmtime_error_t *e = wasmtime_func_call_unchecked(inst->wasm.ctx, func, vals, nvals, &trap);
   ERL_NIF_TERM result = outcome(inst, out, e, trap, "call");
   if (!enif_is_identical(result, atom_ok)) return result;
   ERL_NIF_TERM list = enif_make_list(out, 0);
@@ -42,7 +42,8 @@ static ERL_NIF_TERM call_typed(instance_t *inst, req_t *req, ErlNifEnv *out, was
     }
   }
   wasm_trap_t *trap = NULL;
-  wasmtime_error_t *e = wasmtime_func_call(inst->ctx, func, args, nargs, results, rs->size, &trap);
+  wasmtime_error_t *e =
+      wasmtime_func_call(inst->wasm.ctx, func, args, nargs, results, rs->size, &trap);
   unroot_vals(args, nargs);
   ERL_NIF_TERM result = outcome(inst, out, e, trap, "call");
   if (!enif_is_identical(result, atom_ok)) return result;
@@ -71,7 +72,7 @@ ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
     if (!enif_inspect_iolist_as_binary(env, req->name, &name))
       return mk_error_s(out, "call", "badarg", "export name must be a binary");
     wasmtime_extern_t ext;
-    if (!wasmtime_instance_export_get(inst->ctx, &inst->instance, (const char *)name.data,
+    if (!wasmtime_instance_export_get(inst->wasm.ctx, &inst->wasm.instance, (const char *)name.data,
                                       name.size, &ext))
       return mk_error(out, "call", "no_such_export", (const char *)name.data, name.size);
     if (ext.kind != WASMTIME_EXTERN_FUNC)
@@ -79,7 +80,7 @@ ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
     func = ext.of.func;
   }
 
-  wasm_functype_t *ft = wasmtime_func_type(inst->ctx, &func);
+  wasm_functype_t *ft = wasmtime_func_type(inst->wasm.ctx, &func);
   const wasm_valtype_vec_t *ps = wasm_functype_params(ft), *rs = wasm_functype_results(ft);
   ERL_NIF_TERM result;
   unsigned nargs;
@@ -100,7 +101,7 @@ ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
   }
   ErlNifUInt64 fuel;
   if (enif_get_uint64(env, req->opts, &fuel)) {
-    wasmtime_error_t *fe = wasmtime_context_set_fuel(inst->ctx, fuel);
+    wasmtime_error_t *fe = wasmtime_context_set_fuel(inst->wasm.ctx, fuel);
     if (fe) {
       wasmtime_error_delete(fe);
       result =
@@ -109,7 +110,7 @@ ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
       goto done;
     }
   }
-  wasmtime_context_set_epoch_deadline(inst->ctx, 1);
+  wasmtime_context_set_epoch_deadline(inst->wasm.ctx, 1);
   result =
       sh.refs ? call_typed(inst, req, out, &func, ps, rs) : call_raw(inst, req, out, &func, ps, rs);
 done:

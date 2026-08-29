@@ -33,9 +33,9 @@ ERL_NIF_TERM nif_ref_info(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
 #ifdef WASMTIME_FEATURE_GC
   if (r->kind == REF_EXTERN) kind = atom_externref;
   if (r->kind == REF_ANY)
-    kind = wasmtime_anyref_is_struct(r->inst->ctx, &r->of.any)  ? atom_struct
-           : wasmtime_anyref_is_array(r->inst->ctx, &r->of.any) ? atom_array
-                                                                : atom_anyref;
+    kind = wasmtime_anyref_is_struct(r->inst->wasm.ctx, &r->of.any)  ? atom_struct
+           : wasmtime_anyref_is_array(r->inst->wasm.ctx, &r->of.any) ? atom_array
+                                                                     : atom_anyref;
 #endif
   ERL_NIF_TERM keys[2] = {atom_kind, atom_instance};
   ERL_NIF_TERM vals[2] = {kind, enif_make_copy(env, r->inst->ref)};
@@ -66,16 +66,16 @@ ERL_NIF_TERM nif_externref(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) 
   if (!get_handle(env, argv[0], &inst)) return enif_make_badarg(env);
   pthread_mutex_lock(&inst->mu);
   ERL_NIF_TERM r;
-  if (inst->state == ST_RUNNING) {
+  if (inst->queue.state == ST_RUNNING) {
     r = mk_error_s(env, "ref", "busy", "guest is running");
-  } else if (!inst->instantiated) {
+  } else if (!inst->wasm.instantiated) {
     r = mk_error_s(env, "ref", "stopped", "instance is stopped");
   } else {
     payload_t *pl = enif_alloc(sizeof *pl);
     pl->env = enif_alloc_env();
     pl->term = enif_make_copy(pl->env, argv[1]);
     ref_t ref = {.kind = REF_EXTERN};
-    if (!wasmtime_externref_new(inst->ctx, pl, payload_free, &ref.of.ext)) {
+    if (!wasmtime_externref_new(inst->wasm.ctx, pl, payload_free, &ref.of.ext)) {
       payload_free(pl);
       r = mk_error_s(env, "ref", "gc_heap_full", "no room for another GC object: try gc/1");
     } else {
@@ -92,7 +92,8 @@ ERL_NIF_TERM nif_externref_data(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
   ERL_NIF_TERM err = with_ref(env, argv[0], &r);
   if (err) return err;
   ERL_NIF_TERM res;
-  payload_t *pl = r->kind == REF_EXTERN ? wasmtime_externref_data(r->inst->ctx, &r->of.ext) : NULL;
+  payload_t *pl =
+      r->kind == REF_EXTERN ? wasmtime_externref_data(r->inst->wasm.ctx, &r->of.ext) : NULL;
   if (!pl)
     res = mk_error_s(env, "ref", "badarg", "not an externref made by externref/2");
   else
@@ -103,11 +104,11 @@ ERL_NIF_TERM nif_externref_data(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
 
 /* The struct or array behind an anyref, as a fresh root the caller unroots. */
 static int as_struct(ref_t *r, wasmtime_structref_t *out) {
-  return r->kind == REF_ANY && wasmtime_anyref_as_struct(r->inst->ctx, &r->of.any, out);
+  return r->kind == REF_ANY && wasmtime_anyref_as_struct(r->inst->wasm.ctx, &r->of.any, out);
 }
 
 static int as_array(ref_t *r, wasmtime_arrayref_t *out) {
-  return r->kind == REF_ANY && wasmtime_anyref_as_array(r->inst->ctx, &r->of.any, out);
+  return r->kind == REF_ANY && wasmtime_anyref_as_array(r->inst->wasm.ctx, &r->of.any, out);
 }
 
 /* A field's storage type as the boundary sees it: i8 and i16 cross as i32. */
@@ -134,7 +135,7 @@ ERL_NIF_TERM nif_struct_get(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     res = mk_error_s(env, "ref", "badarg", "not a struct");
   } else {
     wasmtime_val_t v;
-    wasmtime_error_t *e = wasmtime_structref_field(r->inst->ctx, &st, index, &v);
+    wasmtime_error_t *e = wasmtime_structref_field(r->inst->wasm.ctx, &st, index, &v);
     res = e ? error_to_term(env, e, "ref")
             : term_or_unsupported(env, "ref", val_to_term(env, r->inst, &v));
     wasmtime_structref_unroot(&st);
@@ -156,7 +157,7 @@ ERL_NIF_TERM nif_struct_set(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
   if (!as_struct(r, &st)) {
     res = mk_error_s(env, "ref", "badarg", "not a struct");
   } else {
-    wasmtime_struct_type_t *ty = wasmtime_structref_type(r->inst->ctx, &st);
+    wasmtime_struct_type_t *ty = wasmtime_structref_type(r->inst->wasm.ctx, &st);
     if (!wasmtime_struct_type_field(ty, index, &ft)) {
       res = mk_error_s(env, "ref", "out_of_bounds", "no such field");
     } else {
@@ -167,7 +168,7 @@ ERL_NIF_TERM nif_struct_set(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
       if (kind) {
         res = conv_error(env, "ref", kind);
       } else {
-        wasmtime_error_t *e = wasmtime_structref_set_field(r->inst->ctx, &st, index, &v);
+        wasmtime_error_t *e = wasmtime_structref_set_field(r->inst->wasm.ctx, &st, index, &v);
         wasmtime_val_unroot(&v);
         res = e ? error_to_term(env, e, "ref") : atom_ok;
       }
@@ -191,7 +192,7 @@ ERL_NIF_TERM nif_array_len(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) 
     res = mk_error_s(env, "ref", "badarg", "not an array");
   } else {
     uint32_t n = 0;
-    wasmtime_error_t *e = wasmtime_arrayref_len(r->inst->ctx, &ar, &n);
+    wasmtime_error_t *e = wasmtime_arrayref_len(r->inst->wasm.ctx, &ar, &n);
     res = e ? error_to_term(env, e, "ref") : enif_make_tuple2(env, atom_ok, enif_make_uint(env, n));
     wasmtime_arrayref_unroot(&ar);
   }
@@ -215,7 +216,7 @@ ERL_NIF_TERM nif_array_get(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) 
     wasmtime_arrayref_unroot(&ar);
   } else {
     wasmtime_val_t v;
-    wasmtime_error_t *e = wasmtime_arrayref_get(r->inst->ctx, &ar, (uint32_t)index, &v);
+    wasmtime_error_t *e = wasmtime_arrayref_get(r->inst->wasm.ctx, &ar, (uint32_t)index, &v);
     res = e ? error_to_term(env, e, "ref")
             : term_or_unsupported(env, "ref", val_to_term(env, r->inst, &v));
     wasmtime_arrayref_unroot(&ar);
@@ -239,7 +240,7 @@ ERL_NIF_TERM nif_array_set(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) 
     res = mk_error_s(env, "ref", "out_of_bounds", "index is past the array's length");
     wasmtime_arrayref_unroot(&ar);
   } else {
-    wasmtime_array_type_t *ty = wasmtime_arrayref_type(r->inst->ctx, &ar);
+    wasmtime_array_type_t *ty = wasmtime_arrayref_type(r->inst->wasm.ctx, &ar);
     wasmtime_field_type_t ft;
     wasmtime_array_type_element(ty, &ft);
     vtype_t t;
@@ -249,7 +250,7 @@ ERL_NIF_TERM nif_array_set(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) 
     if (kind) {
       res = conv_error(env, "ref", kind);
     } else {
-      wasmtime_error_t *e = wasmtime_arrayref_set(r->inst->ctx, &ar, (uint32_t)index, &v);
+      wasmtime_error_t *e = wasmtime_arrayref_set(r->inst->wasm.ctx, &ar, (uint32_t)index, &v);
       wasmtime_val_unroot(&v);
       res = e ? error_to_term(env, e, "ref") : atom_ok;
     }
@@ -267,12 +268,12 @@ ERL_NIF_TERM nif_gc(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   if (!get_handle(env, argv[0], &inst)) return enif_make_badarg(env);
   pthread_mutex_lock(&inst->mu);
   ERL_NIF_TERM r;
-  if (inst->state == ST_RUNNING) {
+  if (inst->queue.state == ST_RUNNING) {
     r = mk_error_s(env, "ref", "busy", "guest is running");
-  } else if (!inst->instantiated) {
+  } else if (!inst->wasm.instantiated) {
     r = mk_error_s(env, "ref", "stopped", "instance is stopped");
   } else {
-    wasmtime_error_t *e = wasmtime_context_gc(inst->ctx);
+    wasmtime_error_t *e = wasmtime_context_gc(inst->wasm.ctx);
     r = e ? error_to_term(env, e, "ref") : atom_ok;
   }
   pthread_mutex_unlock(&inst->mu);

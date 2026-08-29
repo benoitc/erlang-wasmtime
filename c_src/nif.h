@@ -155,6 +155,11 @@ typedef struct chunk {
   size_t len, off; /* off: what stdin already consumed */
   struct chunk *next;
 } chunk_t;
+/* One guest instance. `mu` guards every field below unless a comment says
+ * otherwise; `cv` is the one condition variable, broadcast whenever a
+ * waiter's condition may have changed (a request queued, a host reply,
+ * inbox bytes, a stop). The store (`wasm`) is used by the worker thread
+ * while queue.state == ST_RUNNING and by whoever holds `mu` otherwise. */
 typedef struct instance {
   pthread_mutex_t mu;
   pthread_cond_t cv;
@@ -162,58 +167,71 @@ typedef struct instance {
   ErlNifEnv *ref_env; /* owns ref, the Erlang reference carried by messages */
   ERL_NIF_TERM ref;
 
-  req_t *head, *tail;
-  req_t *current;
-  enum state state;
-  int stopping;
-
-  /* host call in flight (state == ST_IN_HOST) */
-  ErlNifUInt64 host_id, host_seq;
-  int has_reply, abort;
-  ErlNifPid host_pid; /* serves host calls for REQ_CALL when has_host_pid */
-  int has_host_pid;
-
-  /* WASI stdout/stderr captured in memory (stdio option `capture`) */
+  /* Requests, served one at a time by the worker thread. */
   struct {
-    unsigned char *data;
-    size_t len, cap;
-  } capture[2];
-  size_t output_limit; /* bytes kept per stream; the rest is counted */
-  size_t dropped[2];
-  ErlNifPid host_target; /* who the in-flight host call was sent to */
-  ErlNifEnv *reply_env;
-  ERL_NIF_TERM reply;
-  unsigned host_timeout_ms;
+    req_t *head, *tail;
+    req_t *current;
+    enum state state;
+    int stopping; /* no request starts again; the worker exits when drained */
+  } queue;
+
+  /* The host call in flight (queue.state == ST_IN_HOST) and how the running
+   * request ended. */
+  struct {
+    ErlNifUInt64 id, seq;
+    int has_reply;
+    int abort;     /* end the running request: set by stop_current */
+    ErlNifPid pid; /* serves host calls for REQ_CALL when has_pid */
+    int has_pid;
+    ErlNifPid target; /* who the in-flight host call was sent to */
+    ErlNifEnv *reply_env;
+    ERL_NIF_TERM reply;
+    unsigned timeout_ms;
+    int failed; /* worker only: a host function failed the request */
+    char *msg;  /* worker only: its reason */
+  } host;
 
   /* Bytes sent to the guest with send/2, one chunk per call, read by the
-   * guest through stdin (`stdin => stream`) or the `erlang.recv` import.
-   * Guarded by mu, signalled on cv. */
-  struct chunk *inbox_head, *inbox_tail;
-  size_t inbox_bytes, inbox_limit;
-  int inbox_closed;
-  ErlNifPid stream_pid; /* receives {wasmtime_stream, Ref, Kind, Bytes} */
-  int stdin_stream;
-  wasmtime_func_t real_fd_read; /* Wasmtime's own, taken before it is shadowed */
-  wasmtime_func_t wasi_fd_read; /* the shim in front of it, for fds other than 0 */
-  int has_fd_read;
+   * guest through stdin (`stdin => stream`) or the `erlang.recv` import. */
+  struct {
+    struct chunk *head, *tail;
+    size_t bytes, limit;
+    int closed;
+    ErlNifPid stream_pid;         /* receives {wasmtime_stream, Ref, Kind, Bytes} */
+    int stdin;                    /* stdin => stream: fd_read is shadowed */
+    wasmtime_func_t real_fd_read; /* Wasmtime's own, taken before it is shadowed */
+    wasmtime_func_t shim_fd_read; /* the shim in front of it, for fds other than 0 */
+    int has_shim;
+  } inbox;
 
-  /* set under mu by interrupt/cancel/down, read by the epoch callback */
+  /* WASI stdout/stderr captured in memory (stdio option `capture`). */
+  struct {
+    struct {
+      unsigned char *data;
+      size_t len, cap;
+    } buf[2];
+    size_t limit; /* bytes kept per stream; the rest is counted */
+    size_t dropped[2];
+  } capture;
+
+  /* Set under mu by interrupt/cancel/down, read by the epoch callback
+   * without it. */
   volatile int interrupt;
-  /* worker-thread only: how the running request ended */
-  int interrupted_fired; /* the interrupt flag ended it */
-  int host_failed;       /* a host function failed it */
-  char *host_msg;        /* the host function's reason */
+  int interrupted_fired; /* worker only: the interrupt flag ended the request */
 
-  wasmtime_store_t *store;
-  wasmtime_context_t *ctx;
-  wasmtime_linker_t *linker;
-  wasmtime_instance_t instance;
-  int instantiated;
-  module_res_t *mod;
-  int has_memory;
-  wasmtime_memory_t memory;
-  hostfn_t *hostfns;
-  size_t nhostfns;
+  /* The Wasmtime objects. Worker thread while running, mu holder otherwise. */
+  struct {
+    wasmtime_store_t *store;
+    wasmtime_context_t *ctx;
+    wasmtime_linker_t *linker;
+    wasmtime_instance_t instance;
+    int instantiated;
+    module_res_t *mod;
+    int has_memory;
+    wasmtime_memory_t memory;
+    hostfn_t *hostfns;
+    size_t nhostfns;
+  } wasm;
 } instance_t;
 typedef struct {
   instance_t *inst;

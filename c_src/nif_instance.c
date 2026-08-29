@@ -40,23 +40,23 @@ static void req_done(instance_t *inst, req_t *req) {
 void *worker_main(void *arg) {
   instance_t *inst = arg;
   pthread_mutex_lock(&inst->mu);
-  while (!inst->stopping) {
-    if (!inst->head) {
+  while (!inst->queue.stopping) {
+    if (!inst->queue.head) {
       pthread_cond_wait(&inst->cv, &inst->mu);
       continue;
     }
-    req_t *req = inst->head;
-    inst->head = req->next;
-    if (!inst->head) inst->tail = NULL;
+    req_t *req = inst->queue.head;
+    inst->queue.head = req->next;
+    if (!inst->queue.head) inst->queue.tail = NULL;
     if (req->cancelled) {
       req_done(inst, req);
       continue;
     }
-    inst->current = req;
-    inst->state = ST_RUNNING;
-    inst->abort = 0;
+    inst->queue.current = req;
+    inst->queue.state = ST_RUNNING;
+    inst->host.abort = 0;
     inst->interrupted_fired = 0;
-    inst->host_failed = 0;
+    inst->host.failed = 0;
     __atomic_store_n(&inst->interrupt, 0, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&inst->mu);
 
@@ -65,18 +65,18 @@ void *worker_main(void *arg) {
         req->kind == REQ_INSTANTIATE ? do_instantiate(inst, req, out) : do_call(inst, req, out);
 
     pthread_mutex_lock(&inst->mu);
-    inst->state = ST_IDLE;
-    inst->current = NULL;
+    inst->queue.state = ST_IDLE;
+    inst->queue.current = NULL;
     if (!req->cancelled) send_result(inst, req, out, result);
     enif_free_env(out);
-    int failed_instantiate = req->kind == REQ_INSTANTIATE && !inst->instantiated;
+    int failed_instantiate = req->kind == REQ_INSTANTIATE && !inst->wasm.instantiated;
     req_done(inst, req);
-    if (failed_instantiate) inst->stopping = 1;
+    if (failed_instantiate) inst->queue.stopping = 1;
   }
   /* Nothing more runs. Tell whoever is still waiting. */
-  while (inst->head) {
-    req_t *req = inst->head;
-    inst->head = req->next;
+  while (inst->queue.head) {
+    req_t *req = inst->queue.head;
+    inst->queue.head = req->next;
     if (!req->cancelled) {
       ErlNifEnv *out = enif_alloc_env();
       send_result(inst, req, out, mk_error_s(out, "call", "stopped", "instance is stopped"));
@@ -84,7 +84,7 @@ void *worker_main(void *arg) {
     }
     req_done(inst, req);
   }
-  inst->tail = NULL;
+  inst->queue.tail = NULL;
   pthread_mutex_unlock(&inst->mu);
   /* The thread's own reference; nothing below may touch `inst`. */
   enif_release_resource(inst);
@@ -100,33 +100,33 @@ void module_dtor(ErlNifEnv *env, void *obj) {
  * has exited (or never started), so nothing else can be using the instance. */
 void instance_dtor(ErlNifEnv *env, void *obj) {
   instance_t *inst = obj;
-  while (inst->head) {
-    req_t *r = inst->head;
-    inst->head = r->next;
+  while (inst->queue.head) {
+    req_t *r = inst->queue.head;
+    inst->queue.head = r->next;
     req_free(r);
   }
-  if (inst->linker) wasmtime_linker_delete(inst->linker);
-  if (inst->store) wasmtime_store_delete(inst->store);
-  for (size_t i = 0; i < inst->nhostfns; i++) {
-    enif_free(inst->hostfns[i].module);
-    enif_free(inst->hostfns[i].name);
-    wasm_functype_delete(inst->hostfns[i].type);
+  if (inst->wasm.linker) wasmtime_linker_delete(inst->wasm.linker);
+  if (inst->wasm.store) wasmtime_store_delete(inst->wasm.store);
+  for (size_t i = 0; i < inst->wasm.nhostfns; i++) {
+    enif_free(inst->wasm.hostfns[i].module);
+    enif_free(inst->wasm.hostfns[i].name);
+    wasm_functype_delete(inst->wasm.hostfns[i].type);
   }
-  enif_free(inst->hostfns);
-  if (inst->reply_env) enif_free_env(inst->reply_env);
+  enif_free(inst->wasm.hostfns);
+  if (inst->host.reply_env) enif_free_env(inst->host.reply_env);
   if (inst->ref_env) enif_free_env(inst->ref_env);
-  enif_free(inst->capture[0].data);
-  enif_free(inst->capture[1].data);
-  while (inst->inbox_head) inbox_drop_head(inst);
-  enif_free(inst->host_msg);
-  if (inst->mod) enif_release_resource(inst->mod);
+  enif_free(inst->capture.buf[0].data);
+  enif_free(inst->capture.buf[1].data);
+  while (inst->inbox.head) inbox_drop_head(inst);
+  enif_free(inst->host.msg);
+  if (inst->wasm.mod) enif_release_resource(inst->wasm.mod);
   pthread_mutex_destroy(&inst->mu);
   pthread_cond_destroy(&inst->cv);
 }
 
 /* Ask the running request to end. Called with the mutex held. */
 void stop_current(instance_t *inst) {
-  inst->abort = 1;
+  inst->host.abort = 1;
   __atomic_store_n(&inst->interrupt, 1, __ATOMIC_RELEASE);
   pthread_cond_broadcast(&inst->cv);
 }
@@ -137,8 +137,8 @@ void handle_dtor(ErlNifEnv *env, void *obj) {
   instance_t *inst = h->inst;
   if (!inst) return;
   pthread_mutex_lock(&inst->mu);
-  inst->stopping = 1;
-  if (inst->current) inst->current->cancelled = 1;
+  inst->queue.stopping = 1;
+  if (inst->queue.current) inst->queue.current->cancelled = 1;
   stop_current(inst);
   pthread_mutex_unlock(&inst->mu);
   enif_release_resource(inst);
@@ -149,11 +149,11 @@ void handle_dtor(ErlNifEnv *env, void *obj) {
 void instance_down(ErlNifEnv *env, void *obj, ErlNifPid *pid, ErlNifMonitor *mon) {
   instance_t *inst = obj;
   pthread_mutex_lock(&inst->mu);
-  if (inst->current && enif_compare_pids(&inst->current->caller, pid) == 0) {
-    inst->current->cancelled = 1;
+  if (inst->queue.current && enif_compare_pids(&inst->queue.current->caller, pid) == 0) {
+    inst->queue.current->cancelled = 1;
     stop_current(inst);
   }
-  for (req_t *r = inst->head; r; r = r->next)
+  for (req_t *r = inst->queue.head; r; r = r->next)
     if (enif_compare_pids(&r->caller, pid) == 0) r->cancelled = 1;
   pthread_mutex_unlock(&inst->mu);
 }
@@ -182,25 +182,25 @@ ERL_NIF_TERM enqueue(ErlNifEnv *env, instance_t *inst, enum req_kind kind, ERL_N
   r->opts = enif_make_copy(r->env, opts);
 
   pthread_mutex_lock(&inst->mu);
-  if (inst->stopping) {
+  if (inst->queue.stopping) {
     pthread_mutex_unlock(&inst->mu);
     req_free(r);
     return mk_error_s(env, "call", "stopped", "instance is stopped");
   }
   /* A host function calling back into the instance it runs on would wait for
    * itself: the guest is parked until this process answers the host call. */
-  if (inst->state == ST_IN_HOST && enif_compare_pids(&inst->host_target, &r->caller) == 0) {
+  if (inst->queue.state == ST_IN_HOST && enif_compare_pids(&inst->host.target, &r->caller) == 0) {
     pthread_mutex_unlock(&inst->mu);
     req_free(r);
     return mk_error_s(env, "call", "reentrant",
                       "a host function cannot call the instance it is running on");
   }
   r->monitored = enif_monitor_process(env, inst, &r->caller, &r->mon) == 0;
-  if (inst->tail)
-    inst->tail->next = r;
+  if (inst->queue.tail)
+    inst->queue.tail->next = r;
   else
-    inst->head = r;
-  inst->tail = r;
+    inst->queue.head = r;
+  inst->queue.tail = r;
   pthread_cond_broadcast(&inst->cv);
   pthread_mutex_unlock(&inst->mu);
   return atom_enqueued;
@@ -216,13 +216,13 @@ ERL_NIF_TERM with_export(ErlNifEnv *env, ERL_NIF_TERM handle, ERL_NIF_TERM name,
   if (!get_handle(env, handle, &inst) || !enif_inspect_iolist_as_binary(env, name, &nm))
     return enif_make_badarg(env);
   pthread_mutex_lock(&inst->mu);
-  if (inst->state == ST_RUNNING) {
+  if (inst->queue.state == ST_RUNNING) {
     pthread_mutex_unlock(&inst->mu);
     return mk_error_s(env, what, "busy", "guest is running");
   }
-  if (!inst->instantiated ||
-      !wasmtime_instance_export_get(inst->ctx, &inst->instance, (const char *)nm.data, nm.size,
-                                    ext) ||
+  if (!inst->wasm.instantiated ||
+      !wasmtime_instance_export_get(inst->wasm.ctx, &inst->wasm.instance, (const char *)nm.data,
+                                    nm.size, ext) ||
       ext->kind != kind) {
     pthread_mutex_unlock(&inst->mu);
     return mk_error(env, what, "no_such_export", (const char *)nm.data, nm.size);
@@ -236,7 +236,7 @@ ERL_NIF_TERM with_ref(ErlNifEnv *env, ERL_NIF_TERM term, ref_t **out) {
   ref_t *r;
   if (!enif_get_resource(env, term, ref_type, (void **)&r)) return enif_make_badarg(env);
   pthread_mutex_lock(&r->inst->mu);
-  if (r->inst->state == ST_RUNNING) {
+  if (r->inst->queue.state == ST_RUNNING) {
     pthread_mutex_unlock(&r->inst->mu);
     return mk_error_s(env, "ref", "busy", "guest is running");
   }
@@ -256,25 +256,25 @@ ERL_NIF_TERM with_memory(ErlNifEnv *env, ERL_NIF_TERM handle, ERL_NIF_TERM name,
   if (!get_handle(env, handle, &inst) || (named && !enif_inspect_iolist_as_binary(env, name, &nm)))
     return enif_make_badarg(env);
   pthread_mutex_lock(&inst->mu);
-  if (inst->state == ST_RUNNING) {
+  if (inst->queue.state == ST_RUNNING) {
     pthread_mutex_unlock(&inst->mu);
     return mk_error_s(env, "memory", "busy", "guest is running");
   }
-  if (!inst->instantiated) {
+  if (!inst->wasm.instantiated) {
     pthread_mutex_unlock(&inst->mu);
     return mk_error_s(env, "memory", "no_memory", "instance exports no memory");
   }
   if (named) {
     wasmtime_extern_t ext;
-    if (!wasmtime_instance_export_get(inst->ctx, &inst->instance, (const char *)nm.data, nm.size,
-                                      &ext) ||
+    if (!wasmtime_instance_export_get(inst->wasm.ctx, &inst->wasm.instance, (const char *)nm.data,
+                                      nm.size, &ext) ||
         ext.kind != WASMTIME_EXTERN_MEMORY) {
       pthread_mutex_unlock(&inst->mu);
       return mk_error(env, "memory", "no_memory", (const char *)nm.data, nm.size);
     }
     *mem = ext.of.memory;
-  } else if (inst->has_memory) {
-    *mem = inst->memory;
+  } else if (inst->wasm.has_memory) {
+    *mem = inst->wasm.memory;
   } else {
     pthread_mutex_unlock(&inst->mu);
     return mk_error_s(env, "memory", "no_memory", "instance exports no memory");

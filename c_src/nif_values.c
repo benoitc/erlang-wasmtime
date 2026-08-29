@@ -150,9 +150,9 @@ ERL_NIF_TERM val_to_term(ErlNifEnv *env, instance_t *inst, wasmtime_val_t *v) {
     return mk_ref(env, inst, &ref);
   case WASMTIME_ANYREF:
     if (wasmtime_anyref_is_null(&v->of.anyref)) return atom_null;
-    if (wasmtime_anyref_is_i31(inst->ctx, &v->of.anyref)) {
+    if (wasmtime_anyref_is_i31(inst->wasm.ctx, &v->of.anyref)) {
       int32_t n = 0;
-      wasmtime_anyref_i31_get_s(inst->ctx, &v->of.anyref, &n);
+      wasmtime_anyref_i31_get_s(inst->wasm.ctx, &v->of.anyref, &n);
       wasmtime_anyref_unroot(&v->of.anyref);
       return enif_make_tuple2(env, atom_i31, enif_make_int(env, n));
     }
@@ -217,7 +217,7 @@ const char *term_to_val(ErlNifEnv *env, instance_t *inst, ERL_NIF_TERM term, con
       enif_is_identical(tup[0], atom_i31)) {
     if (!enif_get_int64(env, tup[1], &n) || n < -(1 << 30) || n >= (1 << 30)) return "badarg";
     v->kind = WASMTIME_ANYREF;
-    wasmtime_anyref_from_i31(inst->ctx, (uint32_t)n, &v->of.anyref);
+    wasmtime_anyref_from_i31(inst->wasm.ctx, (uint32_t)n, &v->of.anyref);
     return NULL;
   }
 #endif

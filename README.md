@@ -70,7 +70,7 @@ Requires OTP 27 or later.
 - [Troubleshooting](docs/troubleshooting.md)
 - [Design](docs/design.md): how the NIF is put together, for contributors; see also [CONTRIBUTING.md](CONTRIBUTING.md)
 - [Features](docs/features.md): what is implemented, what is refused, what is deferred
-- [Examples](examples/README.md): a guest that reads ETS, logs and notifies processes
+- [Examples](examples/README.md): user-defined event transforms in JavaScript, a guest that reads ETS, logs and notifies processes
 
 ## Related
 

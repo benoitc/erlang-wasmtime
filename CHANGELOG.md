@@ -43,6 +43,8 @@ First release.
   arrives as `{wasmtime_stream, Ref, Kind, Bytes}` in the `stream` process;
   `inbox_limit`; `ref/1`. Runtime-only builds load the stdin forwarding
   shim precompiled per platform from `priv/shims`.
+- `examples/transform`: user-defined event transforms, one QuickJS worker
+  per script over streams, with reload, timeouts and memory limits.
 - References across the boundary: `funcref`, `externref` and GC values as
   `ref()` terms in calls, host functions, globals and tables; `null` and
   `{i31, N}`; `externref/2`, `externref_data/1`, `call_ref/3,4`,

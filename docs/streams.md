@@ -40,9 +40,12 @@ ok = wasmtime:close(Inst),
   then returns what is queued. Stdin is a byte stream: the guest's reads
   decide where messages start and end, so agree on a framing (one line per
   message is the usual one).
-- `stdout`, `stderr => stream`: every write is one message, delivered at
-  once. Whether a write is a whole line depends on the guest's buffering:
-  QuickJS writes lines at once, CPython needs `-u` or `flush=True`.
+- `stdout`, `stderr => stream`: every write the guest makes is one
+  message, delivered at once. What counts as a write is the guest's
+  buffering: a C library treats a non-terminal stdout as fully buffered
+  (the first line often slips through, later ones wait), so a script must
+  flush after each reply: `std.out.flush()` in QuickJS, `-u` or
+  `flush=True` in CPython.
 - `close/1` ends the input: the guest drains what is queued, then its reads
   return end of file, which is how a read loop ends.
 - `call_async/3` starts the program without waiting; `await/2,3` collects

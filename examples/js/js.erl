@@ -54,8 +54,8 @@ serve(Engine, Dir, File) ->
 
 ask(Worker, Line) -> ask(Worker, Line, ?DEFAULT_TIMEOUT).
 
-%% One request, one reply line. QuickJS writes each line at once, so a
-%% stdout message is a whole line.
+%% One request, one reply line. The script must std.out.flush() after each
+%% line (stdout is buffered past the first write); a message is then a line.
 ask(#{inst := Inst, ref := Ref}, Line, Timeout) ->
     case wasmtime:send(Inst, [Line, $\n]) of
         ok ->

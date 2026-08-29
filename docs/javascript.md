@@ -98,6 +98,7 @@ let line;
 while ((line = std.in.getline()) !== null) {
   const req = JSON.parse(line);
   std.out.puts(JSON.stringify({sku: req.sku, price: 42}) + "\n");
+  std.out.flush();
 }
 ```
 
@@ -122,10 +123,12 @@ ok = wasmtime:close(Inst),
 input, `getline` returns `null`, the loop ends and `await` returns. A
 `timeout` on `await/3` or `wasmtime:interrupt/1` still stops it at any time.
 
-Measured with `qjs-wasi.wasm`: `std.out.puts` and `console.log` each hand
-the line to Erlang at once, no `std.out.flush()` needed. One line per
-request is the script's convention, not a rule: stdin is a byte stream, and
-a message from `send/2` can be split or merged by the script's own reads.
+Call `std.out.flush()` after each reply. Stdout is not a terminal, so the
+C library buffers it: measured with `qjs-wasi.wasm`, the first line a
+script writes leaves at once and every later one waits in the buffer until
+the script exits. One line per request is the script's convention, not a
+rule: stdin is a byte stream, and a message from `send/2` can be split or
+merged by the script's own reads.
 
 `examples/js/js.erl` wraps this as `js:serve/3`, `js:ask/2` and `js:stop/1`.
 

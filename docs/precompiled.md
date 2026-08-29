@@ -2,9 +2,9 @@
 
 `serialize/1` turns a compiled module into Wasmtime's precompiled form, and
 `deserialize/1` loads that form without compiling. You need it when compile
-time matters at start-up (a 30 MB interpreter takes about 350 ms to compile,
-2 ms to deserialize) or when the machine that runs modules should not carry
-the compiler at all.
+time matters at start-up (the 30 MB CPython module takes about 350 ms to
+compile and 4 ms to deserialize from its 17 MB precompiled form) or when the
+machine that runs modules should not carry the compiler at all.
 
 ## Compile once, at build time
 

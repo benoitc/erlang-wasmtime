@@ -8,7 +8,9 @@
 # produces the archives. One recipe, so a fallback build and a published
 # archive are the same thing.
 #
-#   full      Wasmtime's default feature set: compiler, WAT, WASI, GC, ...
+#   full      Wasmtime's default feature set: compiler, WAT, WASI, GC, ...,
+#             built the way Wasmtime builds its own release archives (LTO,
+#             panic abort, debug info stripped)
 #   runtime   no compiler, no WAT: wasi, async, gc, gc-drc, threads,
 #             pooling-allocator, disable-logging, built with Wasmtime's own
 #             size flags (opt-level s, LTO, one codegen unit, panic abort).
@@ -42,6 +44,8 @@ done
 case "$VARIANT" in
     full)
         FEATURES=""
+        export CARGO_PROFILE_RELEASE_LTO=true
+        export CARGO_PROFILE_RELEASE_PANIC=abort
         ;;
     runtime)
         FEATURES="-DWASMTIME_DISABLE_ALL_FEATURES=ON -DWASMTIME_FEATURE_WASI=ON \

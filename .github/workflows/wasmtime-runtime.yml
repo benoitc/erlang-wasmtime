@@ -8,6 +8,11 @@ name: wasmtime-runtime
 
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Overwrite assets that already exist on the release (only before their checksums are pinned)"
+        type: boolean
+        default: false
   push:
     tags: ["wasmtime-runtime-v*"]
 
@@ -166,8 +171,17 @@ jobs:
           V="$(tr -d '[:space:]' < scripts/wasmtime.version)"
           TAG="wasmtime-runtime-$V"
           gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --title "Wasmtime C API $V for erlang_wasmtime" \
-              --notes "Runtime-only (no compiler, with WASI) builds of the Wasmtime C API, and the full C API for FreeBSD. Built by .github/workflows/wasmtime-runtime.yml with scripts/build-wasmtime.sh."
+            gh release create "$TAG" --prerelease --title "Wasmtime C API $V for erlang_wasmtime" \
+              --notes "Runtime-only (no compiler, with WASI) builds of the Wasmtime C API, and the full C API for FreeBSD. Built by .github/workflows/wasmtime-runtime.yml with scripts/build-wasmtime.sh. Pinned by checksum in scripts/wasmtime-runtime.sha256 and scripts/wasmtime.sha256 of the erlang_wasmtime releases that use it; assets are never replaced once pinned."
+          # Assets that exist are pinned somewhere: refuse to replace them
+          # unless the run says so explicitly.
+          if [ "${{ inputs.force }}" != "true" ]; then
+            for f in artifacts/*.tar.xz; do
+              if gh release view "$TAG" --json assets -q '.assets[].name' | grep -qx "$(basename "$f")"; then
+                echo "$(basename "$f") already exists on $TAG; re-run with force to replace it"; exit 1
+              fi
+            done
+          fi
           gh release upload "$TAG" artifacts/*.tar.xz artifacts/SHA256SUMS --clobber
           echo "Paste into scripts/wasmtime-runtime.sha256 (and the FreeBSD line into scripts/wasmtime.sha256):"
           cat artifacts/SHA256SUMS

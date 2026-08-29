@@ -83,6 +83,39 @@ jobs:
           name: ct-logs-${{ matrix.os }}-otp${{ matrix.otp }}
           path: _build/test/logs
 
+  asan:
+    name: AddressSanitizer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          rebar3-version: "3.24.0"
+      - name: Cache the Wasmtime C API
+        uses: actions/cache@v4
+        with:
+          path: _build/wasmtime
+          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version') }}
+      - name: Build the NIF under ASan
+        run: WASMTIME_NIF_SANITIZE=address rebar3 compile
+      # The runtime must be in the emulator before the NIF loads. Leak
+      # checking is off: the emulator's own exit-time state would drown the
+      # report; every other class of error aborts the run.
+      - name: Run the suites with the ASan runtime preloaded
+        run: |
+          ASAN_RT="$(gcc -print-file-name=libasan.so)"
+          test -f "$ASAN_RT"
+          LD_PRELOAD="$ASAN_RT" \
+          ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:alloc_dealloc_mismatch=0" \
+          rebar3 ct
+      - name: Upload CT logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ct-logs-asan
+          path: _build/test/logs
+
   freebsd:
     name: Test on FreeBSD
     runs-on: ubuntu-24.04

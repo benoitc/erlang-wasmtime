@@ -11,8 +11,10 @@ SRC="$ROOT/c_src/wasmtime_nif.c"
 OUT="$ROOT/priv/wasmtime_nif.so"
 VERSION_FILE="$ROOT/scripts/wasmtime.version"
 
-# Up to date when nothing the NIF depends on is newer than it.
-if [ -f "$OUT" ] && [ -z "$(find "$SRC" "$VERSION_FILE" "$0" -newer "$OUT")" ]; then
+# Up to date when nothing the NIF depends on is newer than it. A sanitizer
+# build is never considered up to date: the flags are not in the timestamp.
+if [ -z "${WASMTIME_NIF_SANITIZE:-}" ] && [ -f "$OUT" ] &&
+   [ -z "$(find "$SRC" "$VERSION_FILE" "$0" -newer "$OUT")" ]; then
     exit 0
 fi
 

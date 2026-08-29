@@ -1,11 +1,11 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Build priv/wasmtime_nif.so, linking the Wasmtime C API statically.
 #
 # Runs as a rebar3 pre_hook. Unlike an optional NIF, this one is the product,
 # so any failure fails the build.
 #
 # Set WASMTIME_NIF_SANITIZE=address (or thread) to build under a sanitizer.
-set -euo pipefail
+set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/c_src/wasmtime_nif.c"
 OUT="$ROOT/priv/wasmtime_nif.so"

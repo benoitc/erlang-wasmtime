@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Fetch the pinned Wasmtime C API for this platform.
 #
 # Prints the directory holding include/ and lib/ on stdout. The release
@@ -10,7 +10,7 @@
 # Overrides:
 #   WASMTIME_C_API_DIR   use this directory (include/, lib/) and do not download
 #   WASMTIME_CACHE_DIR   where to store downloads (default: _build/wasmtime)
-set -euo pipefail
+set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(tr -d '[:space:]' < "$ROOT/scripts/wasmtime.version")"
 SUMS="$ROOT/scripts/wasmtime.sha256"

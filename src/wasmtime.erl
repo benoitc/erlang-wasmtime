@@ -258,18 +258,16 @@ proposal_overrides(Proposals) when is_map(Proposals) ->
         end,
         Overrides
     ),
-    Simd = maps:get(simd, Proposals, true),
-    Relaxed = maps:get(relaxed_simd, Proposals, false),
-    if
-        not Simd andalso Relaxed ->
+    case {maps:get(simd, Proposals, true), maps:get(relaxed_simd, Proposals, false)} of
+        {false, true} ->
             {error, #{
                 class => compile,
                 kind => badarg,
                 message => ~"relaxed_simd needs simd: disable both or neither"
             }};
-        not Simd ->
+        {false, false} ->
             {ok, lists:usort([{relaxed_simd, false} | Overrides])};
-        true ->
+        {true, _} ->
             {ok, Overrides}
     end.
 

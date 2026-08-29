@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1 (2026-08-29)
+
+- Wasmtime archives come from `wasmtime-runtime-<version>-r<revision>`
+  releases (`scripts/wasmtime-runtime.rev`); a build recipe change gets a
+  new revision instead of replacing pinned assets. Revision 2 rebuilds every
+  archive with the recipe this release ships: the FreeBSD full library now
+  has LTO and panic abort like Wasmtime's own releases.
+- Hex package lists the C header, the precompiled shims and the examples;
+  ex_doc covers every guide, the design note, contributing and releasing.
+
 ## 0.1.0 (2026-08-29)
 
 First release.

@@ -48,6 +48,7 @@ Requires OTP 27 or later.
 
 ## Documentation
 
+- [Run JavaScript](docs/javascript.md): QuickJS in the sandbox, the shortest path to a demo
 - [Getting started](docs/getting-started.md)
 - [Host functions](docs/host-functions.md)
 - [WASI](docs/wasi.md)

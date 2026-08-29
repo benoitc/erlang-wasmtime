@@ -10,3 +10,4 @@ erl_crash.dump
 rebar3.crashdump
 c_src/*.o
 priv/*.dSYM/
+priv/*.wasm

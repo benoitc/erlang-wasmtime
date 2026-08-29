@@ -1,5 +1,10 @@
 # Examples
 
+## js
+
+QuickJS compiled to WASI, wrapped in `js:load/1`, `js:eval/2,3` and
+`js:run_file/3`. The guide is [docs/javascript.md](../docs/javascript.md).
+
 ## bridge
 
 A guest module that talks to the VM through four host functions, and a

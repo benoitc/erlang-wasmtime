@@ -64,11 +64,17 @@ jobs:
           mkdir -p zigw
           # Rust links its dynamic musl std against libgcc_s; zig has no such
           # library but bundles libunwind, which provides the same symbols.
+          # cc-rs adds --target=<rust triple>, which zig cannot parse next to
+          # its own -target; the wrapper owns the target.
           cat > zigw/cc <<'EOF'
           #!/bin/bash
           args=()
           for a in "$@"; do
-            case "$a" in -lgcc_s) args+=("-lunwind") ;; *) args+=("$a") ;; esac
+            case "$a" in
+              -lgcc_s) args+=("-lunwind") ;;
+              --target=*) ;;
+              *) args+=("$a") ;;
+            esac
           done
           exec zig cc -target ${{ matrix.zig_target }} "${args[@]}"
           EOF

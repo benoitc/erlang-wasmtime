@@ -43,7 +43,7 @@ jobs:
         run: |
           # the whole toolchain except nm, so the link-test probe is what runs
           mkdir -p nonm
-          for p in /usr/bin/* /bin/*; do ln -sf "$p" "nonm/$(basename "$p")"; done
+          for p in /usr/bin/* /bin/*; do [ -d "$p" ] || ln -sfn "$p" "nonm/$(basename "$p")"; done
           rm -f nonm/nm
           ln -sf "$(command -v erl)" nonm/erl
           touch c_src/wasmtime_nif.c

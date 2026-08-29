@@ -23,7 +23,8 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Structured traps | `trace` on trap errors: `[#{func_index, func_offset, func_name, module_name}]`, innermost first |
 | Validation without compiling | `validate/1`, `validate/2` with options |
 | Compile options | `compile/2`: `opt_level` (`none`, `speed`, `speed_and_size`), `proposals` on or off, `fuel`; `module_options/1`; `deserialize/2` to pick the engine |
-| Globals and tables from Erlang | `global_get/2`, `global_set/3`, `table_size/2`, `table_grow/3` (null elements) |
+| Globals and tables from Erlang | `global_get/2`, `global_set/3`, `table_size/2`, `table_get/3`, `table_set/4`, `table_grow/3,4` |
+| References across the boundary | `funcref`, `externref` and GC values as `ref()` terms, `null`, `{i31, N}`: in calls, host signatures, globals and tables; `externref/2` wraps a term; `call_ref/3,4`; `struct_get/set`, `array_len/get/set`; `gc/1`; see [references](references.md) |
 | WASI stdio in memory | `stdin => {binary, _}`, `stdout`/`stderr => capture` with `read_output/1` and `output_limit`; `args`/`env => inherit` |
 | Streams | `send/2`, `close/1`, `inbox_limit`; `stdin`/`stdout`/`stderr => stream`; the `erlang.send` and `erlang.recv` imports; `{wasmtime_stream, Ref, Kind, Bytes}` to the `stream` process; see [streams](streams.md) |
 | Runtime-only builds | `WASMTIME_RUNTIME_ONLY=1`: no compiler, 4 MB; `features/0` reports the linked library's capabilities; see [building](building.md) |
@@ -54,7 +55,9 @@ feature is missing the runtime says so with an error; it does not approximate.
 |---|---|
 | Import the module does not provide | `class => link` |
 | Non-function import from Erlang | `kind => unsupported_import` |
-| `funcref`, `externref`, GC types in a call or host signature | `kind => unsupported_type` |
+| `exnref` in a call or host signature, or `v128` and references in one signature | `kind => unsupported_type` |
+| A reference used with another instance | `kind => wrong_instance` |
+| `null` for a non-nullable type, a reference of the wrong family, an `{i31, N}` out of range | `kind => badarg` |
 | Memory access while the guest runs | `kind => busy` |
 | Memory access on an instance without memory | `kind => no_memory` |
 | Out of range memory access | `kind => out_of_bounds` |
@@ -69,14 +72,13 @@ feature is missing the runtime says so with an error; it does not approximate.
 | An `imports` entry for `erlang.send` or `erlang.recv` | `kind => reserved_import` |
 | `erlang.send` or `erlang.recv` imported with another type | `kind => unsupported_type` |
 | `stdin => stream` on a runtime-only build of a platform without a shim in `priv/shims` | `kind => unavailable` |
-| Reading a reference-typed global | `kind => unsupported_type` |
 
 ## Deferred
 
-- **Reference and GC values across the boundary.** Modules using them
-  internally run; only conversion to and from Erlang terms is missing (that
-  includes reading `funcref`/`externref` globals and table elements; tables
-  can be sized and grown with nulls). Needs a rooting and lifetime design.
+- **Creating GC structs and arrays from Erlang.** Values the guest creates
+  can be read and written field by field; creating one needs a type handle
+  the C API only gives for an existing value. Exception references
+  (`exnref`) are not exposed.
 - **Thread pool.** Measured on an M-series Mac: 13,900 instantiate, call and
   drop cycles per second from one process, 34,500 per second from eight, with
   one OS thread per instance. That covers "thousands of short-lived instances

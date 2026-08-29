@@ -16,7 +16,8 @@
     host_functions/1,
     memory_access/1,
     interrupt/1,
-    streams/1
+    streams/1,
+    references/1
 ]).
 
 all() ->
@@ -30,7 +31,8 @@ all() ->
         host_functions,
         memory_access,
         interrupt,
-        streams
+        streams,
+        references
     ].
 
 init_per_suite(Config) ->
@@ -152,3 +154,15 @@ streams(Config) ->
         _ ->
             ok
     end.
+
+references(Config) ->
+    {ok, Inst} = wasmtime:instantiate(load(Config, "refs")),
+    {ok, Ref} = wasmtime:externref(Inst, #{k => v}),
+    {ok, [Back]} = wasmtime:call(Inst, ~"id_ext", [Ref]),
+    {ok, #{k := v}} = wasmtime:externref_data(Back),
+    {ok, Add} = wasmtime:table_get(Inst, ~"t", 0),
+    #{kind := funcref} = wasmtime:ref_info(Add),
+    {ok, [5]} = wasmtime:call_ref(Inst, Add, [2, 3]),
+    {ok, null} = wasmtime:table_get(Inst, ~"t", 1),
+    ok = wasmtime:gc(Inst),
+    ok.

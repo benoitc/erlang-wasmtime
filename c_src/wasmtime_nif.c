@@ -97,7 +97,9 @@ static ERL_NIF_TERM atom_ok, atom_error, atom_true, atom_false, atom_compiler, a
     atom_read, atom_write, atom_nan, atom_infinity, atom_neg_infinity, atom_class, atom_kind,
     atom_message, atom_status, atom_not_running, atom_func, atom_global, atom_table, atom_memory,
     atom_tag, atom_wasmtime_result, atom_wasmtime_host_call, atom_no_pending_host_call,
-    atom_enqueued, atom_stream, atom_wasmtime_stream, atom_stdout, atom_stderr, atom_channel;
+    atom_enqueued, atom_stream, atom_wasmtime_stream, atom_stdout, atom_stderr, atom_channel,
+    atom_null, atom_i31, atom_externref, atom_funcref, atom_struct, atom_array, atom_anyref,
+    atom_instance;
 
 static ERL_NIF_TERM mk_atom(ErlNifEnv *env, const char *s) {
   ERL_NIF_TERM a;
@@ -230,16 +232,65 @@ static ERL_NIF_TERM error_to_term(ErlNifEnv *env, wasmtime_error_t *err, const c
 
 /* wasm_valtype_kind aborts the process on v128 and on non-nullable references
  * (a TODO in Wasmtime's C API); wasmtime_valtype_new classifies every type. */
-static uint8_t kind_of(const wasm_valtype_t *vt) {
-  wasmtime_valtype_t t;
-  wasmtime_valtype_new(vt, &t);
-  uint8_t k = t.kind;
-  wasmtime_valtype_delete(&t);
-  return k;
+/* A value type as the boundary sees it: the kind, and for references the
+ * family that decides which Erlang terms are accepted and which
+ * wasmtime_val_t kind carries them. wasm_valtype_kind aborts the process on
+ * GC and non-nullable types, so everything goes through wasmtime_valtype_t. */
+enum { FAM_NUM, FAM_EXTERN, FAM_FUNC, FAM_ANY, FAM_EXN };
+typedef struct {
+  uint8_t kind; /* WASMTIME_VALTYPE_KIND_* */
+  uint8_t fam;
+  uint8_t nullable;
+} vtype_t;
+
+static void vtype_of(const wasm_valtype_t *vt, vtype_t *t) {
+  wasmtime_valtype_t w;
+  wasmtime_valtype_new(vt, &w);
+  t->kind = w.kind;
+  t->fam = FAM_NUM;
+  t->nullable = 1;
+  if (w.kind == WASMTIME_VALTYPE_KIND_REF) {
+    t->nullable = w.reftype.nullable;
+    switch (w.reftype.heaptype.kind) {
+    case WASMTIME_HEAPTYPE_KIND_EXTERN:
+    case WASMTIME_HEAPTYPE_KIND_NOEXTERN: t->fam = FAM_EXTERN; break;
+    case WASMTIME_HEAPTYPE_KIND_FUNC:
+    case WASMTIME_HEAPTYPE_KIND_CONCRETE_FUNC:
+    case WASMTIME_HEAPTYPE_KIND_NOFUNC: t->fam = FAM_FUNC; break;
+    case WASMTIME_HEAPTYPE_KIND_EXN:
+    case WASMTIME_HEAPTYPE_KIND_CONCRETE_EXN:
+    case WASMTIME_HEAPTYPE_KIND_NOEXN: t->fam = FAM_EXN; break;
+    default: t->fam = FAM_ANY; break;
+    }
+  }
+  wasmtime_valtype_delete(&w);
 }
 
-static int ref_kind(uint8_t k) {
-  return k == WASMTIME_VALTYPE_KIND_REF;
+static uint8_t kind_of(const wasm_valtype_t *vt) {
+  vtype_t t;
+  vtype_of(vt, &t);
+  return t.kind;
+}
+
+/* How a function type crosses: the raw path carries numbers and v128, the
+ * typed path carries references (and checks them). Both at once, or an
+ * exception reference, cannot cross. */
+typedef struct {
+  int refs, v128, exn;
+} shape_t;
+
+static shape_t shape_of(const wasm_functype_t *ft) {
+  shape_t sh = {0, 0, 0};
+  const wasm_valtype_vec_t *vs[2] = {wasm_functype_params(ft), wasm_functype_results(ft)};
+  for (int j = 0; j < 2; j++)
+    for (size_t i = 0; i < vs[j]->size; i++) {
+      vtype_t t;
+      vtype_of(vs[j]->data[i], &t);
+      if (t.kind == WASMTIME_VALTYPE_KIND_V128) sh.v128 = 1;
+      if (t.kind == WASMTIME_VALTYPE_KIND_REF) sh.refs = 1;
+      if (t.fam == FAM_EXN) sh.exn = 1;
+    }
+  return sh;
 }
 
 /* Values cross the boundary as wasmtime_val_raw_t: the typed wasmtime_val_t
@@ -346,6 +397,7 @@ typedef struct req {
 typedef struct {
   char *module, *name;
   wasm_functype_t *type;
+  int typed; /* references in the signature: the checked callback serves it */
 } hostfn_t;
 
 struct instance;
@@ -428,7 +480,184 @@ typedef struct {
   instance_t *inst;
 } handle_t;
 
-static ErlNifResourceType *module_type, *instance_type, *handle_type;
+static ErlNifResourceType *module_type, *instance_type, *handle_type, *ref_type;
+
+/* ------------------------------------------------------------ references -- */
+/* A reference the guest handed out, as an Erlang term. externref and anyref
+ * are owned GC roots (wasmtime_*_unroot takes no context and only drops a
+ * liveness Arc, so the destructor may run on any thread, even after the
+ * store is gone); funcref is a store-bound handle with nothing to release.
+ * The resource keeps its instance alive so the store outlives the term. */
+enum { REF_EXTERN, REF_FUNC, REF_ANY };
+
+typedef struct {
+  instance_t *inst;
+  uint8_t kind;
+  union {
+    wasmtime_func_t func;
+#ifdef WASMTIME_FEATURE_GC
+    wasmtime_externref_t ext;
+    wasmtime_anyref_t any;
+#endif
+  } of;
+} ref_t;
+
+static void ref_dtor(ErlNifEnv *env, void *obj) {
+  ref_t *r = obj;
+#ifdef WASMTIME_FEATURE_GC
+  if (r->kind == REF_EXTERN) wasmtime_externref_unroot(&r->of.ext);
+  if (r->kind == REF_ANY) wasmtime_anyref_unroot(&r->of.any);
+#endif
+  enif_release_resource(r->inst);
+}
+
+/* Wraps `src` (whose root, if any, the resource takes over). */
+static ERL_NIF_TERM mk_ref(ErlNifEnv *env, instance_t *inst, const ref_t *src) {
+  ref_t *r = enif_alloc_resource(ref_type, sizeof *r);
+  *r = *src;
+  r->inst = inst;
+  enif_keep_resource(inst);
+  ERL_NIF_TERM t = enif_make_resource(env, r);
+  enif_release_resource(r);
+  return t;
+}
+
+/* A wasmtime_val_t as a term, taking over its root. 0 for a kind that
+ * cannot cross (exnref), unrooted. Needs exclusive use of the store. */
+static ERL_NIF_TERM val_to_term(ErlNifEnv *env, instance_t *inst, wasmtime_val_t *v) {
+  wasmtime_val_raw_t r;
+  ref_t ref;
+  switch (v->kind) {
+  case WASMTIME_I32: return enif_make_int(env, v->of.i32);
+  case WASMTIME_I64: return enif_make_int64(env, v->of.i64);
+  case WASMTIME_F32: r.f32 = v->of.f32; return raw_to_term(env, WASMTIME_VALTYPE_KIND_F32, &r);
+  case WASMTIME_F64: r.f64 = v->of.f64; return raw_to_term(env, WASMTIME_VALTYPE_KIND_F64, &r);
+  case WASMTIME_V128: return mk_binary(env, v->of.v128, 16);
+  case WASMTIME_FUNCREF:
+    if (wasmtime_funcref_is_null(&v->of.funcref)) return atom_null;
+    ref.kind = REF_FUNC;
+    ref.of.func = v->of.funcref;
+    return mk_ref(env, inst, &ref);
+#ifdef WASMTIME_FEATURE_GC
+  case WASMTIME_EXTERNREF:
+    if (wasmtime_externref_is_null(&v->of.externref)) return atom_null;
+    ref.kind = REF_EXTERN;
+    ref.of.ext = v->of.externref;
+    return mk_ref(env, inst, &ref);
+  case WASMTIME_ANYREF:
+    if (wasmtime_anyref_is_null(&v->of.anyref)) return atom_null;
+    if (wasmtime_anyref_is_i31(inst->ctx, &v->of.anyref)) {
+      int32_t n = 0;
+      wasmtime_anyref_i31_get_s(inst->ctx, &v->of.anyref, &n);
+      wasmtime_anyref_unroot(&v->of.anyref);
+      return enif_make_tuple2(env, atom_i31, enif_make_int(env, n));
+    }
+    ref.kind = REF_ANY;
+    ref.of.any = v->of.anyref;
+    return mk_ref(env, inst, &ref);
+#endif
+  default: wasmtime_val_unroot(v); return 0;
+  }
+}
+
+/* A term as an owned wasmtime_val_t of type `t`: a fresh root for
+ * references, which the caller unroots when it keeps no ownership. NULL on
+ * success, else the error kind. Needs exclusive use of the store. */
+static const char *term_to_val(ErlNifEnv *env, instance_t *inst, ERL_NIF_TERM term,
+                               const vtype_t *t, wasmtime_val_t *v) {
+  memset(v, 0, sizeof *v);
+  if (t->fam == FAM_NUM) {
+    wasmtime_val_raw_t r;
+    if (!term_to_raw(env, term, t->kind, &r)) return "badarg";
+    switch (t->kind) {
+    case WASMTIME_VALTYPE_KIND_I32:
+      v->kind = WASMTIME_I32;
+      v->of.i32 = r.i32;
+      return NULL;
+    case WASMTIME_VALTYPE_KIND_I64:
+      v->kind = WASMTIME_I64;
+      v->of.i64 = r.i64;
+      return NULL;
+    case WASMTIME_VALTYPE_KIND_F32:
+      v->kind = WASMTIME_F32;
+      v->of.f32 = r.f32;
+      return NULL;
+    case WASMTIME_VALTYPE_KIND_F64:
+      v->kind = WASMTIME_F64;
+      v->of.f64 = r.f64;
+      return NULL;
+    default:
+      v->kind = WASMTIME_V128;
+      memcpy(v->of.v128, r.v128, 16);
+      return NULL;
+    }
+  }
+  if (t->fam == FAM_EXN) return "unsupported_type";
+  if (enif_is_identical(term, atom_null)) {
+    if (!t->nullable) return "badarg";
+    v->kind = t->fam == FAM_FUNC ? WASMTIME_FUNCREF
+#ifdef WASMTIME_FEATURE_GC
+              : t->fam == FAM_EXTERN ? WASMTIME_EXTERNREF
+                                     : WASMTIME_ANYREF
+#else
+                                 : WASMTIME_FUNCREF
+#endif
+        ;
+    return NULL; /* zeroed: store_id 0 is null for every kind */
+  }
+#ifdef WASMTIME_FEATURE_GC
+  const ERL_NIF_TERM *tup;
+  int arity;
+  ErlNifSInt64 n;
+  if (t->fam == FAM_ANY && enif_get_tuple(env, term, &arity, &tup) && arity == 2 &&
+      enif_is_identical(tup[0], atom_i31)) {
+    if (!enif_get_int64(env, tup[1], &n) || n < -(1 << 30) || n >= (1 << 30)) return "badarg";
+    v->kind = WASMTIME_ANYREF;
+    wasmtime_anyref_from_i31(inst->ctx, (uint32_t)n, &v->of.anyref);
+    return NULL;
+  }
+#endif
+  ref_t *r;
+  if (!enif_get_resource(env, term, ref_type, (void **)&r)) return "badarg";
+  if (r->inst != inst) return "wrong_instance";
+  switch (t->fam) {
+  case FAM_FUNC:
+    if (r->kind != REF_FUNC) return "badarg";
+    v->kind = WASMTIME_FUNCREF;
+    v->of.funcref = r->of.func;
+    return NULL;
+#ifdef WASMTIME_FEATURE_GC
+  case FAM_EXTERN:
+    if (r->kind != REF_EXTERN) return "badarg";
+    v->kind = WASMTIME_EXTERNREF;
+    wasmtime_externref_clone(&r->of.ext, &v->of.externref);
+    return NULL;
+  default:
+    if (r->kind != REF_ANY) return "badarg";
+    v->kind = WASMTIME_ANYREF;
+    wasmtime_anyref_clone(&r->of.any, &v->of.anyref);
+    return NULL;
+#else
+  default: return "unavailable";
+#endif
+  }
+}
+
+static void unroot_vals(wasmtime_val_t *vals, size_t n) {
+  for (size_t i = 0; i < n; i++) wasmtime_val_unroot(&vals[i]);
+}
+
+/* The wasmtime_val_t in `v` was consumed or unrooted: report a term-side
+ * conversion failure as the call error. */
+static ERL_NIF_TERM conv_error(ErlNifEnv *env, const char *cls, const char *kind) {
+  if (strcmp(kind, "wrong_instance") == 0)
+    return mk_error_s(env, cls, kind, "the reference belongs to another instance");
+  if (strcmp(kind, "unsupported_type") == 0)
+    return mk_error_s(env, cls, kind, "exception references cannot cross the boundary");
+  if (strcmp(kind, "unavailable") == 0)
+    return mk_error_s(env, cls, kind, "this build of erlang_wasmtime has no GC support");
+  return mk_error_s(env, cls, kind, "value does not match the type");
+}
 /* One engine per distinct set of compile options. Fuel metering and the
  * optimization level change code generation and are part of a precompiled
  * module's compatibility check; proposal toggles change validation. Engines
@@ -682,31 +911,20 @@ static ERL_NIF_TERM outcome(instance_t *inst, ErlNifEnv *out, wasmtime_error_t *
 
 /* Runs on the instance thread, inside wasmtime_func_call. The mutex is not
  * held while the guest runs, so take it here. */
-static wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
-                                  size_t nvals) {
-  hostfn_env_t *he = envp;
-  instance_t *inst = he->inst;
-  hostfn_t *fn = &inst->hostfns[he->idx];
-  const wasm_valtype_vec_t *pt = wasm_functype_params(fn->type);
-  const wasm_valtype_vec_t *rt = wasm_functype_results(fn->type);
-  size_t nargs = pt->size, nresults = rt->size;
-  const char *fail = NULL;
-  int interrupted = 0;
+enum host_status { HOST_OK, HOST_INTERRUPTED, HOST_FAILED };
 
-  /* Read every argument before any result is written: they share `vals`. */
-  ErlNifEnv *menv = enif_alloc_env();
-  ERL_NIF_TERM list = enif_make_list(menv, 0);
-  for (size_t i = nargs; i > 0; i--)
-    list =
-        enif_make_list_cell(menv, raw_to_term(menv, kind_of(pt->data[i - 1]), &vals[i - 1]), list);
-
+/* Sends {wasmtime_host_call, Ref, Id, {Module, Name}, Args} (`args` lives in
+ * `menv`, consumed here) and waits for the reply. Returns with the mutex
+ * held. On HOST_OK, *results is the reply's result list in inst->reply_env;
+ * on HOST_FAILED, inst->host_failed is set or *fail names the reason. */
+static enum host_status host_exchange(instance_t *inst, hostfn_t *fn, ErlNifEnv *menv,
+                                      ERL_NIF_TERM args, ERL_NIF_TERM *results, const char **fail) {
+  *fail = NULL;
   pthread_mutex_lock(&inst->mu);
   if (inst->abort || inst->current->cancelled) {
     /* interrupted or cancelled before we got here: do not even ask */
-    pthread_mutex_unlock(&inst->mu);
     enif_free_env(menv);
-    inst->interrupted_fired = 1;
-    return wasmtime_trap_new("interrupted", 11);
+    return HOST_INTERRUPTED;
   }
   inst->state = ST_IN_HOST;
   inst->host_id = ++inst->host_seq;
@@ -722,61 +940,143 @@ static wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtim
                        enif_make_uint64(menv, inst->host_id),
                        enif_make_tuple2(menv, mk_binary(menv, fn->module, strlen(fn->module)),
                                         mk_binary(menv, fn->name, strlen(fn->name))),
-                       list);
+                       args);
   int sent = enif_send(NULL, &inst->host_target, menv, msg);
   enif_free_env(menv);
+  int interrupted = 0;
   if (!sent) {
-    fail = "host process is gone";
+    *fail = "host process is gone";
   } else {
     struct timespec deadline;
     add_ms(&deadline, inst->host_timeout_ms);
     while (!inst->has_reply && !inst->abort) {
       if (pthread_cond_timedwait(&inst->cv, &inst->mu, &deadline) == ETIMEDOUT) {
-        if (!inst->has_reply && !inst->abort) fail = "host function timed out";
+        if (!inst->has_reply && !inst->abort) *fail = "host function timed out";
         break;
       }
     }
-    if (!fail && inst->abort) interrupted = 1;
+    if (!*fail && inst->abort) interrupted = 1;
   }
   inst->state = ST_RUNNING;
+  if (interrupted) return HOST_INTERRUPTED;
+  if (*fail) return HOST_FAILED;
 
-  if (!fail && !interrupted) {
-    /* {ok, Results} | {error, Message :: binary()} */
-    ErlNifEnv *renv = inst->reply_env;
-    const ERL_NIF_TERM *tup;
-    int arity;
-    ErlNifBinary bin;
-    if (!enif_get_tuple(renv, inst->reply, &arity, &tup) || arity != 2) {
-      fail = "host function returned a malformed reply";
-    } else if (enif_is_identical(tup[0], atom_error)) {
-      if (!enif_inspect_iolist_as_binary(renv, tup[1], &bin)) {
-        bin.data = (unsigned char *)"host error";
-        bin.size = 10;
-      }
-      set_host_failure(inst, (const char *)bin.data, bin.size);
-    } else {
-      ERL_NIF_TERM l = tup[1], h;
-      size_t i = 0;
-      while (i < nresults && enif_get_list_cell(renv, l, &h, &l)) {
-        if (!term_to_raw(renv, h, kind_of(rt->data[i]), &vals[i])) {
-          fail = "host function returned a value of the wrong type";
-          break;
-        }
-        i++;
-      }
-      if (!fail && (i != nresults || !enif_is_empty_list(renv, l)))
-        fail = "host function returned the wrong number of values";
-    }
+  /* {ok, Results} | {error, Message :: binary()} */
+  ErlNifEnv *renv = inst->reply_env;
+  const ERL_NIF_TERM *tup;
+  int arity;
+  ErlNifBinary bin;
+  if (!enif_get_tuple(renv, inst->reply, &arity, &tup) || arity != 2) {
+    *fail = "host function returned a malformed reply";
+    return HOST_FAILED;
   }
-  pthread_mutex_unlock(&inst->mu);
+  if (enif_is_identical(tup[0], atom_error)) {
+    if (!enif_inspect_iolist_as_binary(renv, tup[1], &bin)) {
+      bin.data = (unsigned char *)"host error";
+      bin.size = 10;
+    }
+    set_host_failure(inst, (const char *)bin.data, bin.size);
+    return HOST_FAILED;
+  }
+  *results = tup[1];
+  return HOST_OK;
+}
 
-  if (interrupted) {
+/* After host_exchange, with the mutex released: the trap to return, if any. */
+static wasm_trap_t *host_outcome(instance_t *inst, enum host_status st, const char *fail) {
+  if (st == HOST_INTERRUPTED) {
     inst->interrupted_fired = 1;
     return wasmtime_trap_new("interrupted", 11);
   }
   if (fail) set_host_failure(inst, fail, strlen(fail));
   if (inst->host_failed) return wasmtime_trap_new(inst->host_msg, strlen(inst->host_msg));
   return NULL;
+}
+
+/* Runs on the instance thread, inside wasmtime_func_call, for imports whose
+ * signature has no references: values cross as wasmtime_val_raw_t. */
+static wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
+                                  size_t nvals) {
+  hostfn_env_t *he = envp;
+  instance_t *inst = he->inst;
+  hostfn_t *fn = &inst->hostfns[he->idx];
+  const wasm_valtype_vec_t *pt = wasm_functype_params(fn->type);
+  const wasm_valtype_vec_t *rt = wasm_functype_results(fn->type);
+  size_t nargs = pt->size, nresults = rt->size;
+  const char *fail = NULL;
+
+  /* Read every argument before any result is written: they share `vals`. */
+  ErlNifEnv *menv = enif_alloc_env();
+  ERL_NIF_TERM list = enif_make_list(menv, 0);
+  for (size_t i = nargs; i > 0; i--)
+    list =
+        enif_make_list_cell(menv, raw_to_term(menv, kind_of(pt->data[i - 1]), &vals[i - 1]), list);
+
+  ERL_NIF_TERM results;
+  enum host_status st = host_exchange(inst, fn, menv, list, &results, &fail);
+  if (st == HOST_OK) {
+    ErlNifEnv *renv = inst->reply_env;
+    ERL_NIF_TERM l = results, h;
+    size_t i = 0;
+    while (i < nresults && enif_get_list_cell(renv, l, &h, &l)) {
+      if (!term_to_raw(renv, h, kind_of(rt->data[i]), &vals[i])) {
+        fail = "host function returned a value of the wrong type";
+        break;
+      }
+      i++;
+    }
+    if (!fail && (i != nresults || !enif_is_empty_list(renv, l)))
+      fail = "host function returned the wrong number of values";
+  }
+  pthread_mutex_unlock(&inst->mu);
+  return host_outcome(inst, st, fail);
+}
+
+/* The same for imports with references in their signature: Wasmtime hands
+ * over rooted arguments (it unroots them and the results afterwards). */
+static wasm_trap_t *host_callback_typed(void *envp, wasmtime_caller_t *caller,
+                                        const wasmtime_val_t *args, size_t nargs,
+                                        wasmtime_val_t *results, size_t nresults) {
+  hostfn_env_t *he = envp;
+  instance_t *inst = he->inst;
+  hostfn_t *fn = &inst->hostfns[he->idx];
+  const wasm_valtype_vec_t *rt = wasm_functype_results(fn->type);
+  const char *fail = NULL;
+
+  ErlNifEnv *menv = enif_alloc_env();
+  ERL_NIF_TERM list = enif_make_list(menv, 0);
+  for (size_t i = nargs; i > 0; i--) {
+    wasmtime_val_t copy;
+    wasmtime_val_clone(&args[i - 1], &copy); /* the term takes this root over */
+    ERL_NIF_TERM t = val_to_term(menv, inst, &copy);
+    if (!t) {
+      enif_free_env(menv);
+      return wasmtime_trap_new("host function argument cannot cross the boundary", 47);
+    }
+    list = enif_make_list_cell(menv, t, list);
+  }
+
+  ERL_NIF_TERM rlist;
+  enum host_status st = host_exchange(inst, fn, menv, list, &rlist, &fail);
+  if (st == HOST_OK) {
+    ErlNifEnv *renv = inst->reply_env;
+    ERL_NIF_TERM l = rlist, h;
+    size_t i = 0;
+    while (i < nresults && enif_get_list_cell(renv, l, &h, &l)) {
+      vtype_t t;
+      vtype_of(rt->data[i], &t);
+      if (term_to_val(renv, inst, h, &t, &results[i])) {
+        fail = "host function returned a value of the wrong type";
+        break;
+      }
+      i++;
+    }
+    if (!fail && (i != nresults || !enif_is_empty_list(renv, l)))
+      fail = "host function returned the wrong number of values";
+    if (fail) unroot_vals(results, i);
+  }
+  pthread_mutex_unlock(&inst->mu);
+  return host_outcome(inst, st, fail);
 }
 
 /* --------------------------------------------------------------- streams -- */
@@ -1443,21 +1743,22 @@ static ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out)
       break;
     }
     const wasm_functype_t *ft = wasm_externtype_as_functype_const(et);
-    const wasm_valtype_vec_t *ps = wasm_functype_params(ft), *rs = wasm_functype_results(ft);
-    int refs = 0;
-    for (size_t i = 0; i < ps->size; i++) refs |= ref_kind(kind_of(ps->data[i]));
-    for (size_t i = 0; i < rs->size; i++) refs |= ref_kind(kind_of(rs->data[i]));
-    if (refs || rs->size > MAX_VALS) {
+    const wasm_valtype_vec_t *rs = wasm_functype_results(ft);
+    shape_t sh = shape_of(ft);
+    if (sh.exn || (sh.refs && sh.v128) || rs->size > MAX_VALS) {
       enif_free(module);
       enif_free(name);
       result = mk_error_s(out, "link", "unsupported_type",
-                          "host functions cannot take or return reference types");
+                          sh.exn    ? "host functions cannot take or return exception references"
+                          : sh.refs ? "v128 and references cannot mix in one signature"
+                                    : "too many results");
       break;
     }
     hostfn_t *fn = &inst->hostfns[inst->nhostfns];
     fn->module = module;
     fn->name = name;
     fn->type = wasm_functype_copy(ft);
+    fn->typed = sh.refs;
     hostfn_env_t *he = enif_alloc(sizeof *he);
     he->inst = inst;
     he->idx = inst->nhostfns;
@@ -1465,8 +1766,12 @@ static ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out)
     /* The linker owns `he` from here and frees it with enif_free, on the
      * error path too. */
     wasmtime_error_t *e =
-        wasmtime_linker_define_func_unchecked(inst->linker, module, strlen(module), name,
-                                              strlen(name), fn->type, host_callback, he, enif_free);
+        fn->typed
+            ? wasmtime_linker_define_func(inst->linker, module, strlen(module), name, strlen(name),
+                                          fn->type, host_callback_typed, he, enif_free)
+            : wasmtime_linker_define_func_unchecked(inst->linker, module, strlen(module), name,
+                                                    strlen(name), fn->type, host_callback, he,
+                                                    enif_free);
     if (e) {
       result = error_to_term(out, e, "link");
       break;
@@ -1512,21 +1817,83 @@ static ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out)
   return atom_ok;
 }
 
+/* Numbers and v128 cross through the raw API: the typed one aborts on v128. */
+static ERL_NIF_TERM call_raw(instance_t *inst, req_t *req, ErlNifEnv *out, wasmtime_func_t *func,
+                             const wasm_valtype_vec_t *ps, const wasm_valtype_vec_t *rs) {
+  ErlNifEnv *env = req->env;
+  wasmtime_val_raw_t vals[MAX_VALS];
+  ERL_NIF_TERM l = req->args, h;
+  for (size_t i = 0; enif_get_list_cell(env, l, &h, &l); i++)
+    if (!term_to_raw(env, h, kind_of(ps->data[i]), &vals[i]))
+      return mk_error_s(out, "call", "badarg", "argument does not match the parameter type");
+  wasm_trap_t *trap = NULL;
+  size_t nvals = ps->size > rs->size ? ps->size : rs->size;
+  wasmtime_error_t *e = wasmtime_func_call_unchecked(inst->ctx, func, vals, nvals, &trap);
+  ERL_NIF_TERM result = outcome(inst, out, e, trap, "call");
+  if (!enif_is_identical(result, atom_ok)) return result;
+  ERL_NIF_TERM list = enif_make_list(out, 0);
+  for (size_t i = rs->size; i > 0; i--)
+    list = enif_make_list_cell(out, raw_to_term(out, kind_of(rs->data[i - 1]), &vals[i - 1]), list);
+  return enif_make_tuple2(out, atom_ok, list);
+}
+
+/* References cross through the typed API: Wasmtime checks the arguments
+ * (including subtyping of concrete types) and roots the results. */
+static ERL_NIF_TERM call_typed(instance_t *inst, req_t *req, ErlNifEnv *out, wasmtime_func_t *func,
+                               const wasm_valtype_vec_t *ps, const wasm_valtype_vec_t *rs) {
+  ErlNifEnv *env = req->env;
+  wasmtime_val_t args[MAX_VALS], results[MAX_VALS];
+  ERL_NIF_TERM l = req->args, h;
+  size_t nargs = 0;
+  for (; enif_get_list_cell(env, l, &h, &l); nargs++) {
+    vtype_t t;
+    vtype_of(ps->data[nargs], &t);
+    const char *kind = term_to_val(env, inst, h, &t, &args[nargs]);
+    if (kind) {
+      unroot_vals(args, nargs);
+      return conv_error(out, "call", kind);
+    }
+  }
+  wasm_trap_t *trap = NULL;
+  wasmtime_error_t *e = wasmtime_func_call(inst->ctx, func, args, nargs, results, rs->size, &trap);
+  unroot_vals(args, nargs);
+  ERL_NIF_TERM result = outcome(inst, out, e, trap, "call");
+  if (!enif_is_identical(result, atom_ok)) return result;
+  ERL_NIF_TERM list = enif_make_list(out, 0);
+  int bad = 0;
+  for (size_t i = rs->size; i > 0; i--) {
+    ERL_NIF_TERM t = val_to_term(out, inst, &results[i - 1]);
+    if (!t) bad = 1;
+    list = enif_make_list_cell(out, t ? t : atom_undefined, list);
+  }
+  if (bad) return mk_error_s(out, "call", "unsupported_type", "a result cannot cross the boundary");
+  return enif_make_tuple2(out, atom_ok, list);
+}
+
 static ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
   ErlNifEnv *env = req->env;
   ErlNifBinary name;
-  if (!enif_inspect_iolist_as_binary(env, req->name, &name))
-    return mk_error_s(out, "call", "badarg", "export name must be a binary");
-  wasmtime_extern_t ext;
-  if (!wasmtime_instance_export_get(inst->ctx, &inst->instance, (const char *)name.data, name.size,
-                                    &ext))
-    return mk_error(out, "call", "no_such_export", (const char *)name.data, name.size);
-  if (ext.kind != WASMTIME_EXTERN_FUNC)
-    return mk_error(out, "call", "not_a_function", (const char *)name.data, name.size);
+  wasmtime_func_t func;
+  ref_t *r;
+  if (enif_get_resource(env, req->name, ref_type, (void **)&r)) {
+    /* call_ref: a funcref this instance handed out */
+    if (r->inst != inst) return conv_error(out, "call", "wrong_instance");
+    if (r->kind != REF_FUNC) return mk_error_s(out, "call", "badarg", "not a funcref");
+    func = r->of.func;
+  } else {
+    if (!enif_inspect_iolist_as_binary(env, req->name, &name))
+      return mk_error_s(out, "call", "badarg", "export name must be a binary");
+    wasmtime_extern_t ext;
+    if (!wasmtime_instance_export_get(inst->ctx, &inst->instance, (const char *)name.data,
+                                      name.size, &ext))
+      return mk_error(out, "call", "no_such_export", (const char *)name.data, name.size);
+    if (ext.kind != WASMTIME_EXTERN_FUNC)
+      return mk_error(out, "call", "not_a_function", (const char *)name.data, name.size);
+    func = ext.of.func;
+  }
 
-  wasm_functype_t *ft = wasmtime_func_type(inst->ctx, &ext.of.func);
+  wasm_functype_t *ft = wasmtime_func_type(inst->ctx, &func);
   const wasm_valtype_vec_t *ps = wasm_functype_params(ft), *rs = wasm_functype_results(ft);
-  wasmtime_val_raw_t vals[MAX_VALS];
   ERL_NIF_TERM result;
   unsigned nargs;
   if (!enif_get_list_length(env, req->args, &nargs) || nargs != ps->size) {
@@ -1537,27 +1904,12 @@ static ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
     result = mk_error_s(out, "call", "unsupported_type", "too many parameters or results");
     goto done;
   }
-  {
-    ERL_NIF_TERM l = req->args, h;
-    for (size_t i = 0; enif_get_list_cell(env, l, &h, &l); i++) {
-      uint8_t k = kind_of(ps->data[i]);
-      if (ref_kind(k)) {
-        result = mk_error_s(out, "call", "unsupported_type",
-                            "reference-typed parameters cannot be passed from Erlang");
-        goto done;
-      }
-      if (!term_to_raw(env, h, k, &vals[i])) {
-        result = mk_error_s(out, "call", "badarg", "argument does not match the parameter type");
-        goto done;
-      }
-    }
-    for (size_t i = 0; i < rs->size; i++) {
-      if (ref_kind(kind_of(rs->data[i]))) {
-        result = mk_error_s(out, "call", "unsupported_type",
-                            "reference-typed results cannot be returned to Erlang");
-        goto done;
-      }
-    }
+  shape_t sh = shape_of(ft);
+  if (sh.exn || (sh.refs && sh.v128)) {
+    result = mk_error_s(out, "call", "unsupported_type",
+                        sh.exn ? "exception references cannot cross the boundary"
+                               : "v128 and references cannot mix in one signature");
+    goto done;
   }
   ErlNifUInt64 fuel;
   if (enif_get_uint64(env, req->opts, &fuel)) {
@@ -1571,19 +1923,8 @@ static ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
     }
   }
   wasmtime_context_set_epoch_deadline(inst->ctx, 1);
-  {
-    wasm_trap_t *trap = NULL;
-    size_t nvals = ps->size > rs->size ? ps->size : rs->size;
-    wasmtime_error_t *e = wasmtime_func_call_unchecked(inst->ctx, &ext.of.func, vals, nvals, &trap);
-    result = outcome(inst, out, e, trap, "call");
-    if (enif_is_identical(result, atom_ok)) {
-      ERL_NIF_TERM list = enif_make_list(out, 0);
-      for (size_t i = rs->size; i > 0; i--)
-        list = enif_make_list_cell(out, raw_to_term(out, kind_of(rs->data[i - 1]), &vals[i - 1]),
-                                   list);
-      result = enif_make_tuple2(out, atom_ok, list);
-    }
-  }
+  result =
+      sh.refs ? call_typed(inst, req, out, &func, ps, rs) : call_raw(inst, req, out, &func, ps, rs);
 done:
   wasm_functype_delete(ft);
   return result;
@@ -2040,53 +2381,22 @@ static ERL_NIF_TERM with_export(ErlNifEnv *env, ERL_NIF_TERM handle, ERL_NIF_TER
   return 0;
 }
 
-/* A wasmtime_val_t (from a global) as a term; refs are refused. */
-static ERL_NIF_TERM typed_val_to_term(ErlNifEnv *env, wasmtime_val_t *v, ERL_NIF_TERM *out) {
-  wasmtime_val_raw_t r;
-  switch (v->kind) {
-  case WASMTIME_I32: *out = enif_make_int(env, v->of.i32); return 0;
-  case WASMTIME_I64: *out = enif_make_int64(env, v->of.i64); return 0;
-  case WASMTIME_F32:
-    r.f32 = v->of.f32;
-    *out = raw_to_term(env, WASMTIME_VALTYPE_KIND_F32, &r);
-    return 0;
-  case WASMTIME_F64:
-    r.f64 = v->of.f64;
-    *out = raw_to_term(env, WASMTIME_VALTYPE_KIND_F64, &r);
-    return 0;
-  case WASMTIME_V128: *out = mk_binary(env, v->of.v128, 16); return 0;
-  default:
-    wasmtime_val_unroot(v);
-    return mk_error_s(env, "global", "unsupported_type", "reference-typed values cannot be read");
+/* Locks the instance a reference belongs to, like with_export. */
+static ERL_NIF_TERM with_ref(ErlNifEnv *env, ERL_NIF_TERM term, ref_t **out) {
+  ref_t *r;
+  if (!enif_get_resource(env, term, ref_type, (void **)&r)) return enif_make_badarg(env);
+  pthread_mutex_lock(&r->inst->mu);
+  if (r->inst->state == ST_RUNNING) {
+    pthread_mutex_unlock(&r->inst->mu);
+    return mk_error_s(env, "ref", "busy", "guest is running");
   }
+  *out = r;
+  return 0;
 }
 
-/* A term as a wasmtime_val_t of the given WASMTIME_VALTYPE_KIND_*. */
-static int term_to_typed_val(ErlNifEnv *env, ERL_NIF_TERM t, uint8_t kind, wasmtime_val_t *v) {
-  wasmtime_val_raw_t r;
-  if (ref_kind(kind) || !term_to_raw(env, t, kind, &r)) return 0;
-  switch (kind) {
-  case WASMTIME_VALTYPE_KIND_I32:
-    v->kind = WASMTIME_I32;
-    v->of.i32 = r.i32;
-    return 1;
-  case WASMTIME_VALTYPE_KIND_I64:
-    v->kind = WASMTIME_I64;
-    v->of.i64 = r.i64;
-    return 1;
-  case WASMTIME_VALTYPE_KIND_F32:
-    v->kind = WASMTIME_F32;
-    v->of.f32 = r.f32;
-    return 1;
-  case WASMTIME_VALTYPE_KIND_F64:
-    v->kind = WASMTIME_F64;
-    v->of.f64 = r.f64;
-    return 1;
-  default:
-    v->kind = WASMTIME_V128;
-    memcpy(v->of.v128, r.v128, 16);
-    return 1;
-  }
+static ERL_NIF_TERM term_or_unsupported(ErlNifEnv *env, const char *cls, ERL_NIF_TERM t) {
+  if (!t) return mk_error_s(env, cls, "unsupported_type", "the value cannot cross the boundary");
+  return enif_make_tuple2(env, atom_ok, t);
 }
 
 /* global_get(Handle, Name) -> {ok, Value} */
@@ -2098,10 +2408,9 @@ static ERL_NIF_TERM nif_global_get(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
   if (err) return err;
   wasmtime_val_t v;
   wasmtime_global_get(inst->ctx, &ext.of.global, &v);
-  ERL_NIF_TERM value = atom_undefined;
-  err = typed_val_to_term(env, &v, &value);
+  ERL_NIF_TERM r = term_or_unsupported(env, "global", val_to_term(env, inst, &v));
   pthread_mutex_unlock(&inst->mu);
-  return err ? err : enif_make_tuple2(env, atom_ok, value);
+  return r;
 }
 
 /* global_set(Handle, Name, Value) -> ok */
@@ -2114,12 +2423,16 @@ static ERL_NIF_TERM nif_global_set(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
   wasm_globaltype_t *gt = wasmtime_global_type(inst->ctx, &ext.of.global);
   ERL_NIF_TERM r;
   wasmtime_val_t v;
+  vtype_t t;
+  vtype_of(wasm_globaltype_content(gt), &t);
+  const char *kind;
   if (wasm_globaltype_mutability(gt) == WASM_CONST) {
     r = mk_error_s(env, "global", "immutable", "the global is not mutable");
-  } else if (!term_to_typed_val(env, argv[2], kind_of(wasm_globaltype_content(gt)), &v)) {
-    r = mk_error_s(env, "global", "badarg", "value does not match the global's type");
+  } else if ((kind = term_to_val(env, inst, argv[2], &t, &v))) {
+    r = conv_error(env, "global", kind);
   } else {
     wasmtime_error_t *e = wasmtime_global_set(inst->ctx, &ext.of.global, &v);
+    wasmtime_val_unroot(&v);
     r = e ? error_to_term(env, e, "global") : atom_ok;
   }
   wasm_globaltype_delete(gt);
@@ -2140,7 +2453,58 @@ static ERL_NIF_TERM nif_table_size(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
   return r;
 }
 
-/* table_grow(Handle, Name, Delta) -> {ok, PreviousSize}: new slots hold null */
+/* table_get(Handle, Name, Index) -> {ok, Value} */
+static ERL_NIF_TERM nif_table_get(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  ErlNifUInt64 index;
+  if (!enif_get_uint64(env, argv[2], &index)) return enif_make_badarg(env);
+  instance_t *inst;
+  wasmtime_extern_t ext;
+  ERL_NIF_TERM err =
+      with_export(env, argv[0], argv[1], WASMTIME_EXTERN_TABLE, "table", &inst, &ext);
+  if (err) return err;
+  wasmtime_val_t v;
+  ERL_NIF_TERM r;
+  if (!wasmtime_table_get(inst->ctx, &ext.of.table, index, &v))
+    r = mk_error_s(env, "table", "out_of_bounds", "index is past the table's size");
+  else
+    r = term_or_unsupported(env, "table", val_to_term(env, inst, &v));
+  pthread_mutex_unlock(&inst->mu);
+  return r;
+}
+
+/* The element type of a table, as the boundary sees it. */
+static void table_elem_type(instance_t *inst, const wasmtime_table_t *table, vtype_t *t) {
+  wasm_tabletype_t *tt = wasmtime_table_type(inst->ctx, table);
+  vtype_of(wasm_tabletype_element(tt), t);
+  wasm_tabletype_delete(tt);
+}
+
+/* table_set(Handle, Name, Index, Value) -> ok */
+static ERL_NIF_TERM nif_table_set(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  ErlNifUInt64 index;
+  if (!enif_get_uint64(env, argv[2], &index)) return enif_make_badarg(env);
+  instance_t *inst;
+  wasmtime_extern_t ext;
+  ERL_NIF_TERM err =
+      with_export(env, argv[0], argv[1], WASMTIME_EXTERN_TABLE, "table", &inst, &ext);
+  if (err) return err;
+  vtype_t t;
+  table_elem_type(inst, &ext.of.table, &t);
+  wasmtime_val_t v;
+  ERL_NIF_TERM r;
+  const char *kind = term_to_val(env, inst, argv[3], &t, &v);
+  if (kind) {
+    r = conv_error(env, "table", kind);
+  } else {
+    wasmtime_error_t *e = wasmtime_table_set(inst->ctx, &ext.of.table, index, &v);
+    wasmtime_val_unroot(&v);
+    r = e ? error_to_term(env, e, "table") : atom_ok;
+  }
+  pthread_mutex_unlock(&inst->mu);
+  return r;
+}
+
+/* table_grow(Handle, Name, Delta, Init) -> {ok, PreviousSize} */
 static ERL_NIF_TERM nif_table_grow(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   ErlNifUInt64 delta;
   if (!enif_get_uint64(env, argv[2], &delta)) return enif_make_badarg(env);
@@ -2149,27 +2513,292 @@ static ERL_NIF_TERM nif_table_grow(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
   ERL_NIF_TERM err =
       with_export(env, argv[0], argv[1], WASMTIME_EXTERN_TABLE, "table", &inst, &ext);
   if (err) return err;
-  uint64_t prev = 0;
+  vtype_t t;
+  table_elem_type(inst, &ext.of.table, &t);
   wasmtime_val_t init;
-  memset(&init, 0, sizeof init);
-  init.kind = WASMTIME_FUNCREF; /* a null funcref: store_id 0 */
-  wasmtime_error_t *e = wasmtime_table_grow(inst->ctx, &ext.of.table, delta, &init, &prev);
-#ifdef WASMTIME_EXTERNREF
-  if (e) {
-    /* not a funcref table: a null externref then */
-    wasmtime_error_delete(e);
-    memset(&init, 0, sizeof init);
-    init.kind = WASMTIME_EXTERNREF;
-    e = wasmtime_table_grow(inst->ctx, &ext.of.table, delta, &init, &prev);
+  ERL_NIF_TERM r;
+  const char *kind = term_to_val(env, inst, argv[3], &t, &init);
+  if (kind) {
+    r = conv_error(env, "table", kind);
+  } else {
+    uint64_t prev = 0;
+    wasmtime_error_t *e = wasmtime_table_grow(inst->ctx, &ext.of.table, delta, &init, &prev);
+    wasmtime_val_unroot(&init);
+    r = e ? error_to_term(env, e, "table")
+          : enif_make_tuple2(env, atom_ok, enif_make_uint64(env, prev));
   }
-#endif
-  ERL_NIF_TERM r = e ? error_to_term(env, e, "table")
-                     : enif_make_tuple2(env, atom_ok, enif_make_uint64(env, prev));
   pthread_mutex_unlock(&inst->mu);
   return r;
 }
 
-/* fuel_remaining(Handle) -> {ok, Fuel} */
+/* ref_info(Ref) -> #{kind => externref | funcref | struct | array | anyref, instance => Ref} */
+static ERL_NIF_TERM nif_ref_info(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  ref_t *r;
+  ERL_NIF_TERM err = with_ref(env, argv[0], &r);
+  if (err) return err;
+  ERL_NIF_TERM kind = atom_funcref;
+#ifdef WASMTIME_FEATURE_GC
+  if (r->kind == REF_EXTERN) kind = atom_externref;
+  if (r->kind == REF_ANY)
+    kind = wasmtime_anyref_is_struct(r->inst->ctx, &r->of.any)  ? atom_struct
+           : wasmtime_anyref_is_array(r->inst->ctx, &r->of.any) ? atom_array
+                                                                : atom_anyref;
+#endif
+  ERL_NIF_TERM keys[2] = {atom_kind, atom_instance};
+  ERL_NIF_TERM vals[2] = {kind, enif_make_copy(env, r->inst->ref)};
+  ERL_NIF_TERM map;
+  enif_make_map_from_arrays(env, keys, vals, 2, &map);
+  pthread_mutex_unlock(&r->inst->mu);
+  return map;
+}
+
+#ifdef WASMTIME_FEATURE_GC
+/* What an externref made by externref/2 carries: a term in its own env. */
+typedef struct {
+  ErlNifEnv *env;
+  ERL_NIF_TERM term;
+} payload_t;
+
+/* Wasmtime's collector runs this on any thread, without the store. */
+static void payload_free(void *p) {
+  payload_t *pl = p;
+  enif_free_env(pl->env);
+  enif_free(pl);
+}
+
+/* externref(Handle, Term) -> {ok, Ref}: the term lives in an env the
+ * object owns until Wasmtime's collector drops it. */
+static ERL_NIF_TERM nif_externref(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  instance_t *inst;
+  if (!get_handle(env, argv[0], &inst)) return enif_make_badarg(env);
+  pthread_mutex_lock(&inst->mu);
+  ERL_NIF_TERM r;
+  if (inst->state == ST_RUNNING) {
+    r = mk_error_s(env, "ref", "busy", "guest is running");
+  } else if (!inst->instantiated) {
+    r = mk_error_s(env, "ref", "stopped", "instance is stopped");
+  } else {
+    payload_t *pl = enif_alloc(sizeof *pl);
+    pl->env = enif_alloc_env();
+    pl->term = enif_make_copy(pl->env, argv[1]);
+    ref_t ref = {.kind = REF_EXTERN};
+    if (!wasmtime_externref_new(inst->ctx, pl, payload_free, &ref.of.ext)) {
+      payload_free(pl);
+      r = mk_error_s(env, "ref", "gc_heap_full", "no room for another GC object: try gc/1");
+    } else {
+      r = enif_make_tuple2(env, atom_ok, mk_ref(env, inst, &ref));
+    }
+  }
+  pthread_mutex_unlock(&inst->mu);
+  return r;
+}
+
+/* externref_data(Ref) -> {ok, Term} */
+static ERL_NIF_TERM nif_externref_data(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  ref_t *r;
+  ERL_NIF_TERM err = with_ref(env, argv[0], &r);
+  if (err) return err;
+  ERL_NIF_TERM res;
+  payload_t *pl = r->kind == REF_EXTERN ? wasmtime_externref_data(r->inst->ctx, &r->of.ext) : NULL;
+  if (!pl)
+    res = mk_error_s(env, "ref", "badarg", "not an externref made by externref/2");
+  else
+    res = enif_make_tuple2(env, atom_ok, enif_make_copy(env, pl->term));
+  pthread_mutex_unlock(&r->inst->mu);
+  return res;
+}
+
+/* The struct or array behind an anyref, as a fresh root the caller unroots. */
+static int as_struct(ref_t *r, wasmtime_structref_t *out) {
+  return r->kind == REF_ANY && wasmtime_anyref_as_struct(r->inst->ctx, &r->of.any, out);
+}
+static int as_array(ref_t *r, wasmtime_arrayref_t *out) {
+  return r->kind == REF_ANY && wasmtime_anyref_as_array(r->inst->ctx, &r->of.any, out);
+}
+
+/* A field's storage type as the boundary sees it: i8 and i16 cross as i32. */
+static void field_vtype(const wasmtime_field_type_t *ft, vtype_t *t) {
+  if (ft->storage.kind == WASMTIME_STORAGE_TYPE_KIND_VALTYPE) {
+    vtype_of(ft->storage.valtype, t);
+  } else {
+    t->kind = WASMTIME_VALTYPE_KIND_I32;
+    t->fam = FAM_NUM;
+    t->nullable = 1;
+  }
+}
+
+/* struct_get(Ref, Index) -> {ok, Value} */
+static ERL_NIF_TERM nif_struct_get(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  ErlNifUInt64 index;
+  if (!enif_get_uint64(env, argv[1], &index)) return enif_make_badarg(env);
+  ref_t *r;
+  ERL_NIF_TERM err = with_ref(env, argv[0], &r);
+  if (err) return err;
+  ERL_NIF_TERM res;
+  wasmtime_structref_t st;
+  if (!as_struct(r, &st)) {
+    res = mk_error_s(env, "ref", "badarg", "not a struct");
+  } else {
+    wasmtime_val_t v;
+    wasmtime_error_t *e = wasmtime_structref_field(r->inst->ctx, &st, index, &v);
+    res = e ? error_to_term(env, e, "ref")
+            : term_or_unsupported(env, "ref", val_to_term(env, r->inst, &v));
+    wasmtime_structref_unroot(&st);
+  }
+  pthread_mutex_unlock(&r->inst->mu);
+  return res;
+}
+
+/* struct_set(Ref, Index, Value) -> ok */
+static ERL_NIF_TERM nif_struct_set(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  ErlNifUInt64 index;
+  if (!enif_get_uint64(env, argv[1], &index)) return enif_make_badarg(env);
+  ref_t *r;
+  ERL_NIF_TERM err = with_ref(env, argv[0], &r);
+  if (err) return err;
+  ERL_NIF_TERM res;
+  wasmtime_structref_t st;
+  wasmtime_field_type_t ft;
+  if (!as_struct(r, &st)) {
+    res = mk_error_s(env, "ref", "badarg", "not a struct");
+  } else {
+    wasmtime_struct_type_t *ty = wasmtime_structref_type(r->inst->ctx, &st);
+    if (!wasmtime_struct_type_field(ty, index, &ft)) {
+      res = mk_error_s(env, "ref", "out_of_bounds", "no such field");
+    } else {
+      vtype_t t;
+      field_vtype(&ft, &t);
+      wasmtime_val_t v;
+      const char *kind = term_to_val(env, r->inst, argv[2], &t, &v);
+      if (kind) {
+        res = conv_error(env, "ref", kind);
+      } else {
+        wasmtime_error_t *e = wasmtime_structref_set_field(r->inst->ctx, &st, index, &v);
+        wasmtime_val_unroot(&v);
+        res = e ? error_to_term(env, e, "ref") : atom_ok;
+      }
+      wasmtime_field_type_delete(&ft);
+    }
+    wasmtime_struct_type_delete(ty);
+    wasmtime_structref_unroot(&st);
+  }
+  pthread_mutex_unlock(&r->inst->mu);
+  return res;
+}
+
+/* array_len(Ref) -> {ok, N} */
+static ERL_NIF_TERM nif_array_len(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  ref_t *r;
+  ERL_NIF_TERM err = with_ref(env, argv[0], &r);
+  if (err) return err;
+  ERL_NIF_TERM res;
+  wasmtime_arrayref_t ar;
+  if (!as_array(r, &ar)) {
+    res = mk_error_s(env, "ref", "badarg", "not an array");
+  } else {
+    uint32_t n = 0;
+    wasmtime_error_t *e = wasmtime_arrayref_len(r->inst->ctx, &ar, &n);
+    res = e ? error_to_term(env, e, "ref") : enif_make_tuple2(env, atom_ok, enif_make_uint(env, n));
+    wasmtime_arrayref_unroot(&ar);
+  }
+  pthread_mutex_unlock(&r->inst->mu);
+  return res;
+}
+
+/* array_get(Ref, Index) -> {ok, Value} */
+static ERL_NIF_TERM nif_array_get(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  ErlNifUInt64 index;
+  if (!enif_get_uint64(env, argv[1], &index)) return enif_make_badarg(env);
+  ref_t *r;
+  ERL_NIF_TERM err = with_ref(env, argv[0], &r);
+  if (err) return err;
+  ERL_NIF_TERM res;
+  wasmtime_arrayref_t ar;
+  if (!as_array(r, &ar)) {
+    res = mk_error_s(env, "ref", "badarg", "not an array");
+  } else if (index > UINT32_MAX) {
+    res = mk_error_s(env, "ref", "out_of_bounds", "index is past the array's length");
+    wasmtime_arrayref_unroot(&ar);
+  } else {
+    wasmtime_val_t v;
+    wasmtime_error_t *e = wasmtime_arrayref_get(r->inst->ctx, &ar, (uint32_t)index, &v);
+    res = e ? error_to_term(env, e, "ref")
+            : term_or_unsupported(env, "ref", val_to_term(env, r->inst, &v));
+    wasmtime_arrayref_unroot(&ar);
+  }
+  pthread_mutex_unlock(&r->inst->mu);
+  return res;
+}
+
+/* array_set(Ref, Index, Value) -> ok */
+static ERL_NIF_TERM nif_array_set(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  ErlNifUInt64 index;
+  if (!enif_get_uint64(env, argv[1], &index)) return enif_make_badarg(env);
+  ref_t *r;
+  ERL_NIF_TERM err = with_ref(env, argv[0], &r);
+  if (err) return err;
+  ERL_NIF_TERM res;
+  wasmtime_arrayref_t ar;
+  if (!as_array(r, &ar)) {
+    res = mk_error_s(env, "ref", "badarg", "not an array");
+  } else if (index > UINT32_MAX) {
+    res = mk_error_s(env, "ref", "out_of_bounds", "index is past the array's length");
+    wasmtime_arrayref_unroot(&ar);
+  } else {
+    wasmtime_array_type_t *ty = wasmtime_arrayref_type(r->inst->ctx, &ar);
+    wasmtime_field_type_t ft;
+    wasmtime_array_type_element(ty, &ft);
+    vtype_t t;
+    field_vtype(&ft, &t);
+    wasmtime_val_t v;
+    const char *kind = term_to_val(env, r->inst, argv[2], &t, &v);
+    if (kind) {
+      res = conv_error(env, "ref", kind);
+    } else {
+      wasmtime_error_t *e = wasmtime_arrayref_set(r->inst->ctx, &ar, (uint32_t)index, &v);
+      wasmtime_val_unroot(&v);
+      res = e ? error_to_term(env, e, "ref") : atom_ok;
+    }
+    wasmtime_field_type_delete(&ft);
+    wasmtime_array_type_delete(ty);
+    wasmtime_arrayref_unroot(&ar);
+  }
+  pthread_mutex_unlock(&r->inst->mu);
+  return res;
+}
+
+/* gc(Handle) -> ok */
+static ERL_NIF_TERM nif_gc(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  instance_t *inst;
+  if (!get_handle(env, argv[0], &inst)) return enif_make_badarg(env);
+  pthread_mutex_lock(&inst->mu);
+  ERL_NIF_TERM r;
+  if (inst->state == ST_RUNNING) {
+    r = mk_error_s(env, "ref", "busy", "guest is running");
+  } else if (!inst->instantiated) {
+    r = mk_error_s(env, "ref", "stopped", "instance is stopped");
+  } else {
+    wasmtime_error_t *e = wasmtime_context_gc(inst->ctx);
+    r = e ? error_to_term(env, e, "ref") : atom_ok;
+  }
+  pthread_mutex_unlock(&inst->mu);
+  return r;
+}
+#else
+static ERL_NIF_TERM nif_no_gc(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  return mk_error_s(env, "ref", "unavailable", "this build of erlang_wasmtime has no GC support");
+}
+#define nif_externref nif_no_gc
+#define nif_externref_data nif_no_gc
+#define nif_struct_get nif_no_gc
+#define nif_struct_set nif_no_gc
+#define nif_array_len nif_no_gc
+#define nif_array_get nif_no_gc
+#define nif_array_set nif_no_gc
+#define nif_gc nif_no_gc
+#endif
+
+/* fuel_remaining(Handle) -> {ok, Fuel} */ /* fuel_remaining(Handle) -> {ok, Fuel} */
 static ERL_NIF_TERM nif_fuel_remaining(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   instance_t *inst;
   if (!get_handle(env, argv[0], &inst)) return enif_make_badarg(env);
@@ -2469,15 +3098,25 @@ static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
   A(atom_stdout, "stdout");
   A(atom_stderr, "stderr");
   A(atom_channel, "channel");
+  A(atom_null, "null");
+  A(atom_i31, "i31");
+  A(atom_externref, "externref");
+  A(atom_funcref, "funcref");
+  A(atom_struct, "struct");
+  A(atom_array, "array");
+  A(atom_anyref, "anyref");
+  A(atom_instance, "instance");
 #undef A
 
   ErlNifResourceTypeInit mi = {.dtor = module_dtor};
   ErlNifResourceTypeInit ii = {.dtor = instance_dtor, .down = instance_down};
   ErlNifResourceTypeInit hi = {.dtor = handle_dtor};
+  ErlNifResourceTypeInit ri = {.dtor = ref_dtor};
   module_type = enif_open_resource_type_x(env, "wasmtime_module", &mi, ERL_NIF_RT_CREATE, NULL);
   instance_type = enif_open_resource_type_x(env, "wasmtime_instance", &ii, ERL_NIF_RT_CREATE, NULL);
   handle_type = enif_open_resource_type_x(env, "wasmtime_handle", &hi, ERL_NIF_RT_CREATE, NULL);
-  if (!module_type || !instance_type || !handle_type) return -1;
+  ref_type = enif_open_resource_type_x(env, "wasmtime_ref", &ri, ERL_NIF_RT_CREATE, NULL);
+  if (!module_type || !instance_type || !handle_type || !ref_type) return -1;
 
   /* The default engine exists from the start; others come on first use. */
   ERL_NIF_TERM err;
@@ -2519,7 +3158,18 @@ static ErlNifFunc funcs[] = {
     {"global_get", 2, nif_global_get, 0},
     {"global_set", 3, nif_global_set, 0},
     {"table_size", 2, nif_table_size, 0},
-    {"table_grow", 3, nif_table_grow, 0},
+    {"table_get", 3, nif_table_get, 0},
+    {"table_set", 4, nif_table_set, 0},
+    {"table_grow", 4, nif_table_grow, 0},
+    {"ref_info", 1, nif_ref_info, 0},
+    {"externref", 2, nif_externref, 0},
+    {"externref_data", 1, nif_externref_data, 0},
+    {"struct_get", 2, nif_struct_get, 0},
+    {"struct_set", 3, nif_struct_set, 0},
+    {"array_len", 1, nif_array_len, 0},
+    {"array_get", 2, nif_array_get, 0},
+    {"array_set", 3, nif_array_set, 0},
+    {"gc", 1, nif_gc, 0},
     {"fuel_remaining", 1, nif_fuel_remaining, 0},
     {"host_reply", 3, nif_host_reply, 0},
     {"send", 2, nif_send, 0},

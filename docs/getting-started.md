@@ -146,9 +146,10 @@ ok         = wasmtime:global_set(Inst, ~"counter", 8),
 {ok, 4}    = wasmtime:table_grow(Inst, ~"handlers", 2).
 ```
 
-Numeric and `v128` globals only; a constant global refuses `global_set`.
-Tables can be measured and grown (with null elements) from Erlang; their
-elements are references, which stay inside the guest.
+A constant global refuses `global_set`. Table elements and reference-typed
+globals are references: `table_get/3` and `table_set/4` read and write them,
+`table_grow/4` fills new slots with one. See [references](references.md) for
+what a reference term is and what you can do with it.
 
 ## Read and write memory
 

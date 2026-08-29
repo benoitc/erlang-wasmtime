@@ -32,6 +32,8 @@ all come back as `{error, #{class => ..., kind => ..., message => ...}}`.
 - WASI preview 1 with explicit capabilities: `args`, `env`, preopened `dirs`,
   and stdio redirected to files or inherited.
 - Linear memory access from Erlang while the guest is idle or inside a host call.
+- References as terms: `funcref`, `externref` (wrapping any Erlang term) and
+  GC structs and arrays cross calls, host functions, globals and tables.
 - Precompiled modules: compile once, `deserialize/1` in milliseconds.
 - Runtime-only builds: `WASMTIME_RUNTIME_ONLY=1` gives a 4 MB NIF without the
   compiler for nodes that only load precompiled modules.
@@ -62,6 +64,7 @@ Requires OTP 27 or later.
 - [Host functions](docs/host-functions.md)
 - [WASI](docs/wasi.md)
 - [Streams](docs/streams.md): talk to a guest while it runs
+- [References](docs/references.md): funcref, externref and GC values as terms
 - [Precompiled modules](docs/precompiled.md): compile once, load in milliseconds
 - [Building and shipping](docs/building.md)
 - [Features](docs/features.md): what is implemented, what is refused, what is deferred

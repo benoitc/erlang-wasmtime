@@ -43,6 +43,12 @@ First release.
   arrives as `{wasmtime_stream, Ref, Kind, Bytes}` in the `stream` process;
   `inbox_limit`; `ref/1`. Runtime-only builds load the stdin forwarding
   shim precompiled per platform from `priv/shims`.
+- References across the boundary: `funcref`, `externref` and GC values as
+  `ref()` terms in calls, host functions, globals and tables; `null` and
+  `{i31, N}`; `externref/2`, `externref_data/1`, `call_ref/3,4`,
+  `ref_info/1`, `table_get/3`, `table_set/4`, `table_grow/4`,
+  `struct_get/2`, `struct_set/3`, `array_len/1`, `array_get/2`,
+  `array_set/3`, `gc/1`. A dropped ref is unrooted by its destructor.
 - Runtime-only builds (`WASMTIME_RUNTIME_ONLY=1`): no compiler, a 4 MB shared
   library; `features/0` reports the linked library's capabilities and
   `compile/1`, `{wat, _}`, `serialize/1` and the `wasi` option answer

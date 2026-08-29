@@ -62,9 +62,13 @@ WASMTIME_NIF_SANITIZE=address rebar3 compile     # ASan build of the NIF
   the `erlang.recv` import; guest writes to a `stream` stdio or
   `erlang.send` arrive as `{wasmtime_stream, Ref, Kind, Bytes}`. `Ref` is an Erlang reference made at
   instantiate time, never a resource term, so worker threads cannot resurrect
-  a resource. Two resource types: the handle Erlang holds (its destructor
-  only signals) and the instance, owned by the handle and by its detached
-  worker thread. Interruption is epoch based: a ticker thread bumps the
+  a resource. Three resource types: the handle Erlang holds (its destructor
+  only signals), the instance, owned by the handle and by its detached
+  worker thread, and `wasmtime_ref`, a reference the guest handed out (an
+  owned GC root or a funcref; its destructor unroots, which needs no store
+  and no thread, and releases the instance it keeps alive). Calls and host
+  functions with references use Wasmtime's typed API, everything else the
+  raw one (the typed one aborts on v128). Interruption is epoch based: a ticker thread bumps the
   engine epoch every 10 ms; `cancel/2` ends one request by id and drops its
   result.
 - `src/wasmtime.erl`: public API and the `receive` loop that serves host calls

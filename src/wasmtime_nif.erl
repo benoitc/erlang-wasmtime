@@ -14,7 +14,18 @@
     global_get/2,
     global_set/3,
     table_size/2,
-    table_grow/3,
+    table_get/3,
+    table_set/4,
+    table_grow/4,
+    ref_info/1,
+    externref/2,
+    externref_data/1,
+    struct_get/2,
+    struct_set/3,
+    array_len/1,
+    array_get/2,
+    array_set/3,
+    gc/1,
     fuel_remaining/1,
     host_reply/3,
     send/2,
@@ -41,7 +52,18 @@
     global_get/2,
     global_set/3,
     table_size/2,
-    table_grow/3,
+    table_get/3,
+    table_set/4,
+    table_grow/4,
+    ref_info/1,
+    externref/2,
+    externref_data/1,
+    struct_get/2,
+    struct_set/3,
+    array_len/1,
+    array_get/2,
+    array_set/3,
+    gc/1,
     fuel_remaining/1,
     host_reply/3,
     send/2,
@@ -79,7 +101,18 @@ call(_Handle, _Name, _Args, _Id, _Fuel) -> erlang:nif_error(not_loaded).
 global_get(_Handle, _Name) -> erlang:nif_error(not_loaded).
 global_set(_Handle, _Name, _Value) -> erlang:nif_error(not_loaded).
 table_size(_Handle, _Name) -> erlang:nif_error(not_loaded).
-table_grow(_Handle, _Name, _Delta) -> erlang:nif_error(not_loaded).
+table_get(_Handle, _Name, _Index) -> erlang:nif_error(not_loaded).
+table_set(_Handle, _Name, _Index, _Value) -> erlang:nif_error(not_loaded).
+table_grow(_Handle, _Name, _Delta, _Init) -> erlang:nif_error(not_loaded).
+ref_info(_Ref) -> erlang:nif_error(not_loaded).
+externref(_Handle, _Term) -> erlang:nif_error(not_loaded).
+externref_data(_Ref) -> erlang:nif_error(not_loaded).
+struct_get(_Ref, _Index) -> erlang:nif_error(not_loaded).
+struct_set(_Ref, _Index, _Value) -> erlang:nif_error(not_loaded).
+array_len(_Ref) -> erlang:nif_error(not_loaded).
+array_get(_Ref, _Index) -> erlang:nif_error(not_loaded).
+array_set(_Ref, _Index, _Value) -> erlang:nif_error(not_loaded).
+gc(_Handle) -> erlang:nif_error(not_loaded).
 fuel_remaining(_Handle) -> erlang:nif_error(not_loaded).
 host_reply(_Handle, _Id, _Reply) -> erlang:nif_error(not_loaded).
 send(_Handle, _Bytes) -> erlang:nif_error(not_loaded).

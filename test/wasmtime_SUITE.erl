@@ -13,7 +13,7 @@
     host_error/1,
     host_timeout/1,
     host_exception/1,
-    reference_types_refused/1,
+    reference_types_cross/1,
     memory_access/1,
     memory_limit/1,
     instances_are_isolated/1,
@@ -44,7 +44,7 @@ all() ->
         host_error,
         host_timeout,
         host_exception,
-        reference_types_refused,
+        reference_types_cross,
         memory_access,
         memory_limit,
         instances_are_isolated,
@@ -255,24 +255,24 @@ host_timeout(Config) ->
     ?assert(erlang:monotonic_time(millisecond) - T0 >= 100),
     ok.
 
-reference_types_refused(_) ->
+reference_types_cross(_) ->
     {ok, Mod} = wasmtime:compile(
         {wat,
             ~"""
         (module
-          (import "env" "take_ref" (func (param externref)))
-          (func (export "give_ref") (result externref) ref.null extern))
+          (import "env" "take_ref" (func $take (param externref) (result externref)))
+          (func (export "give_ref") (result externref) ref.null extern)
+          (func (export "via") (param externref) (result externref) local.get 0 call $take))
         """}
     ),
-    {error, #{class := link, kind := unsupported_type}} =
+    {ok, Inst} =
         wasmtime:instantiate(Mod, #{
-            imports => #{{~"env", ~"take_ref"} => fun(_, _) -> {ok, []} end}
+            imports => #{{~"env", ~"take_ref"} => fun(_, [R]) -> {ok, [R]} end}
         }),
-    {ok, Mod2} = wasmtime:compile(
-        {wat, ~"(module (func (export \"give_ref\") (result externref) ref.null extern))"}
-    ),
-    {ok, Inst} = wasmtime:instantiate(Mod2),
-    {error, #{class := call, kind := unsupported_type}} = wasmtime:call(Inst, ~"give_ref", []),
+    {ok, [null]} = wasmtime:call(Inst, ~"give_ref", []),
+    {ok, Ref} = wasmtime:externref(Inst, #{payload => true}),
+    {ok, [Back]} = wasmtime:call(Inst, ~"via", [Ref]),
+    {ok, #{payload := true}} = wasmtime:externref_data(Back),
     ok.
 
 %% ---------------------------------------------------------------- memory

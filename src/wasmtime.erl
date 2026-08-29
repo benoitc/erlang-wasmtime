@@ -28,6 +28,7 @@ on an instance at a time; concurrent callers are queued.
     deserialize/1, deserialize/2,
     instantiate/1, instantiate/2,
     call/3, call/4,
+    call_ref/3, call_ref/4,
     call_async/3,
     await/2, await/3,
     interrupt/1,
@@ -35,7 +36,18 @@ on an instance at a time; concurrent callers are queued.
     global_get/2,
     global_set/3,
     table_size/2,
-    table_grow/3,
+    table_get/3,
+    table_set/4,
+    table_grow/3, table_grow/4,
+    ref_info/1,
+    externref/2,
+    externref_data/1,
+    struct_get/2,
+    struct_set/3,
+    array_len/1,
+    array_get/2,
+    array_set/3,
+    gc/1,
     fuel_remaining/1,
     handle_host_call/2,
     send/2,
@@ -53,6 +65,7 @@ on an instance at a time; concurrent callers are queued.
     instance/0,
     call_ref/0,
     value/0,
+    ref/0,
     error/0,
     frame/0,
     host_fun/0,
@@ -83,7 +96,24 @@ on an instance at a time; concurrent callers are queued.
 A WebAssembly value. `nan`, `infinity` and `neg_infinity` stand for the floats
 Erlang cannot represent; a `v128` is a 16-byte binary.
 """.
--type value() :: integer() | float() | nan | infinity | neg_infinity | <<_:128>>.
+-type value() ::
+    integer()
+    | float()
+    | nan
+    | infinity
+    | neg_infinity
+    | <<_:128>>
+    | null
+    | ref()
+    | {i31, integer()}.
+
+-doc """
+A reference the guest handed out: a `funcref`, an `externref` or a GC value
+(`struct`, `array`, any other `anyref`). Opaque; `ref_info/1` says which.
+The object stays alive while the term does; drop the term to let the
+guest's collector reclaim it. A ref belongs to one instance.
+""".
+-opaque ref() :: reference().
 
 -doc """
 Every failure has a class, a machine-readable kind and a message. Non-zero
@@ -527,9 +557,25 @@ instantiate option) is what bounds the guest there.
 """.
 -spec call(instance(), iodata(), [value()], #{timeout => timeout(), fuel => non_neg_integer()}) ->
     {ok, [value()]} | error().
-call(#instance{handle = H} = Inst, Name, Args, Opts) when is_list(Args), is_map(Opts) ->
+call(Inst, Name, Args, Opts) when is_list(Args), is_map(Opts) ->
+    do_call(Inst, iolist_to_binary(Name), Args, Opts).
+
+-doc #{equiv => call_ref(Inst, Ref, Args, #{})}.
+-spec call_ref(instance(), ref(), [value()]) -> {ok, [value()]} | error().
+call_ref(Inst, Ref, Args) -> call_ref(Inst, Ref, Args, #{}).
+
+-doc """
+Call a `funcref` the instance handed out (from a table, a global, a result
+or a host function argument), with the options of `call/4`.
+""".
+-spec call_ref(instance(), ref(), [value()], #{timeout => timeout(), fuel => non_neg_integer()}) ->
+    {ok, [value()]} | error().
+call_ref(Inst, Ref, Args, Opts) when is_reference(Ref), is_list(Args), is_map(Opts) ->
+    do_call(Inst, Ref, Args, Opts).
+
+do_call(#instance{handle = H} = Inst, Name, Args, Opts) ->
     Id = erlang:unique_integer([positive, monotonic]),
-    case wasmtime_nif:call(H, iolist_to_binary(Name), Args, Id, maps:get(fuel, Opts, undefined)) of
+    case wasmtime_nif:call(H, Name, Args, Id, maps:get(fuel, Opts, undefined)) of
         enqueued -> wait_result(Inst, Id, maps:get(timeout, Opts, infinity));
         {error, _} = Error -> Error
     end.
@@ -646,7 +692,7 @@ format_reason(Term) -> unicode:characters_to_binary(io_lib:format("~0p", [Term])
 
 %% ------------------------------------------------------------------- memory
 
--doc "Read an exported global. Reference-typed globals are refused.".
+-doc "Read an exported global; a reference-typed one gives a `ref()`, `null` or `{i31, N}`.".
 -spec global_get(instance(), iodata()) -> {ok, value()} | error().
 global_get(#instance{handle = H}, Name) -> wasmtime_nif:global_get(H, Name).
 
@@ -660,7 +706,72 @@ table_size(#instance{handle = H}, Name) -> wasmtime_nif:table_size(H, Name).
 
 -doc "Grow an exported table by `Delta` null elements; returns the previous size.".
 -spec table_grow(instance(), iodata(), non_neg_integer()) -> {ok, non_neg_integer()} | error().
-table_grow(#instance{handle = H}, Name, Delta) -> wasmtime_nif:table_grow(H, Name, Delta).
+table_grow(Inst, Name, Delta) -> table_grow(Inst, Name, Delta, null).
+
+-doc "Grow an exported table by `Delta` elements holding `Init`; returns the previous size.".
+-spec table_grow(instance(), iodata(), non_neg_integer(), value()) ->
+    {ok, non_neg_integer()} | error().
+table_grow(#instance{handle = H}, Name, Delta, Init) ->
+    wasmtime_nif:table_grow(H, Name, Delta, Init).
+
+-doc "Read an element of an exported table: a `ref()` or `null`.".
+-spec table_get(instance(), iodata(), non_neg_integer()) -> {ok, value()} | error().
+table_get(#instance{handle = H}, Name, Index) -> wasmtime_nif:table_get(H, Name, Index).
+
+-doc "Write an element of an exported table: a `ref()` of the table's type, or `null`.".
+-spec table_set(instance(), iodata(), non_neg_integer(), value()) -> ok | error().
+table_set(#instance{handle = H}, Name, Index, Value) ->
+    wasmtime_nif:table_set(H, Name, Index, Value).
+
+-doc """
+What a reference is: `#{kind => externref | funcref | struct | array | anyref,
+instance => Ref}` where `instance` is the `ref/1` of the instance it belongs to.
+""".
+-spec ref_info(ref()) ->
+    #{kind := externref | funcref | struct | array | anyref, instance := reference()}.
+ref_info(Ref) -> wasmtime_nif:ref_info(Ref).
+
+-doc """
+Wrap an Erlang term as an `externref` the guest can hold and hand back.
+
+The term is copied; `externref_data/1` copies it out again. The object lives
+while any `ref()` to it or the guest reaches it. Fails with
+`kind => gc_heap_full` when Wasmtime cannot allocate; `gc/1` may make room.
+""".
+-spec externref(instance(), term()) -> {ok, ref()} | error().
+externref(#instance{handle = H}, Term) -> wasmtime_nif:externref(H, Term).
+
+-doc "The term an `externref/2` reference wraps.".
+-spec externref_data(ref()) -> {ok, term()} | error().
+externref_data(Ref) -> wasmtime_nif:externref_data(Ref).
+
+-doc "Read field `Index` of a struct the guest created.".
+-spec struct_get(ref(), non_neg_integer()) -> {ok, value()} | error().
+struct_get(Ref, Index) -> wasmtime_nif:struct_get(Ref, Index).
+
+-doc "Write field `Index` of a struct; `i8` and `i16` fields take integers.".
+-spec struct_set(ref(), non_neg_integer(), value()) -> ok | error().
+struct_set(Ref, Index, Value) -> wasmtime_nif:struct_set(Ref, Index, Value).
+
+-doc "The length of an array the guest created.".
+-spec array_len(ref()) -> {ok, non_neg_integer()} | error().
+array_len(Ref) -> wasmtime_nif:array_len(Ref).
+
+-doc "Read element `Index` of an array.".
+-spec array_get(ref(), non_neg_integer()) -> {ok, value()} | error().
+array_get(Ref, Index) -> wasmtime_nif:array_get(Ref, Index).
+
+-doc "Write element `Index` of an array.".
+-spec array_set(ref(), non_neg_integer(), value()) -> ok | error().
+array_set(Ref, Index, Value) -> wasmtime_nif:array_set(Ref, Index, Value).
+
+-doc """
+Run the instance's garbage collector now. Objects no longer reachable from
+the guest or from a `ref()` are reclaimed and `externref/2` terms released.
+Fails with `kind => busy` while the guest runs.
+""".
+-spec gc(instance()) -> ok | error().
+gc(#instance{handle = H}) -> wasmtime_nif:gc(H).
 
 -doc "Fuel left after the last call, for a module compiled with `fuel => true`.".
 -spec fuel_remaining(instance()) -> {ok, non_neg_integer()} | error().

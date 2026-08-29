@@ -104,7 +104,11 @@ hand long work to another process.
   [streams](streams.md).
 - Only function imports can be provided from Erlang. A memory, table or global
   import fails instantiation with `kind => unsupported_import`.
-- Imports with reference-typed parameters or results (`funcref`, `externref`)
+- A host function can wait for the guest's own callback only by keeping the
+  `funcref` it received and calling it with `call_ref/3` after the call
+  returns: `call_ref` from inside the fun is refused as `reentrant`, like
+  any call on the instance the fun runs on. See [references](references.md).
+- Imports with exception-typed parameters or results (`exnref`)
   are refused with `kind => unsupported_type`.
 - An import the module needs and the map does not provide fails instantiation
   with `class => link`. Extra keys in the map are ignored, so one map can serve

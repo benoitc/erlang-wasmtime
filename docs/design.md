@@ -32,7 +32,10 @@ thread, but never from two at once.
 
 `c_src/nif.h` holds every struct and the prototypes shared between files.
 `src/wasmtime.erl` is the public API and owns defaults and option
-validation; `src/wasmtime_nif.erl` is only the NIF stub table.
+validation; `src/wasmtime_nif.erl` is only the NIF stub table. Options
+reach the NIF as maps read by key (`parse_options`, `configure_wasi` in
+`nif_instantiate.c`), never by tuple position, so the two sides cannot
+drift silently: a missing or ill-typed key is `badarg` naming the key.
 
 ## Ownership
 
@@ -81,15 +84,15 @@ changed.
 
 | Field | Meaning |
 |---|---|
-| `state` | `ST_IDLE` (no request), `ST_RUNNING` (guest executing on the worker), `ST_IN_HOST` (guest parked in a host function or a stream wait, store usable by the mutex holder) |
-| `head`, `tail`, `current` | the request queue and the request being served |
-| `stopping` | no request will ever start again; the worker exits when the queue drains |
-| `abort` | the current request must end: set by `stop_current`, read by host and stream waits |
+| `queue.state` | `ST_IDLE` (no request), `ST_RUNNING` (guest executing on the worker), `ST_IN_HOST` (guest parked in a host function, store usable by the mutex holder) |
+| `queue.head`, `queue.tail`, `queue.current` | the request queue and the request being served |
+| `queue.stopping` | no request will ever start again; the worker exits when the queue drains |
+| `host.abort` | the current request must end: set by `stop_current`, read by host and stream waits |
 | `interrupt` (atomic) | same signal for the guest itself, read by the epoch callback every 10 ms |
 | `req->cancelled` | the caller does not want the result (died or timed out): run nothing if not started, send nothing if running |
-| `has_reply`, `reply` | the host call answer arrived |
-| `interrupted_fired`, `host_failed`, `host_msg` | how the running request ended, worker thread only, read by `outcome` |
-| `instantiated` | the store holds a live instance; false before `do_instantiate` succeeds |
+| `host.has_reply`, `host.reply` | the host call answer arrived |
+| `interrupted_fired`, `host.failed`, `host.msg` | how the running request ended, worker thread only, read by `outcome` |
+| `wasm.instantiated` | the store holds a live instance; false before `do_instantiate` succeeds |
 
 Transitions, by who makes them:
 

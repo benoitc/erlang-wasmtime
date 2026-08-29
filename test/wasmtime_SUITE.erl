@@ -14,6 +14,7 @@
     host_timeout/1,
     host_exception/1,
     reference_types_cross/1,
+    nif_options_by_key/1,
     memory_access/1,
     memory_limit/1,
     instances_are_isolated/1,
@@ -45,6 +46,7 @@ all() ->
         host_timeout,
         host_exception,
         reference_types_cross,
+        nif_options_by_key,
         memory_access,
         memory_limit,
         instances_are_isolated,
@@ -543,4 +545,37 @@ timeout_keeps_a_result_that_just_arrived(Config) ->
     after 0 -> ok
     end,
     {ok, [3]} = wasmtime:call(Inst, ~"add", [1, 2]),
+    ok.
+
+nif_options_by_key(_) ->
+    %% the NIF reads its options by key and names a missing or ill-typed one
+    {ok, Mod} = wasmtime:compile(<<0, "asm", 1, 0, 0, 0>>),
+    Ref = make_ref(),
+    Id = erlang:unique_integer([positive]),
+    {ok, _} = wasmtime_nif:instantiate(Mod, #{}, Ref, Id),
+    receive
+        {wasmtime_result, Ref, Id, {error, #{kind := badarg, message := M1}}} ->
+            {_, _} = binary:match(M1, ~"imports")
+    after 2000 -> error(no_result)
+    end,
+    Id2 = erlang:unique_integer([positive]),
+    Good = #{
+        imports => [],
+        wasi => none,
+        memory_limit => -1,
+        max_tables => 1,
+        max_table_elements => 1,
+        max_instances => 1,
+        host_timeout => 1000,
+        host => undefined,
+        stream => self(),
+        inbox_limit => 1,
+        shim => undefined
+    },
+    {ok, _} = wasmtime_nif:instantiate(Mod, Good#{host_timeout => bad}, Ref, Id2),
+    receive
+        {wasmtime_result, Ref, Id2, {error, #{kind := badarg, message := M2}}} ->
+            {_, _} = binary:match(M2, ~"host_timeout")
+    after 2000 -> error(no_result)
+    end,
     ok.

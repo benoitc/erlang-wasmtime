@@ -85,6 +85,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -101,7 +102,9 @@ extern ERL_NIF_TERM atom_ok, atom_error, atom_true, atom_false, atom_compiler, a
     atom_tag, atom_wasmtime_result, atom_wasmtime_host_call, atom_no_pending_host_call,
     atom_enqueued, atom_stream, atom_wasmtime_stream, atom_stdout, atom_stderr, atom_channel,
     atom_null, atom_i31, atom_externref, atom_funcref, atom_struct, atom_array, atom_anyref,
-    atom_instance;
+    atom_instance, atom_imports, atom_wasi, atom_memory_limit, atom_max_tables,
+    atom_max_table_elements, atom_max_instances, atom_host_timeout, atom_host, atom_inbox_limit,
+    atom_shim, atom_args, atom_env, atom_dirs, atom_stdin, atom_output_limit;
 
 /* -------------------------------------------------------------- types -- */
 /* wasm_valtype_kind aborts the process on v128 and on non-nullable references

@@ -417,14 +417,8 @@ instantiate(Mod, Opts) when is_map(Opts) ->
             Error
     end.
 
-%% The tuple the NIF reads; see do_instantiate in wasmtime_nif.c.
+%% The map the NIF reads by key; see parse_options in c_src/nif_instantiate.c.
 nif_options(Mod, Imports, Opts) ->
-    Limits = {
-        limit(memory_limit, Opts, ?DEFAULT_MEMORY_LIMIT),
-        limit(max_tables, Opts, 100),
-        limit(max_table_elements, Opts, 10_000_000),
-        limit(max_instances, Opts, 10)
-    },
     HostTimeout =
         case maps:get(host_timeout, Opts, ?DEFAULT_HOST_TIMEOUT) of
             infinity -> 16#FFFFFFFF;
@@ -437,22 +431,25 @@ nif_options(Mod, Imports, Opts) ->
     InboxLimit = maps:get(inbox_limit, Opts, ?DEFAULT_INBOX_LIMIT),
     true = is_integer(InboxLimit) andalso InboxLimit > 0,
     Wasi = wasi_options(maps:get(wasi, Opts, none)),
-    {
-        maps:keys(Imports),
-        Wasi,
-        Limits,
-        HostTimeout,
-        HostPid,
-        StreamPid,
-        InboxLimit,
-        stdin_shim(Mod, Wasi)
+    #{
+        imports => maps:keys(Imports),
+        wasi => Wasi,
+        memory_limit => limit(memory_limit, Opts, ?DEFAULT_MEMORY_LIMIT),
+        max_tables => limit(max_tables, Opts, 100),
+        max_table_elements => limit(max_table_elements, Opts, 10_000_000),
+        max_instances => limit(max_instances, Opts, 10),
+        host_timeout => HostTimeout,
+        host => HostPid,
+        stream => StreamPid,
+        inbox_limit => InboxLimit,
+        shim => stdin_shim(Mod, Wasi)
     }.
 
 %% `stdin => stream` forwards reads of other fds through a small module.
 %% A full build compiles it; a runtime-only build loads the precompiled
 %% copy for this platform and the module's fuel setting from priv/shims
 %% (scripts/precompile-shims.escript), or `undefined` when there is none.
-stdin_shim(Mod, {_, _, _, stream, _, _, _}) ->
+stdin_shim(Mod, #{stdin := stream}) ->
     case wasmtime:features() of
         #{compiler := true} ->
             undefined;
@@ -509,20 +506,22 @@ limit(Key, Opts, Default) ->
 wasi_options(none) ->
     none;
 wasi_options(Wasi) when is_map(Wasi) ->
-    {
-        case maps:get(args, Wasi, []) of
-            inherit -> inherit;
-            Args -> [bin(A) || A <- Args]
-        end,
-        case maps:get(env, Wasi, []) of
-            inherit -> inherit;
-            Env -> [{bin(K), bin(V)} || {K, V} <- Env]
-        end,
-        [{bin(Guest), bin(Host), Perm} || {Guest, Host, Perm} <- maps:get(dirs, Wasi, [])],
-        stdio(maps:get(stdin, Wasi, none)),
-        stdio(maps:get(stdout, Wasi, none)),
-        stdio(maps:get(stderr, Wasi, none)),
-        maps:get(output_limit, Wasi, ?DEFAULT_OUTPUT_LIMIT)
+    #{
+        args =>
+            case maps:get(args, Wasi, []) of
+                inherit -> inherit;
+                Args -> [bin(A) || A <- Args]
+            end,
+        env =>
+            case maps:get(env, Wasi, []) of
+                inherit -> inherit;
+                Env -> [{bin(K), bin(V)} || {K, V} <- Env]
+            end,
+        dirs => [{bin(Guest), bin(Host), Perm} || {Guest, Host, Perm} <- maps:get(dirs, Wasi, [])],
+        stdin => stdio(maps:get(stdin, Wasi, none)),
+        stdout => stdio(maps:get(stdout, Wasi, none)),
+        stderr => stdio(maps:get(stderr, Wasi, none)),
+        output_limit => maps:get(output_limit, Wasi, ?DEFAULT_OUTPUT_LIMIT)
     }.
 
 stdio(none) -> none;

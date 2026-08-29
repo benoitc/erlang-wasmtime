@@ -542,7 +542,7 @@ static ERL_NIF_TERM nif_version(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
   return mk_binary(env, WASMTIME_VERSION, strlen(WASMTIME_VERSION));
 }
 
-static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
+static void open_atoms(ErlNifEnv *env) {
 #define A(name, str) name = enif_make_atom(env, str)
   A(atom_ok, "ok");
   A(atom_error, "error");
@@ -595,8 +595,25 @@ static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
   A(atom_array, "array");
   A(atom_anyref, "anyref");
   A(atom_instance, "instance");
+  A(atom_imports, "imports");
+  A(atom_wasi, "wasi");
+  A(atom_memory_limit, "memory_limit");
+  A(atom_max_tables, "max_tables");
+  A(atom_max_table_elements, "max_table_elements");
+  A(atom_max_instances, "max_instances");
+  A(atom_host_timeout, "host_timeout");
+  A(atom_host, "host");
+  A(atom_inbox_limit, "inbox_limit");
+  A(atom_shim, "shim");
+  A(atom_args, "args");
+  A(atom_env, "env");
+  A(atom_dirs, "dirs");
+  A(atom_stdin, "stdin");
+  A(atom_output_limit, "output_limit");
 #undef A
+}
 
+static int open_resources(ErlNifEnv *env) {
   ErlNifResourceTypeInit mi = {.dtor = module_dtor};
   ErlNifResourceTypeInit ii = {.dtor = instance_dtor, .down = instance_down};
   ErlNifResourceTypeInit hi = {.dtor = handle_dtor};
@@ -605,13 +622,21 @@ static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
   instance_type = enif_open_resource_type_x(env, "wasmtime_instance", &ii, ERL_NIF_RT_CREATE, NULL);
   handle_type = enif_open_resource_type_x(env, "wasmtime_handle", &hi, ERL_NIF_RT_CREATE, NULL);
   ref_type = enif_open_resource_type_x(env, "wasmtime_ref", &ri, ERL_NIF_RT_CREATE, NULL);
-  if (!module_type || !instance_type || !handle_type || !ref_type) return -1;
+  return module_type && instance_type && handle_type && ref_type;
+}
 
-  /* The default engine exists from the start; others come on first use. */
+/* The default engine exists from the start; others come on first use. */
+static int start_default_engine(ErlNifEnv *env) {
   ERL_NIF_TERM err;
   ERL_NIF_TERM plain =
       enif_make_tuple3(env, atom_false, mk_atom(env, "speed"), enif_make_list(env, 0));
-  if (!engine_for(env, plain, &err)) return -1;
+  return engine_for(env, plain, &err) != NULL;
+}
+
+static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
+  open_atoms(env);
+  if (!open_resources(env)) return -1;
+  if (!start_default_engine(env)) return -1;
   if (!ticker_start()) return -1;
   return 0;
 }

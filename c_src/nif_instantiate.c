@@ -14,18 +14,21 @@ static char *bin_to_cstr(ErlNifEnv *env, ERL_NIF_TERM t) {
   return s;
 }
 
-/* Wasi :: none | {Args, Env, Dirs, Stdin, Stdout, Stderr, OutputLimit}
- * Args  :: inherit | [binary()]     Env :: inherit | [{binary(), binary()}]
- * Stdin :: none | inherit | {file, Path} | {binary, Bytes}
- * Stdout, Stderr :: none | inherit | {file, Path} | capture
- * Dirs  :: [{GuestPath, HostPath, read | write}] */
+/* Wasi :: none | #{args, env, dirs, stdin, stdout, stderr, output_limit}
+ * (wasi_options/1 in wasmtime.erl fills every key)
+ * args  :: inherit | [binary()]     env :: inherit | [{binary(), binary()}]
+ * stdin :: none | inherit | stream | {file, Path} | {binary, Bytes}
+ * stdout, stderr :: none | inherit | stream | {file, Path} | capture
+ * dirs  :: [{GuestPath, HostPath, read | write}] */
 static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *out,
                                    ERL_NIF_TERM wasi) {
-  const ERL_NIF_TERM *t;
-  int arity;
+  ERL_NIF_TERM t[7];
+  const ERL_NIF_TERM keys[7] = {atom_args,   atom_env,    atom_dirs,        atom_stdin,
+                                atom_stdout, atom_stderr, atom_output_limit};
   if (enif_is_identical(wasi, atom_none)) return 0;
-  if (!enif_get_tuple(env, wasi, &arity, &t) || arity != 7)
-    return mk_error_s(out, "wasi", "config", "wasi option is malformed");
+  for (int i = 0; i < 7; i++)
+    if (!enif_get_map_value(env, wasi, keys[i], &t[i]))
+      return mk_error_s(out, "wasi", "config", "wasi option is malformed");
 #if !NIF_HAVE_WASI
   return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
 #else
@@ -186,54 +189,145 @@ done:
 #endif
 }
 
-/* Opts :: {Imports :: [{Module, Name}], Wasi, Limits, HostTimeoutMs, HostPid,
- *          StreamPid, InboxLimit, Shim :: binary() | undefined}
- * Limits :: {MemoryBytes, Tables, TableElements, Instances}, -1 = unlimited
- * HostPid :: pid() | undefined */
-ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
-  ErlNifEnv *env = req->env;
-  const ERL_NIF_TERM *o, *lim;
-  int arity;
-  if (!enif_get_tuple(env, req->opts, &arity, &o) || arity != 8 ||
-      !enif_get_tuple(env, o[2], &arity, &lim) || arity != 4)
-    return mk_error_s(out, "link", "badarg", "malformed options");
-  inst->host.has_pid = enif_get_local_pid(env, o[4], &inst->host.pid);
+/* What instantiate/2 passes, as nif_options/3 in wasmtime.erl builds it:
+ * every key present, defaults already applied. */
+typedef struct {
+  ERL_NIF_TERM imports; /* [{Module, Name}]: the host functions to bind */
+  ERL_NIF_TERM wasi;    /* none | map, see configure_wasi */
+  ERL_NIF_TERM shim;    /* binary() | undefined: the precompiled stdin shim */
+  ErlNifSInt64 memory_limit, max_tables, max_table_elements, max_instances; /* -1: unlimited */
+} opts_t;
 
-  ErlNifSInt64 mem, tables, elems, instances;
-  unsigned host_timeout;
-  ErlNifUInt64 inbox_limit;
-  if (!enif_get_int64(env, lim[0], &mem) || !enif_get_int64(env, lim[1], &tables) ||
-      !enif_get_int64(env, lim[2], &elems) || !enif_get_int64(env, lim[3], &instances) ||
-      !enif_get_uint(env, o[3], &host_timeout) ||
-      !enif_get_local_pid(env, o[5], &inst->inbox.stream_pid) ||
-      !enif_get_uint64(env, o[6], &inbox_limit))
-    return mk_error_s(out, "link", "badarg", "malformed limits");
-  inst->host.timeout_ms = host_timeout;
-  inst->inbox.limit = inbox_limit;
+static ERL_NIF_TERM opt_error(ErlNifEnv *out, const char *key) {
+  char msg[80];
+  snprintf(msg, sizeof msg, "option %s is missing or of the wrong type", key);
+  return mk_error_s(out, "link", "badarg", msg);
+}
 
-  inst->wasm.store = wasmtime_store_new(inst->wasm.mod->engine->engine, NULL, NULL);
+/* Reads the options map into `o` and the instance fields it sets. */
+static ERL_NIF_TERM parse_options(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM map, opts_t *o,
+                                  ErlNifEnv *out) {
+  ERL_NIF_TERM v;
+  if (!enif_get_map_value(env, map, atom_imports, &o->imports) || !enif_is_list(env, o->imports))
+    return opt_error(out, "imports");
+  if (!enif_get_map_value(env, map, atom_wasi, &o->wasi)) return opt_error(out, "wasi");
+  if (!enif_get_map_value(env, map, atom_shim, &o->shim)) return opt_error(out, "shim");
+  struct {
+    ERL_NIF_TERM key;
+    const char *name;
+    ErlNifSInt64 *dst;
+  } limits[4] = {{atom_memory_limit, "memory_limit", &o->memory_limit},
+                 {atom_max_tables, "max_tables", &o->max_tables},
+                 {atom_max_table_elements, "max_table_elements", &o->max_table_elements},
+                 {atom_max_instances, "max_instances", &o->max_instances}};
+  for (int i = 0; i < 4; i++)
+    if (!enif_get_map_value(env, map, limits[i].key, &v) || !enif_get_int64(env, v, limits[i].dst))
+      return opt_error(out, limits[i].name);
+  if (!enif_get_map_value(env, map, atom_host_timeout, &v) ||
+      !enif_get_uint(env, v, &inst->host.timeout_ms))
+    return opt_error(out, "host_timeout");
+  if (!enif_get_map_value(env, map, atom_host, &v)) return opt_error(out, "host");
+  inst->host.has_pid = enif_get_local_pid(env, v, &inst->host.pid);
+  if (!inst->host.has_pid && !enif_is_identical(v, atom_undefined)) return opt_error(out, "host");
+  if (!enif_get_map_value(env, map, atom_stream, &v) ||
+      !enif_get_local_pid(env, v, &inst->inbox.stream_pid))
+    return opt_error(out, "stream");
+  ErlNifUInt64 limit;
+  if (!enif_get_map_value(env, map, atom_inbox_limit, &v) || !enif_get_uint64(env, v, &limit))
+    return opt_error(out, "inbox_limit");
+  inst->inbox.limit = limit;
+  return 0;
+}
+
+/* The store, its limits, the epoch hook and an empty linker. */
+static void configure_store(instance_t *inst, const opts_t *o) {
+  wasm_engine_t *engine = inst->wasm.mod->engine->engine;
+  inst->wasm.store = wasmtime_store_new(engine, NULL, NULL);
   inst->wasm.ctx = wasmtime_store_context(inst->wasm.store);
-  wasmtime_store_limiter(inst->wasm.store, mem, elems, instances, tables, -1);
+  wasmtime_store_limiter(inst->wasm.store, o->memory_limit, o->max_table_elements, o->max_instances,
+                         o->max_tables, -1);
   wasmtime_store_epoch_deadline_callback(inst->wasm.store, epoch_callback, inst, NULL);
   wasmtime_context_set_epoch_deadline(inst->wasm.ctx, 1);
-  inst->wasm.linker = wasmtime_linker_new(inst->wasm.mod->engine->engine);
+  inst->wasm.linker = wasmtime_linker_new(engine);
+}
 
-  ERL_NIF_TERM wasi_err = configure_wasi(inst, env, out, o[1]);
-  if (wasi_err) return wasi_err;
+/* The import type named {Module, Name}, or NULL when the module does not
+ * have it. */
+static const wasm_importtype_t *find_import(const wasm_importtype_vec_t *imports,
+                                            const char *module, const char *name) {
+  for (size_t i = 0; i < imports->size; i++) {
+    const wasm_name_t *m = wasm_importtype_module(imports->data[i]);
+    const wasm_name_t *n = wasm_importtype_name(imports->data[i]);
+    if (m->size == strlen(module) && memcmp(m->data, module, m->size) == 0 &&
+        n->size == strlen(name) && memcmp(n->data, name, n->size) == 0)
+      return imports->data[i];
+  }
+  return NULL;
+}
 
-  /* Host functions: only imports named in the map are defined. Anything else
-   * the module needs makes wasmtime_linker_instantiate fail with a link error. */
+/* Binds one Erlang-backed import. Takes ownership of `module` and `name`. */
+static ERL_NIF_TERM bind_import(instance_t *inst, ErlNifEnv *out, char *module, char *name,
+                                const wasm_importtype_t *found) {
+  if (strcmp(module, "erlang") == 0 && (strcmp(name, "send") == 0 || strcmp(name, "recv") == 0)) {
+    enif_free(module);
+    enif_free(name);
+    return mk_error_s(out, "link", "reserved_import",
+                      "erlang.send and erlang.recv are provided by the runtime");
+  }
+  const wasm_externtype_t *et = wasm_importtype_type(found);
+  if (wasm_externtype_kind(et) != WASM_EXTERN_FUNC) {
+    enif_free(module);
+    enif_free(name);
+    return mk_error_s(out, "link", "unsupported_import",
+                      "only function imports can be provided from Erlang");
+  }
+  const wasm_functype_t *ft = wasm_externtype_as_functype_const(et);
+  const wasm_valtype_vec_t *rs = wasm_functype_results(ft);
+  shape_t sh = shape_of(ft);
+  if (sh.exn || (sh.refs && sh.v128) || rs->size > MAX_VALS) {
+    enif_free(module);
+    enif_free(name);
+    return mk_error_s(out, "link", "unsupported_type",
+                      sh.exn    ? "host functions cannot take or return exception references"
+                      : sh.refs ? "v128 and references cannot mix in one signature"
+                                : "too many results");
+  }
+  hostfn_t *fn = &inst->wasm.hostfns[inst->wasm.nhostfns];
+  fn->module = module;
+  fn->name = name;
+  fn->type = wasm_functype_copy(ft);
+  fn->typed = sh.refs;
+  hostfn_env_t *he = enif_alloc(sizeof *he);
+  he->inst = inst;
+  he->idx = inst->wasm.nhostfns;
+  inst->wasm.nhostfns++;
+  /* The linker owns `he` from here and frees it with enif_free, on the
+   * error path too. */
+  wasmtime_error_t *e =
+      fn->typed
+          ? wasmtime_linker_define_func(inst->wasm.linker, module, strlen(module), name,
+                                        strlen(name), fn->type, host_callback_typed, he, enif_free)
+          : wasmtime_linker_define_func_unchecked(inst->wasm.linker, module, strlen(module), name,
+                                                  strlen(name), fn->type, host_callback, he,
+                                                  enif_free);
+  return e ? error_to_term(out, e, "link") : 0;
+}
+
+/* Host functions: only imports named in the map are defined. Anything else
+ * the module needs makes wasmtime_linker_instantiate fail with a link error.
+ * The erlang.* imports are bound by the runtime when the module has them. */
+static ERL_NIF_TERM bind_imports(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM list,
+                                 ErlNifEnv *out) {
   unsigned nimports;
-  if (!enif_get_list_length(env, o[0], &nimports))
+  if (!enif_get_list_length(env, list, &nimports))
     return mk_error_s(out, "link", "badarg", "imports must be a list");
   inst->wasm.hostfns = enif_alloc(sizeof(hostfn_t) * (nimports + 1));
   memset(inst->wasm.hostfns, 0, sizeof(hostfn_t) * (nimports + 1));
 
   wasm_importtype_vec_t imports;
   wasmtime_module_imports(inst->wasm.mod->mod, &imports);
-  ERL_NIF_TERM l = o[0], h;
-  ERL_NIF_TERM result = atom_ok;
-  while (enif_get_list_cell(env, l, &h, &l)) {
+  ERL_NIF_TERM h, result = 0;
+  while (!result && enif_get_list_cell(env, list, &h, &list)) {
     const ERL_NIF_TERM *mn;
     int ar;
     if (!enif_get_tuple(env, h, &ar, &mn) || ar != 2) {
@@ -247,16 +341,7 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
       result = mk_error_s(out, "link", "badarg", "imports keys must be binaries");
       break;
     }
-    const wasm_importtype_t *found = NULL;
-    for (size_t i = 0; i < imports.size; i++) {
-      const wasm_name_t *m = wasm_importtype_module(imports.data[i]);
-      const wasm_name_t *n = wasm_importtype_name(imports.data[i]);
-      if (m->size == strlen(module) && memcmp(m->data, module, m->size) == 0 &&
-          n->size == strlen(name) && memcmp(n->data, name, n->size) == 0) {
-        found = imports.data[i];
-        break;
-      }
-    }
+    const wasm_importtype_t *found = find_import(&imports, module, name);
     if (!found) {
       /* Providing a fun for an import the module does not have is harmless;
        * skip it so the same imports map can serve several modules. */
@@ -264,93 +349,57 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
       enif_free(name);
       continue;
     }
-    if (strcmp(module, "erlang") == 0 && (strcmp(name, "send") == 0 || strcmp(name, "recv") == 0)) {
-      enif_free(module);
-      enif_free(name);
-      result = mk_error_s(out, "link", "reserved_import",
-                          "erlang.send and erlang.recv are provided by the runtime");
-      break;
-    }
-    const wasm_externtype_t *et = wasm_importtype_type(found);
-    if (wasm_externtype_kind(et) != WASM_EXTERN_FUNC) {
-      enif_free(module);
-      enif_free(name);
-      result = mk_error_s(out, "link", "unsupported_import",
-                          "only function imports can be provided from Erlang");
-      break;
-    }
-    const wasm_functype_t *ft = wasm_externtype_as_functype_const(et);
-    const wasm_valtype_vec_t *rs = wasm_functype_results(ft);
-    shape_t sh = shape_of(ft);
-    if (sh.exn || (sh.refs && sh.v128) || rs->size > MAX_VALS) {
-      enif_free(module);
-      enif_free(name);
-      result = mk_error_s(out, "link", "unsupported_type",
-                          sh.exn    ? "host functions cannot take or return exception references"
-                          : sh.refs ? "v128 and references cannot mix in one signature"
-                                    : "too many results");
-      break;
-    }
-    hostfn_t *fn = &inst->wasm.hostfns[inst->wasm.nhostfns];
-    fn->module = module;
-    fn->name = name;
-    fn->type = wasm_functype_copy(ft);
-    fn->typed = sh.refs;
-    hostfn_env_t *he = enif_alloc(sizeof *he);
-    he->inst = inst;
-    he->idx = inst->wasm.nhostfns;
-    inst->wasm.nhostfns++;
-    /* The linker owns `he` from here and frees it with enif_free, on the
-     * error path too. */
-    wasmtime_error_t *e =
-        fn->typed ? wasmtime_linker_define_func(inst->wasm.linker, module, strlen(module), name,
-                                                strlen(name), fn->type, host_callback_typed, he,
-                                                enif_free)
-                  : wasmtime_linker_define_func_unchecked(inst->wasm.linker, module, strlen(module),
-                                                          name, strlen(name), fn->type,
-                                                          host_callback, he, enif_free);
-    if (e) {
-      result = error_to_term(out, e, "link");
-      break;
-    }
+    result = bind_import(inst, out, module, name, found);
   }
-  if (enif_is_identical(result, atom_ok)) {
-    ERL_NIF_TERM e = define_erlang_imports(inst, out, &imports);
-    if (e) result = e;
-  }
+  if (!result) result = define_erlang_imports(inst, out, &imports);
   wasm_importtype_vec_delete(&imports);
-  if (!enif_is_identical(result, atom_ok)) return result;
+  return result;
+}
 
-  /* This runs the module's start section, which may call host functions. */
+/* Runs the module's start section, which may call host functions. */
+static ERL_NIF_TERM instantiate_module(instance_t *inst, ErlNifEnv *out) {
   wasm_trap_t *trap = NULL;
   wasmtime_error_t *e = wasmtime_linker_instantiate(
       inst->wasm.linker, inst->wasm.ctx, inst->wasm.mod->mod, &inst->wasm.instance, &trap);
-  result = outcome(inst, out, e, trap, "link");
-  if (!enif_is_identical(result, atom_ok)) return result;
+  ERL_NIF_TERM result = outcome(inst, out, e, trap, "link");
+  return enif_is_identical(result, atom_ok) ? 0 : result;
+}
 
-  /* Cache the exported memory, "memory" by name or the first one exported. */
+/* The exported memory, "memory" by name or the first one exported. */
+static void cache_memory(instance_t *inst) {
   wasmtime_extern_t ext;
   if (wasmtime_instance_export_get(inst->wasm.ctx, &inst->wasm.instance, "memory", 6, &ext) &&
       ext.kind == WASMTIME_EXTERN_MEMORY) {
     inst->wasm.memory = ext.of.memory;
     inst->wasm.has_memory = 1;
-  } else {
-    char *nm;
-    size_t nlen;
-    for (size_t i = 0;
-         wasmtime_instance_export_nth(inst->wasm.ctx, &inst->wasm.instance, i, &nm, &nlen, &ext);
-         i++) {
-      if (ext.kind == WASMTIME_EXTERN_MEMORY) {
-        inst->wasm.memory = ext.of.memory;
-        inst->wasm.has_memory = 1;
-        break;
-      }
+    return;
+  }
+  char *nm;
+  size_t nlen;
+  for (size_t i = 0;
+       wasmtime_instance_export_nth(inst->wasm.ctx, &inst->wasm.instance, i, &nm, &nlen, &ext);
+       i++) {
+    if (ext.kind == WASMTIME_EXTERN_MEMORY) {
+      inst->wasm.memory = ext.of.memory;
+      inst->wasm.has_memory = 1;
+      return;
     }
   }
-  if (inst->inbox.stdin) {
-    ERL_NIF_TERM r = link_stdin_shim(inst, env, o[7], out);
-    if (r) return r;
-  }
+}
+
+/* The REQ_INSTANTIATE request, on the worker thread. Each step answers 0
+ * or the error to send; a failure leaves the instance stopped. */
+ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
+  ErlNifEnv *env = req->env;
+  opts_t o;
+  ERL_NIF_TERM err;
+  if ((err = parse_options(inst, env, req->opts, &o, out))) return err;
+  configure_store(inst, &o);
+  if ((err = configure_wasi(inst, env, out, o.wasi))) return err;
+  if ((err = bind_imports(inst, env, o.imports, out))) return err;
+  if ((err = instantiate_module(inst, out))) return err;
+  cache_memory(inst);
+  if (inst->inbox.stdin && (err = link_stdin_shim(inst, env, o.shim, out))) return err;
   inst->wasm.instantiated = 1;
   return atom_ok;
 }

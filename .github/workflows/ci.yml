@@ -41,12 +41,14 @@ jobs:
           grep -q "disagree about compiler" err
       - name: build-nif.sh probes the library without nm
         run: |
+          # the whole toolchain except nm, so the link-test probe is what runs
           mkdir -p nonm
-          for t in cc erl find grep head cat mkdir printf tr rm cp uname ls sh env dirname basename awk sed xz tar curl mv sha256sum test; do
-            p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "nonm/$t" || true
-          done
+          for p in /usr/bin/* /bin/*; do ln -sf "$p" "nonm/$(basename "$p")"; done
+          rm -f nonm/nm
+          ln -sf "$(command -v erl)" nonm/erl
           touch c_src/wasmtime_nif.c
           PATH="$PWD/nonm" scripts/build-nif.sh 2>&1 | grep "compiler=1 wat=1 wasi=1"
+          test -f _build/probe.c
       - run: rebar3 lint
       - run: rebar3 xref
       - run: rebar3 dialyzer

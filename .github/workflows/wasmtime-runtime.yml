@@ -73,6 +73,8 @@ jobs:
             case "$a" in
               -lgcc_s) args+=("-lunwind") ;;
               --target=*) ;;
+              # a Cortex-A53 erratum workaround GNU ld knows and lld does not
+              -Wl,--fix-cortex-a53-843419) ;;
               *) args+=("$a") ;;
             esac
           done

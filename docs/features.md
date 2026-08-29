@@ -19,6 +19,10 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Precompiled modules | `serialize/1` and `deserialize/1`, Wasmtime's `.cwasm` form; see [precompiled](precompiled.md) |
 | Host functions in a dedicated process | `host => Pid` at instantiate, `handle_host_call/2` in that process |
 | Non-blocking calls | `call_async/3` and `await/2,3` |
+| Fuel metering | `compile(Bin, #{fuel => true})`, `call/4` with `fuel`, `fuel_remaining/1`; `kind => out_of_fuel` |
+| Structured traps | `trace` on trap errors: `[#{func_index, func_offset, func_name, module_name}]`, innermost first |
+| Validation without compiling | `validate/1` |
+| Globals and tables from Erlang | `global_get/2`, `global_set/3`, `table_size/2`, `table_grow/3` (null elements) |
 | WASI stdio in memory | `stdin => {binary, _}`, `stdout`/`stderr => capture` with `read_output/1` and `output_limit`; `args`/`env => inherit` |
 | Runtime-only builds | `WASMTIME_RUNTIME_ONLY=1`: no compiler, 4 MB; `features/0` reports the linked library's capabilities; see [building](building.md) |
 | Source build fallback | a platform without a prebuilt archive compiles the C API itself |
@@ -55,12 +59,16 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Wrong argument count or type | `kind => badarity`, `kind => badarg` |
 | A host function calling the instance it runs on | `kind => reentrant` |
 | `compile/1`, `{wat, _}`, `serialize/1` or the `wasi` option on a build without them | `kind => unavailable` |
+| `fuel` on a module compiled without metering | `kind => fuel_disabled` |
+| Writing a constant global | `kind => immutable` |
+| Reading a reference-typed global | `kind => unsupported_type` |
 
 ## Deferred
 
 - **Reference and GC values across the boundary.** Modules using them
-  internally run; only conversion to and from Erlang terms is missing. Needs a
-  rooting and lifetime design.
+  internally run; only conversion to and from Erlang terms is missing (that
+  includes reading `funcref`/`externref` globals and table elements; tables
+  can be sized and grown with nulls). Needs a rooting and lifetime design.
 - **Thread pool.** Measured on an M-series Mac: 13,900 instantiate, call and
   drop cycles per second from one process, 34,500 per second from eight, with
   one OS thread per instance. That covers "thousands of short-lived instances

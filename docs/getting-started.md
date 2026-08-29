@@ -91,6 +91,43 @@ served there, while it waits; a guest that calls the host earlier waits for
 `await` (within `host_timeout`), or use a `host` process. Two async calls on
 one instance run one after the other.
 
+## Bound a call by instructions instead of time
+
+```erlang
+{ok, Mod}  = wasmtime:compile(Bin, #{fuel => true}),
+{ok, Inst} = wasmtime:instantiate(Mod),
+{error, #{kind := out_of_fuel}} = wasmtime:call(Inst, ~"loop", [], #{fuel => 1000000}),
+{ok, Left} = wasmtime:fuel_remaining(Inst).
+```
+
+Fuel counts instructions (about one unit each), so the same input always
+stops at the same point, unlike `timeout`. It costs a few percent of speed
+and must be chosen at compile time; fuel belongs to the instance and is
+consumed across calls until set again.
+
+## Read traps with their frames
+
+```erlang
+{error, #{kind := unreachable, trace := [#{func_name := ~"inner"} | _]}} =
+    wasmtime:call(Inst, ~"outer", []).
+```
+
+`trace` lists the wasm frames innermost first, with the function index and
+byte offset, and names when the module carries a name section.
+
+## Globals and tables
+
+```erlang
+{ok, 7}    = wasmtime:global_get(Inst, ~"counter"),
+ok         = wasmtime:global_set(Inst, ~"counter", 8),
+{ok, 4}    = wasmtime:table_size(Inst, ~"handlers"),
+{ok, 4}    = wasmtime:table_grow(Inst, ~"handlers", 2).
+```
+
+Numeric and `v128` globals only; a constant global refuses `global_set`.
+Tables can be measured and grown (with null elements) from Erlang; their
+elements are references, which stay inside the guest.
+
 ## Read and write memory
 
 ```erlang

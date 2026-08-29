@@ -19,7 +19,8 @@ on an instance at a time; concurrent callers are queued.
 """.
 
 -export([
-    compile/1,
+    compile/1, compile/2,
+    validate/1,
     imports/1,
     exports/1,
     serialize/1,
@@ -30,6 +31,11 @@ on an instance at a time; concurrent callers are queued.
     await/2, await/3,
     interrupt/1,
     read_output/1,
+    global_get/2,
+    global_set/3,
+    table_size/2,
+    table_grow/3,
+    fuel_remaining/1,
     handle_host_call/2,
     read_memory/3, read_memory/4,
     write_memory/3, write_memory/4,
@@ -39,7 +45,15 @@ on an instance at a time; concurrent callers are queued.
 ]).
 
 -export_type([
-    module_ref/0, instance/0, call_ref/0, value/0, error/0, host_fun/0, options/0, features/0
+    module_ref/0,
+    instance/0,
+    call_ref/0,
+    value/0,
+    error/0,
+    frame/0,
+    host_fun/0,
+    options/0,
+    features/0
 ]).
 
 -define(DEFAULT_MEMORY_LIMIT, 256 * 1024 * 1024).
@@ -64,14 +78,27 @@ Erlang cannot represent; a `v128` is a 16-byte binary.
 """.
 -type value() :: integer() | float() | nan | infinity | neg_infinity | <<_:128>>.
 
--doc "Every failure has a class, a machine-readable kind and a message. Non-zero WASI exits also carry `status`.".
+-doc """
+Every failure has a class, a machine-readable kind and a message. Non-zero
+WASI exits also carry `status`; traps carry the wasm frames in `trace`,
+innermost first.
+""".
 -type error() ::
     {error, #{
-        class := compile | link | call | trap | host | wasi | memory | exit,
+        class := compile | link | call | trap | host | wasi | memory | global | table | exit,
         kind := atom(),
         message := binary(),
-        status => integer()
+        status => integer(),
+        trace => [frame()]
     }}.
+
+-doc "One wasm frame of a trap: the function's index and byte offset, and its names when the module has them.".
+-type frame() :: #{
+    func_index := non_neg_integer(),
+    func_offset := non_neg_integer(),
+    func_name := binary() | undefined,
+    module_name := binary() | undefined
+}.
 
 -doc """
 What the linked Wasmtime library can do. A runtime-only build has no
@@ -127,10 +154,36 @@ A runtime-only build has no compiler: this returns
 `{error, #{kind := unavailable}}` and modules come from `deserialize/1`.
 """.
 -spec compile(binary() | {wat, iodata()}) -> {ok, module_ref()} | error().
-compile({wat, Text}) ->
-    wasmtime_nif:compile(iolist_to_binary(Text), true);
-compile(Bin) when is_binary(Bin) ->
-    wasmtime_nif:compile(Bin, false).
+compile(Source) -> compile(Source, #{}).
+
+-doc """
+Compile with options.
+
+- `fuel => true`: compile with fuel metering, so calls on instances of this
+  module can be bounded by an instruction count (`fuel` option of `call/4`,
+  `fuel_remaining/1`). Metering costs a few percent of speed, and a module
+  compiled this way is only compatible with precompiled modules of the same
+  kind.
+""".
+-spec compile(binary() | {wat, iodata()}, #{fuel => boolean()}) -> {ok, module_ref()} | error().
+compile({wat, Text}, Opts) ->
+    wasmtime_nif:compile(iolist_to_binary(Text), true, fuel_option(Opts));
+compile(Bin, Opts) when is_binary(Bin) ->
+    wasmtime_nif:compile(Bin, false, fuel_option(Opts)).
+
+fuel_option(Opts) ->
+    Fuel = maps:get(fuel, Opts, false),
+    true = is_boolean(Fuel),
+    Fuel.
+
+-doc """
+Decode and validate a binary module without compiling it.
+
+Cheaper than `compile/1` when the question is only whether the bytes are a
+well-formed module; the errors have the same shape.
+""".
+-spec validate(binary()) -> ok | error().
+validate(Bin) when is_binary(Bin) -> wasmtime_nif:validate(Bin).
 
 -doc """
 Serialize a compiled module into Wasmtime's precompiled form.
@@ -270,15 +323,19 @@ Call an exported function and wait for its results.
 Host functions the guest calls run in this process, so it must be able to
 receive messages until the call returns. With `timeout` the guest is
 interrupted when the time is up and `{error, #{kind := timeout}}` is returned.
+With `fuel` the call may execute that many units of fuel (about one per
+instruction) before it traps with `kind := out_of_fuel`; the module must have
+been compiled with `fuel => true`.
 
 `timeout` covers guest execution and the wait for it. It cannot fire while
 this process is inside one of its own host functions; `host_timeout` (an
 instantiate option) is what bounds the guest there.
 """.
--spec call(instance(), iodata(), [value()], #{timeout => timeout()}) -> {ok, [value()]} | error().
+-spec call(instance(), iodata(), [value()], #{timeout => timeout(), fuel => non_neg_integer()}) ->
+    {ok, [value()]} | error().
 call(#instance{handle = H} = Inst, Name, Args, Opts) when is_list(Args), is_map(Opts) ->
     Id = erlang:unique_integer([positive, monotonic]),
-    case wasmtime_nif:call(H, iolist_to_binary(Name), Args, Id) of
+    case wasmtime_nif:call(H, iolist_to_binary(Name), Args, Id, maps:get(fuel, Opts, undefined)) of
         enqueued -> wait_result(Inst, Id, maps:get(timeout, Opts, infinity));
         {error, _} = Error -> Error
     end.
@@ -323,7 +380,7 @@ guest that calls back before `await` waits until then, within
 -spec call_async(instance(), iodata(), [value()]) -> {ok, call_ref()} | error().
 call_async(#instance{handle = H}, Name, Args) when is_list(Args) ->
     Id = erlang:unique_integer([positive, monotonic]),
-    case wasmtime_nif:call(H, iolist_to_binary(Name), Args, Id) of
+    case wasmtime_nif:call(H, iolist_to_binary(Name), Args, Id, undefined) of
         enqueued -> {ok, {call_ref, Id}};
         {error, _} = Error -> Error
     end.
@@ -394,6 +451,26 @@ format_reason(Bin) when is_binary(Bin) -> Bin;
 format_reason(Term) -> unicode:characters_to_binary(io_lib:format("~0p", [Term])).
 
 %% ------------------------------------------------------------------- memory
+
+-doc "Read an exported global. Reference-typed globals are refused.".
+-spec global_get(instance(), iodata()) -> {ok, value()} | error().
+global_get(#instance{handle = H}, Name) -> wasmtime_nif:global_get(H, Name).
+
+-doc "Write an exported mutable global; `kind => immutable` for a constant one.".
+-spec global_set(instance(), iodata(), value()) -> ok | error().
+global_set(#instance{handle = H}, Name, Value) -> wasmtime_nif:global_set(H, Name, Value).
+
+-doc "Number of elements in an exported table.".
+-spec table_size(instance(), iodata()) -> {ok, non_neg_integer()} | error().
+table_size(#instance{handle = H}, Name) -> wasmtime_nif:table_size(H, Name).
+
+-doc "Grow an exported table by `Delta` null elements; returns the previous size.".
+-spec table_grow(instance(), iodata(), non_neg_integer()) -> {ok, non_neg_integer()} | error().
+table_grow(#instance{handle = H}, Name, Delta) -> wasmtime_nif:table_grow(H, Name, Delta).
+
+-doc "Fuel left after the last call, for a module compiled with `fuel => true`.".
+-spec fuel_remaining(instance()) -> {ok, non_neg_integer()} | error().
+fuel_remaining(#instance{handle = H}) -> wasmtime_nif:fuel_remaining(H).
 
 -doc """
 Take what the captured `stdout` and `stderr` hold and empty them.

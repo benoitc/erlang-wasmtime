@@ -66,7 +66,9 @@ kept: the guest still sees complete writes, and the two counters in the
 result say how many bytes were dropped.
 
 `args => inherit` and `env => inherit` hand the guest the VM's own command
-line and environment; the default is none of either.
+line and environment; the default is none of either. The inherited command
+line is what the platform gives a dynamically loaded library: the VM's
+arguments on Linux (glibc) and macOS, an empty list on FreeBSD.
 
 ## Notes
 

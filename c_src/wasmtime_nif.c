@@ -87,10 +87,12 @@
 /* ---------------------------------------------------------------- atoms -- */
 
 static ERL_NIF_TERM atom_ok, atom_error, atom_true, atom_false, atom_compiler, atom_wat, atom_wasi,
-    atom_none, atom_capture, atom_binary, atom_undefined, atom_inherit, atom_file, atom_read,
-    atom_write, atom_nan, atom_infinity, atom_neg_infinity, atom_class, atom_kind, atom_message,
-    atom_status, atom_not_running, atom_func, atom_global, atom_table, atom_memory, atom_tag,
-    atom_wasmtime_result, atom_wasmtime_host_call, atom_no_pending_host_call, atom_enqueued;
+    atom_none, atom_capture, atom_binary, atom_trace, atom_func_index, atom_func_offset,
+    atom_func_name, atom_module_name, atom_immutable, atom_undefined, atom_inherit, atom_file,
+    atom_read, atom_write, atom_nan, atom_infinity, atom_neg_infinity, atom_class, atom_kind,
+    atom_message, atom_status, atom_not_running, atom_func, atom_global, atom_table, atom_memory,
+    atom_tag, atom_wasmtime_result, atom_wasmtime_host_call, atom_no_pending_host_call,
+    atom_enqueued;
 
 static ERL_NIF_TERM mk_atom(ErlNifEnv *env, const char *s) {
   ERL_NIF_TERM a;
@@ -105,14 +107,45 @@ static ERL_NIF_TERM mk_binary(ErlNifEnv *env, const void *data, size_t len) {
   return t;
 }
 
-/* {error, #{class => Class, kind => Kind, message => Msg}} */
+/* {error, #{class => Class, kind => Kind, message => Msg[, trace => Frames]}} */
+static ERL_NIF_TERM mk_error_trace(ErlNifEnv *env, const char *cls, const char *kind,
+                                   const char *msg, size_t len, ERL_NIF_TERM trace) {
+  ERL_NIF_TERM keys[4] = {atom_class, atom_kind, atom_message, atom_trace};
+  ERL_NIF_TERM vals[4] = {mk_atom(env, cls), mk_atom(env, kind), mk_binary(env, msg, len), trace};
+  ERL_NIF_TERM map;
+  enif_make_map_from_arrays(env, keys, vals, trace ? 4 : 3, &map);
+  return enif_make_tuple2(env, atom_error, map);
+}
+
 static ERL_NIF_TERM mk_error(ErlNifEnv *env, const char *cls, const char *kind, const char *msg,
                              size_t len) {
-  ERL_NIF_TERM keys[3] = {atom_class, atom_kind, atom_message};
-  ERL_NIF_TERM vals[3] = {mk_atom(env, cls), mk_atom(env, kind), mk_binary(env, msg, len)};
-  ERL_NIF_TERM map;
-  enif_make_map_from_arrays(env, keys, vals, 3, &map);
-  return enif_make_tuple2(env, atom_error, map);
+  return mk_error_trace(env, cls, kind, msg, len, 0);
+}
+
+/* The wasm frames of a trap, innermost first, as
+ * [#{func_index, func_offset, func_name, module_name}]; 0 when empty.
+ * Consumes `frames`. */
+static ERL_NIF_TERM frames_term(ErlNifEnv *env, wasm_frame_vec_t *frames) {
+  if (frames->size == 0) {
+    wasm_frame_vec_delete(frames);
+    return 0;
+  }
+  ERL_NIF_TERM list = enif_make_list(env, 0);
+  for (size_t i = frames->size; i > 0; i--) {
+    const wasm_frame_t *f = frames->data[i - 1];
+    const wasm_name_t *fn = wasmtime_frame_func_name(f);
+    const wasm_name_t *mn = wasmtime_frame_module_name(f);
+    ERL_NIF_TERM keys[4] = {atom_func_index, atom_func_offset, atom_func_name, atom_module_name};
+    ERL_NIF_TERM vals[4] = {enif_make_uint(env, wasm_frame_func_index(f)),
+                            enif_make_uint64(env, wasm_frame_func_offset(f)),
+                            fn ? mk_binary(env, fn->data, fn->size) : atom_undefined,
+                            mn ? mk_binary(env, mn->data, mn->size) : atom_undefined};
+    ERL_NIF_TERM map;
+    enif_make_map_from_arrays(env, keys, vals, 4, &map);
+    list = enif_make_list_cell(env, map, list);
+  }
+  wasm_frame_vec_delete(frames);
+  return list;
 }
 
 static ERL_NIF_TERM mk_error_s(ErlNifEnv *env, const char *cls, const char *kind, const char *msg) {
@@ -132,6 +165,7 @@ static const char *trap_kind(wasmtime_trap_code_t code) {
   case WASMTIME_TRAP_CODE_BAD_CONVERSION_TO_INTEGER: return "bad_conversion_to_integer";
   case WASMTIME_TRAP_CODE_UNREACHABLE_CODE_REACHED: return "unreachable";
   case WASMTIME_TRAP_CODE_INTERRUPT: return "interrupt";
+  case WASMTIME_TRAP_CODE_OUT_OF_FUEL: return "out_of_fuel";
   default: return "trap";
   }
 }
@@ -144,10 +178,13 @@ static ERL_NIF_TERM trap_to_term(ErlNifEnv *env, wasm_trap_t *trap) {
   ERL_NIF_TERM t;
   /* Wasmtime NUL-terminates trap messages; drop the terminator. */
   size_t len = msg.size && msg.data[msg.size - 1] == 0 ? msg.size - 1 : msg.size;
+  wasm_frame_vec_t frames;
+  wasm_trap_trace(trap, &frames);
+  ERL_NIF_TERM trace = frames_term(env, &frames);
   if (wasmtime_trap_code(trap, &code))
-    t = mk_error(env, "trap", trap_kind(code), msg.data, len);
+    t = mk_error_trace(env, "trap", trap_kind(code), msg.data, len, trace);
   else
-    t = mk_error(env, "trap", "trap", msg.data, len);
+    t = mk_error_trace(env, "trap", "trap", msg.data, len, trace);
   wasm_byte_vec_delete(&msg);
   wasm_trap_delete(trap);
   return t;
@@ -173,7 +210,11 @@ static ERL_NIF_TERM error_to_term(ErlNifEnv *env, wasmtime_error_t *err, const c
   } else {
     wasm_name_t msg;
     wasmtime_error_message(err, &msg);
-    t = mk_error(env, cls, cls, msg.data, msg.size);
+    wasm_frame_vec_t frames;
+    wasmtime_error_wasm_trace(err, &frames);
+    ERL_NIF_TERM trace = frames_term(env, &frames);
+    /* an error carrying wasm frames is a trap that Wasmtime wrapped */
+    t = mk_error_trace(env, trace ? "trap" : cls, trace ? "trap" : cls, msg.data, msg.size, trace);
     wasm_byte_vec_delete(&msg);
   }
   wasmtime_error_delete(err);
@@ -278,6 +319,7 @@ static int term_to_raw(ErlNifEnv *env, ERL_NIF_TERM t, uint8_t kind, wasmtime_va
 
 typedef struct {
   wasmtime_module_t *mod;
+  int fuel; /* engine index: 0 plain, 1 with fuel metering */
 } module_res_t;
 
 enum req_kind { REQ_INSTANTIATE, REQ_CALL };
@@ -362,7 +404,10 @@ typedef struct {
 } handle_t;
 
 static ErlNifResourceType *module_type, *instance_type, *handle_type;
-static wasm_engine_t *engine;
+/* Two engines: fuel metering changes code generation and is part of a
+ * precompiled module's compatibility check, so modules pick one at compile
+ * time. The ticker bumps both epochs. */
+static wasm_engine_t *engines[2];
 static pthread_t ticker;
 static volatile int ticker_stop;
 
@@ -754,12 +799,12 @@ static ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out)
     return mk_error_s(out, "link", "badarg", "malformed limits");
   inst->host_timeout_ms = host_timeout;
 
-  inst->store = wasmtime_store_new(engine, NULL, NULL);
+  inst->store = wasmtime_store_new(engines[inst->mod->fuel], NULL, NULL);
   inst->ctx = wasmtime_store_context(inst->store);
   wasmtime_store_limiter(inst->store, mem, elems, instances, tables, -1);
   wasmtime_store_epoch_deadline_callback(inst->store, epoch_callback, inst, NULL);
   wasmtime_context_set_epoch_deadline(inst->ctx, 1);
-  inst->linker = wasmtime_linker_new(engine);
+  inst->linker = wasmtime_linker_new(engines[inst->mod->fuel]);
 
   ERL_NIF_TERM wasi_err = configure_wasi(inst, env, out, o[1]);
   if (wasi_err) return wasi_err;
@@ -924,6 +969,17 @@ static ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
       }
     }
   }
+  ErlNifUInt64 fuel;
+  if (enif_get_uint64(env, req->opts, &fuel)) {
+    wasmtime_error_t *fe = wasmtime_context_set_fuel(inst->ctx, fuel);
+    if (fe) {
+      wasmtime_error_delete(fe);
+      result =
+          mk_error_s(out, "call", "fuel_disabled",
+                     "the module was not compiled with fuel metering: compile with fuel => true");
+      goto done;
+    }
+  }
   wasmtime_context_set_epoch_deadline(inst->ctx, 1);
   {
     wasm_trap_t *trap = NULL;
@@ -1007,7 +1063,8 @@ static void *ticker_main(void *arg) {
   struct timespec ts = {0, EPOCH_TICK_NS};
   while (!__atomic_load_n(&ticker_stop, __ATOMIC_ACQUIRE)) {
     nanosleep(&ts, NULL);
-    wasmtime_engine_increment_epoch(engine);
+    wasmtime_engine_increment_epoch(engines[0]);
+    wasmtime_engine_increment_epoch(engines[1]);
   }
   return NULL;
 }
@@ -1105,15 +1162,30 @@ static ERL_NIF_TERM nif_compile(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
     size = wasm.size;
 #endif
   }
+  int fuel = enif_is_identical(argv[2], atom_true);
   wasmtime_module_t *mod = NULL;
-  wasmtime_error_t *e = wasmtime_module_new(engine, data, size, &mod);
+  wasmtime_error_t *e = wasmtime_module_new(engines[fuel], data, size, &mod);
   if (is_wat) wasm_byte_vec_delete(&wasm);
   if (e) return error_to_term(env, e, "compile");
   module_res_t *m = enif_alloc_resource(module_type, sizeof *m);
   m->mod = mod;
+  m->fuel = fuel;
   ERL_NIF_TERM t = enif_make_resource(env, m);
   enif_release_resource(m);
   return enif_make_tuple2(env, atom_ok, t);
+#endif
+}
+
+/* validate(Binary) -> ok | {error, _}: decode and validate without compiling */
+static ERL_NIF_TERM nif_validate(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  ErlNifBinary bin;
+  if (!enif_inspect_binary(env, argv[0], &bin)) return enif_make_badarg(env);
+#if !NIF_HAVE_COMPILER
+  return mk_error_s(env, "compile", "unavailable", "this build of erlang_wasmtime cannot validate");
+#else
+  wasmtime_error_t *e = wasmtime_module_validate(engines[0], bin.data, bin.size);
+  if (e) return error_to_term(env, e, "compile");
+  return atom_ok;
 #endif
 }
 
@@ -1141,10 +1213,21 @@ static ERL_NIF_TERM nif_deserialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM
   ErlNifBinary bin;
   if (!enif_inspect_binary(env, argv[0], &bin)) return enif_make_badarg(env);
   wasmtime_module_t *mod = NULL;
-  wasmtime_error_t *e = wasmtime_module_deserialize(engine, bin.data, bin.size, &mod);
-  if (e) return error_to_term(env, e, "compile");
+  int fuel = 0;
+  wasmtime_error_t *e = wasmtime_module_deserialize(engines[0], bin.data, bin.size, &mod);
+  if (e) {
+    /* compiled with fuel metering? the other engine accepts it */
+    wasmtime_error_t *e2 = wasmtime_module_deserialize(engines[1], bin.data, bin.size, &mod);
+    if (e2) {
+      wasmtime_error_delete(e2);
+      return error_to_term(env, e, "compile");
+    }
+    wasmtime_error_delete(e);
+    fuel = 1;
+  }
   module_res_t *m = enif_alloc_resource(module_type, sizeof *m);
   m->mod = mod;
+  m->fuel = fuel;
   ERL_NIF_TERM t = enif_make_resource(env, m);
   enif_release_resource(m);
   return enif_make_tuple2(env, atom_ok, t);
@@ -1298,11 +1381,186 @@ static ERL_NIF_TERM nif_instantiate(ErlNifEnv *env, int argc, const ERL_NIF_TERM
   return enif_make_tuple2(env, atom_ok, ht);
 }
 
-/* call(Handle, Name, Args, Id) -> enqueued; result arrives as a message */
+/* call(Handle, Name, Args, Id, Fuel | undefined) -> enqueued; result arrives as a message */
 static ERL_NIF_TERM nif_call(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   instance_t *inst;
   if (!get_handle(env, argv[0], &inst) || !enif_is_list(env, argv[2])) return enif_make_badarg(env);
-  return enqueue(env, inst, REQ_CALL, argv[3], argv[1], argv[2], atom_undefined);
+  return enqueue(env, inst, REQ_CALL, argv[3], argv[1], argv[2], argv[4]);
+}
+
+/* Look up an export of a given kind while the guest is not executing. On
+ * success the caller holds inst->mu. */
+static ERL_NIF_TERM with_export(ErlNifEnv *env, ERL_NIF_TERM handle, ERL_NIF_TERM name,
+                                wasmtime_extern_kind_t kind, const char *what, instance_t **out,
+                                wasmtime_extern_t *ext) {
+  instance_t *inst;
+  ErlNifBinary nm;
+  if (!get_handle(env, handle, &inst) || !enif_inspect_iolist_as_binary(env, name, &nm))
+    return enif_make_badarg(env);
+  pthread_mutex_lock(&inst->mu);
+  if (inst->state == ST_RUNNING) {
+    pthread_mutex_unlock(&inst->mu);
+    return mk_error_s(env, what, "busy", "guest is running");
+  }
+  if (!inst->instantiated ||
+      !wasmtime_instance_export_get(inst->ctx, &inst->instance, (const char *)nm.data, nm.size,
+                                    ext) ||
+      ext->kind != kind) {
+    pthread_mutex_unlock(&inst->mu);
+    return mk_error(env, what, "no_such_export", (const char *)nm.data, nm.size);
+  }
+  *out = inst;
+  return 0;
+}
+
+/* A wasmtime_val_t (from a global) as a term; refs are refused. */
+static ERL_NIF_TERM typed_val_to_term(ErlNifEnv *env, wasmtime_val_t *v, ERL_NIF_TERM *out) {
+  wasmtime_val_raw_t r;
+  switch (v->kind) {
+  case WASMTIME_I32: *out = enif_make_int(env, v->of.i32); return 0;
+  case WASMTIME_I64: *out = enif_make_int64(env, v->of.i64); return 0;
+  case WASMTIME_F32:
+    r.f32 = v->of.f32;
+    *out = raw_to_term(env, WASMTIME_VALTYPE_KIND_F32, &r);
+    return 0;
+  case WASMTIME_F64:
+    r.f64 = v->of.f64;
+    *out = raw_to_term(env, WASMTIME_VALTYPE_KIND_F64, &r);
+    return 0;
+  case WASMTIME_V128: *out = mk_binary(env, v->of.v128, 16); return 0;
+  default:
+    wasmtime_val_unroot(v);
+    return mk_error_s(env, "global", "unsupported_type", "reference-typed values cannot be read");
+  }
+}
+
+/* A term as a wasmtime_val_t of the given WASMTIME_VALTYPE_KIND_*. */
+static int term_to_typed_val(ErlNifEnv *env, ERL_NIF_TERM t, uint8_t kind, wasmtime_val_t *v) {
+  wasmtime_val_raw_t r;
+  if (ref_kind(kind) || !term_to_raw(env, t, kind, &r)) return 0;
+  switch (kind) {
+  case WASMTIME_VALTYPE_KIND_I32:
+    v->kind = WASMTIME_I32;
+    v->of.i32 = r.i32;
+    return 1;
+  case WASMTIME_VALTYPE_KIND_I64:
+    v->kind = WASMTIME_I64;
+    v->of.i64 = r.i64;
+    return 1;
+  case WASMTIME_VALTYPE_KIND_F32:
+    v->kind = WASMTIME_F32;
+    v->of.f32 = r.f32;
+    return 1;
+  case WASMTIME_VALTYPE_KIND_F64:
+    v->kind = WASMTIME_F64;
+    v->of.f64 = r.f64;
+    return 1;
+  default:
+    v->kind = WASMTIME_V128;
+    memcpy(v->of.v128, r.v128, 16);
+    return 1;
+  }
+}
+
+/* global_get(Handle, Name) -> {ok, Value} */
+static ERL_NIF_TERM nif_global_get(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  instance_t *inst;
+  wasmtime_extern_t ext;
+  ERL_NIF_TERM err =
+      with_export(env, argv[0], argv[1], WASMTIME_EXTERN_GLOBAL, "global", &inst, &ext);
+  if (err) return err;
+  wasmtime_val_t v;
+  wasmtime_global_get(inst->ctx, &ext.of.global, &v);
+  ERL_NIF_TERM value;
+  err = typed_val_to_term(env, &v, &value);
+  pthread_mutex_unlock(&inst->mu);
+  return err ? err : enif_make_tuple2(env, atom_ok, value);
+}
+
+/* global_set(Handle, Name, Value) -> ok */
+static ERL_NIF_TERM nif_global_set(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  instance_t *inst;
+  wasmtime_extern_t ext;
+  ERL_NIF_TERM err =
+      with_export(env, argv[0], argv[1], WASMTIME_EXTERN_GLOBAL, "global", &inst, &ext);
+  if (err) return err;
+  wasm_globaltype_t *gt = wasmtime_global_type(inst->ctx, &ext.of.global);
+  ERL_NIF_TERM r;
+  wasmtime_val_t v;
+  if (wasm_globaltype_mutability(gt) == WASM_CONST) {
+    r = mk_error_s(env, "global", "immutable", "the global is not mutable");
+  } else if (!term_to_typed_val(env, argv[2], kind_of(wasm_globaltype_content(gt)), &v)) {
+    r = mk_error_s(env, "global", "badarg", "value does not match the global's type");
+  } else {
+    wasmtime_error_t *e = wasmtime_global_set(inst->ctx, &ext.of.global, &v);
+    r = e ? error_to_term(env, e, "global") : atom_ok;
+  }
+  wasm_globaltype_delete(gt);
+  pthread_mutex_unlock(&inst->mu);
+  return r;
+}
+
+/* table_size(Handle, Name) -> {ok, Elements} */
+static ERL_NIF_TERM nif_table_size(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  instance_t *inst;
+  wasmtime_extern_t ext;
+  ERL_NIF_TERM err =
+      with_export(env, argv[0], argv[1], WASMTIME_EXTERN_TABLE, "table", &inst, &ext);
+  if (err) return err;
+  ERL_NIF_TERM r = enif_make_tuple2(
+      env, atom_ok, enif_make_uint64(env, wasmtime_table_size(inst->ctx, &ext.of.table)));
+  pthread_mutex_unlock(&inst->mu);
+  return r;
+}
+
+/* table_grow(Handle, Name, Delta) -> {ok, PreviousSize}: new slots hold null */
+static ERL_NIF_TERM nif_table_grow(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  ErlNifUInt64 delta;
+  if (!enif_get_uint64(env, argv[2], &delta)) return enif_make_badarg(env);
+  instance_t *inst;
+  wasmtime_extern_t ext;
+  ERL_NIF_TERM err =
+      with_export(env, argv[0], argv[1], WASMTIME_EXTERN_TABLE, "table", &inst, &ext);
+  if (err) return err;
+  uint64_t prev = 0;
+  wasmtime_val_t init;
+  memset(&init, 0, sizeof init);
+  init.kind = WASMTIME_FUNCREF; /* a null funcref: store_id 0 */
+  wasmtime_error_t *e = wasmtime_table_grow(inst->ctx, &ext.of.table, delta, &init, &prev);
+#ifdef WASMTIME_EXTERNREF
+  if (e) {
+    /* not a funcref table: a null externref then */
+    wasmtime_error_delete(e);
+    memset(&init, 0, sizeof init);
+    init.kind = WASMTIME_EXTERNREF;
+    e = wasmtime_table_grow(inst->ctx, &ext.of.table, delta, &init, &prev);
+  }
+#endif
+  ERL_NIF_TERM r = e ? error_to_term(env, e, "table")
+                     : enif_make_tuple2(env, atom_ok, enif_make_uint64(env, prev));
+  pthread_mutex_unlock(&inst->mu);
+  return r;
+}
+
+/* fuel_remaining(Handle) -> {ok, Fuel} */
+static ERL_NIF_TERM nif_fuel_remaining(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  instance_t *inst;
+  if (!get_handle(env, argv[0], &inst)) return enif_make_badarg(env);
+  pthread_mutex_lock(&inst->mu);
+  ERL_NIF_TERM r;
+  uint64_t fuel = 0;
+  if (inst->state == ST_RUNNING) {
+    r = mk_error_s(env, "call", "busy", "guest is running");
+  } else if (!inst->instantiated || !inst->mod->fuel) {
+    r = mk_error_s(env, "call", "fuel_disabled",
+                   "the module was not compiled with fuel metering: compile with fuel => true");
+  } else {
+    wasmtime_error_t *e = wasmtime_context_get_fuel(inst->ctx, &fuel);
+    r = e ? error_to_term(env, e, "call")
+          : enif_make_tuple2(env, atom_ok, enif_make_uint64(env, fuel));
+  }
+  pthread_mutex_unlock(&inst->mu);
+  return r;
 }
 
 /* host_reply(Handle, HostId, {ok, Results} | {error, Message}) -> ok */
@@ -1505,6 +1763,12 @@ static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
   A(atom_wat, "wat");
   A(atom_wasi, "wasi");
   A(atom_none, "none");
+  A(atom_trace, "trace");
+  A(atom_func_index, "func_index");
+  A(atom_func_offset, "func_offset");
+  A(atom_func_name, "func_name");
+  A(atom_module_name, "module_name");
+  A(atom_immutable, "immutable");
   A(atom_capture, "capture");
   A(atom_binary, "binary");
   A(atom_undefined, "undefined");
@@ -1539,21 +1803,24 @@ static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
   handle_type = enif_open_resource_type_x(env, "wasmtime_handle", &hi, ERL_NIF_RT_CREATE, NULL);
   if (!module_type || !instance_type || !handle_type) return -1;
 
-  wasm_config_t *cfg = wasm_config_new();
-  wasmtime_config_epoch_interruption_set(cfg, true);
-  /* Engine settings are part of a precompiled module's compatibility check.
-   * Runtime-only builds have no component model, so the full build must
-   * not compile modules with the concurrency support it would otherwise
-   * enable by default; nothing here uses components. */
+  for (int fuel = 0; fuel < 2; fuel++) {
+    wasm_config_t *cfg = wasm_config_new();
+    wasmtime_config_epoch_interruption_set(cfg, true);
+    wasmtime_config_consume_fuel_set(cfg, fuel);
+    /* Engine settings are part of a precompiled module's compatibility
+     * check. Runtime-only builds have no component model, so the full build
+     * must not compile modules with the concurrency support it would
+     * otherwise enable by default; nothing here uses components. */
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
-  wasmtime_config_concurrency_support_set(cfg, false);
+    wasmtime_config_concurrency_support_set(cfg, false);
 #endif
-  engine = wasm_engine_new_with_config(cfg); /* consumes cfg */
-  if (!engine) return -1;
+    engines[fuel] = wasm_engine_new_with_config(cfg); /* consumes cfg */
+    if (!engines[fuel]) return -1;
+  }
   ticker_stop = 0;
   if (pthread_create(&ticker, NULL, ticker_main, NULL) != 0) {
-    wasm_engine_delete(engine);
-    engine = NULL;
+    wasm_engine_delete(engines[0]);
+    wasm_engine_delete(engines[1]);
     return -1;
   }
   return 0;
@@ -1564,18 +1831,24 @@ static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
 static void unload(ErlNifEnv *env, void *priv) {
   __atomic_store_n(&ticker_stop, 1, __ATOMIC_RELEASE);
   pthread_join(ticker, NULL);
-  wasm_engine_delete(engine);
-  engine = NULL;
+  wasm_engine_delete(engines[0]);
+  wasm_engine_delete(engines[1]);
 }
 
 static ErlNifFunc funcs[] = {
-    {"compile", 2, nif_compile, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"compile", 3, nif_compile, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"validate", 1, nif_validate, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"module_imports", 1, nif_module_imports, 0},
     {"module_exports", 1, nif_module_exports, 0},
     {"serialize", 1, nif_serialize, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"deserialize", 1, nif_deserialize, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"instantiate", 4, nif_instantiate, 0},
-    {"call", 4, nif_call, 0},
+    {"call", 5, nif_call, 0},
+    {"global_get", 2, nif_global_get, 0},
+    {"global_set", 3, nif_global_set, 0},
+    {"table_size", 2, nif_table_size, 0},
+    {"table_grow", 3, nif_table_grow, 0},
+    {"fuel_remaining", 1, nif_fuel_remaining, 0},
     {"host_reply", 3, nif_host_reply, 0},
     {"interrupt", 1, nif_interrupt, 0},
     {"cancel", 2, nif_cancel, 0},

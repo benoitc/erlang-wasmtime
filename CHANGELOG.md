@@ -29,6 +29,9 @@ First release.
   serves them there.
 - Worker threads get a 4 MB stack on every platform.
 - `call_async/3` and `await/2,3`.
+- Fuel metering: `compile/2` with `fuel => true`, `call/4` with `fuel`,
+  `fuel_remaining/1`; `validate/1`; `trace` frames on trap errors;
+  `global_get/2`, `global_set/3`, `table_size/2`, `table_grow/3`.
 - WASI stdio without files: `stdin => {binary, Bytes}`, `stdout`/`stderr =>
   capture` read back with `read_output/1` under an `output_limit`;
   `args`/`env => inherit`.

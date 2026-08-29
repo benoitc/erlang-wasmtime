@@ -38,6 +38,10 @@ clang-format -i c_src/wasmtime_nif.c             # Format the C
 rebar3 ex_doc                                    # Docs into doc/
 rebar3 hex build                                 # Must stay under 8 MB
 WASMTIME_C_API_DIR=/path rebar3 compile          # Use a local Wasmtime C API
+WASMTIME_RUNTIME_ONLY=1 rebar3 compile           # No compiler: 4 MB shared library
+WASMTIME_SOURCE_BUILD=1 rebar3 compile           # Build the C API from source
+escript scripts/precompile-fixtures.escript test/wasmtime_runtime_only_SUITE_data _build/cwasm
+WASMTIME_RUNTIME_ONLY=1 WASMTIME_CWASM_DIR=$PWD/_build/cwasm rebar3 ct   # runtime-only suite
 WASMTIME_NIF_SANITIZE=address rebar3 compile     # ASan build of the NIF
 ```
 
@@ -59,15 +63,22 @@ WASMTIME_NIF_SANITIZE=address rebar3 compile     # ASan build of the NIF
 - `src/wasmtime.erl`: public API and the `receive` loop that serves host calls
   while a call runs. Normalises options into the tuples the NIF expects.
 - `src/wasmtime_nif.erl`: NIF stubs and `on_load`.
-- `scripts/fetch-wasmtime.sh` and `scripts/build-nif.sh`: build-time download
-  (pinned in `scripts/wasmtime.version`, checksums in `scripts/wasmtime.sha256`)
-  and static link. FreeBSD has no upstream archive and uses the `wasmtime`
-  package instead.
+- `scripts/fetch-wasmtime.sh`: resolves the C API (`WASMTIME_C_API_DIR`, a
+  prebuilt archive from upstream or from this repository's releases, else a
+  source build through `scripts/build-wasmtime.sh`). `scripts/build-nif.sh`
+  probes the library for compiler/WAT/WASI, passes `NIF_HAVE_*` to the C,
+  links statically or copies a shared library into `priv/`, and keeps a
+  stamp so a variant switch relinks. `scripts/precompile-fixtures.escript`
+  makes the `.cwasm` fixtures for the runtime-only suite.
+  `.github/workflows/wasmtime-runtime.yml` publishes the runtime-only and
+  FreeBSD archives; their checksums are pasted into `scripts/*.sha256`.
 - `test/wasmtime_SUITE.erl`: behaviour of the binding (host calls, interrupts,
   isolation, WASI, lifetime).
 - `test/wasmtime_api_SUITE.erl`: API coverage in the style of wasmtime-py's
   tests (values, traps, memory, imports, WASI details, precompiled modules,
   named memories, host process).
+- `test/wasmtime_runtime_only_SUITE.erl`: the binding on a build without a
+  compiler, from precompiled fixtures. The other two suites skip there.
 
 ## Conventions
 

@@ -18,6 +18,8 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Memory access from Erlang | `read_memory/3,4`, `write_memory/3,4`, `memory_size/1,2`: the export named `memory` (or the first exported memory) by default, any exported memory by name |
 | Precompiled modules | `serialize/1` and `deserialize/1`, Wasmtime's `.cwasm` form; see [precompiled](precompiled.md) |
 | Host functions in a dedicated process | `host => Pid` at instantiate, `handle_host_call/2` in that process |
+| Runtime-only builds | `WASMTIME_RUNTIME_ONLY=1`: no compiler, 4 MB; `features/0` reports the linked library's capabilities; see [building](building.md) |
+| Source build fallback | a platform without a prebuilt archive compiles the C API itself |
 | WASI preview 1 | args, env, preopened dirs with read or write, stdio to file or inherited |
 | Caller death | the abandoned call is interrupted, queued calls proceed |
 | Host function timeout | `host_timeout`, default 30 s |
@@ -50,16 +52,13 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Out of range memory access | `kind => out_of_bounds` |
 | Wrong argument count or type | `kind => badarity`, `kind => badarg` |
 | A host function calling the instance it runs on | `kind => reentrant` |
+| `compile/1`, `{wat, _}`, `serialize/1` or the `wasi` option on a build without them | `kind => unavailable` |
 
 ## Deferred
 
 - **Reference and GC values across the boundary.** Modules using them
   internally run; only conversion to and from Erlang terms is missing. Needs a
   rooting and lifetime design.
-- **Runtime-only library.** Wasmtime ships a 1.8 MB build without the
-  compiler that can load precompiled modules only. This package always links
-  the full library; a build option to link the small one (and refuse
-  `compile/1`) is not offered yet.
 - **Thread pool.** Measured on an M-series Mac: 13,900 instantiate, call and
   drop cycles per second from one process, 34,500 per second from eight, with
   one OS thread per instance. That covers "thousands of short-lived instances

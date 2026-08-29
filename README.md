@@ -33,6 +33,8 @@ all come back as `{error, #{class => ..., kind => ..., message => ...}}`.
   and stdio redirected to files or inherited.
 - Linear memory access from Erlang while the guest is idle or inside a host call.
 - Precompiled modules: compile once, `deserialize/1` in milliseconds.
+- Runtime-only builds: `WASMTIME_RUNTIME_ONLY=1` gives a 4 MB NIF without the
+  compiler for nodes that only load precompiled modules.
 - Host functions served by the caller or by a dedicated process.
 
 ## Install
@@ -43,8 +45,9 @@ all come back as `{error, #{class => ..., kind => ..., message => ...}}`.
 
 The first `rebar3 compile` downloads the pinned Wasmtime C API release for your
 platform (about 15 MB, checksum verified) and builds the NIF. You need a C
-compiler and `curl`. See [docs/building.md](docs/building.md) for offline builds,
-system-installed Wasmtime and supported platforms.
+compiler and `curl`; a platform without a prebuilt archive builds Wasmtime
+from source with `git`, `cmake` and Rust. See [docs/building.md](docs/building.md)
+for offline builds, runtime-only builds and supported platforms.
 
 Requires OTP 27 or later.
 

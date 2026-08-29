@@ -31,10 +31,11 @@ on an instance at a time; concurrent callers are queued.
     read_memory/3, read_memory/4,
     write_memory/3, write_memory/4,
     memory_size/1, memory_size/2,
+    features/0,
     version/0
 ]).
 
--export_type([module_ref/0, instance/0, value/0, error/0, host_fun/0, options/0]).
+-export_type([module_ref/0, instance/0, value/0, error/0, host_fun/0, options/0, features/0]).
 
 -define(DEFAULT_MEMORY_LIMIT, 256 * 1024 * 1024).
 -define(DEFAULT_HOST_TIMEOUT, 30000).
@@ -64,6 +65,13 @@ Erlang cannot represent; a `v128` is a 16-byte binary.
         message := binary(),
         status => integer()
     }}.
+
+-doc """
+What the linked Wasmtime library can do. A runtime-only build has no
+`compiler` (`compile/1` and `serialize/1` answer `kind => unavailable`) and
+may have no `wat` or `wasi`. See building.md, "Runtime-only builds".
+""".
+-type features() :: #{compiler := boolean(), wat := boolean(), wasi := boolean()}.
 
 -doc "A host function. Returns the results the guest expects, or `{error, Reason}` which traps the guest.".
 -type host_fun() :: fun((instance(), [value()]) -> {ok, [value()]} | {error, term()}).
@@ -95,6 +103,9 @@ Compile a module from its binary form, or from text as `{wat, Text}`.
 
 Compilation runs on a dirty CPU scheduler. The result is immutable and can be
 instantiated any number of times, from any process.
+
+A runtime-only build has no compiler: this returns
+`{error, #{kind := unavailable}}` and modules come from `deserialize/1`.
 """.
 -spec compile(binary() | {wat, iodata()}) -> {ok, module_ref()} | error().
 compile({wat, Text}) ->
@@ -147,6 +158,7 @@ memory at most. Options:
   needs and the map does not provide fails with `class => link`.
 - `wasi`: enable WASI preview 1. See `t:wasi_options/0`; without `dirs` the
   guest has no filesystem, without `stdout`/`stderr` its output is discarded.
+  A build without WASI (see `features/0`) answers `kind => unavailable`.
 - `memory_limit`, `max_tables`, `max_table_elements`, `max_instances`:
   per-store caps enforced by Wasmtime. `unlimited` removes a cap.
 - `host_timeout`: how long a host function may run before the guest traps
@@ -358,6 +370,10 @@ memory_size(Inst) -> memory_size(Inst, default).
 -spec memory_size(instance(), default | iodata()) ->
     {ok, {non_neg_integer(), non_neg_integer()}} | error().
 memory_size(#instance{handle = H}, Name) -> wasmtime_nif:memory_size(H, Name).
+
+-doc "What the linked Wasmtime library can do; see `t:features/0`.".
+-spec features() -> features().
+features() -> wasmtime_nif:features().
 
 -doc "Version of the linked Wasmtime library.".
 -spec version() -> binary().

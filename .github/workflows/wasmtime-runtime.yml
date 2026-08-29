@@ -1,0 +1,130 @@
+name: wasmtime-runtime
+
+# Builds the runtime-only Wasmtime C API (no compiler, with WASI) for every
+# supported platform, plus the full C API for FreeBSD which Wasmtime does not
+# publish, and attaches them to the release tagged wasmtime-runtime-<version>.
+# The checksums it prints are then pasted into scripts/wasmtime-runtime.sha256
+# (and the FreeBSD line of scripts/wasmtime.sha256) by hand and committed.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["wasmtime-runtime-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: aarch64-macos
+            os: macos-15
+          - asset: x86_64-macos
+            os: macos-15-intel
+          - asset: x86_64-linux
+            os: ubuntu-24.04
+          - asset: aarch64-linux
+            os: ubuntu-24.04-arm
+          - asset: x86_64-musl
+            os: ubuntu-24.04
+            container: alpine:3.21
+          - asset: aarch64-musl
+            os: ubuntu-24.04-arm
+            container: alpine:3.21
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain (Alpine)
+        if: matrix.container != ''
+        run: apk add --no-cache bash git cmake rust cargo build-base xz tar
+
+      - name: Install the toolchain (macOS, Ubuntu)
+        if: matrix.container == ''
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          which cmake >/dev/null || (sudo apt-get update && sudo apt-get install -y cmake)
+
+      - name: Build the runtime C API
+        run: scripts/build-wasmtime.sh runtime "$PWD/out/prefix"
+
+      - name: Package
+        run: |
+          V="$(tr -d '[:space:]' < scripts/wasmtime.version)"
+          NAME="wasmtime-runtime-$V-${{ matrix.asset }}"
+          mkdir -p "dist/$NAME"
+          cp -r out/prefix/include "dist/$NAME/"
+          mkdir -p "dist/$NAME/lib"
+          cp out/prefix/lib/libwasmtime.so out/prefix/lib/libwasmtime.dylib "dist/$NAME/lib/" 2>/dev/null || true
+          ls -la "dist/$NAME/lib"
+          tar -C dist -cJf "dist/$NAME.tar.xz" "$NAME"
+          ls -la "dist/$NAME.tar.xz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/*.tar.xz
+
+  freebsd:
+    name: x86_64-freebsd (runtime and full)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build both C API variants in a FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.3"
+          usesh: true
+          sync: rsync
+          copyback: true
+          prepare: pkg install -y git cmake rust curl
+          run: |
+            set -e
+            V="$(tr -d '[:space:]' < scripts/wasmtime.version)"
+            scripts/build-wasmtime.sh runtime "$PWD/out/runtime"
+            scripts/build-wasmtime.sh full "$PWD/out/full"
+            mkdir -p dist
+            R="wasmtime-runtime-$V-x86_64-freebsd"
+            mkdir -p "dist/$R/lib" && cp -r out/runtime/include "dist/$R/" && cp out/runtime/lib/libwasmtime.so "dist/$R/lib/"
+            tar -C dist -cJf "dist/$R.tar.xz" "$R"
+            F="wasmtime-$V-x86_64-freebsd-c-api"
+            mkdir -p "dist/$F" && cp -r out/full/include out/full/lib "dist/$F/"
+            tar -C dist -cJf "dist/$F.tar.xz" "$F"
+            ls -la dist/*.tar.xz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x86_64-freebsd
+          path: dist/*.tar.xz
+
+  release:
+    name: Publish
+    needs: [build, freebsd]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd artifacts && sha256sum *.tar.xz | tee SHA256SUMS
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="$(tr -d '[:space:]' < scripts/wasmtime.version)"
+          TAG="wasmtime-runtime-$V"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "Wasmtime C API $V for erlang_wasmtime" \
+              --notes "Runtime-only (no compiler, with WASI) builds of the Wasmtime C API, and the full C API for FreeBSD. Built by .github/workflows/wasmtime-runtime.yml with scripts/build-wasmtime.sh."
+          gh release upload "$TAG" artifacts/*.tar.xz artifacts/SHA256SUMS --clobber
+          echo "Paste into scripts/wasmtime-runtime.sha256 (and the FreeBSD line into scripts/wasmtime.sha256):"
+          cat artifacts/SHA256SUMS

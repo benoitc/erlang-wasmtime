@@ -1,0 +1,4 @@
+# Runtime-only Wasmtime C API archives built by .github/workflows/wasmtime-runtime.yml
+# and published under this repository's releases (tag wasmtime-runtime-<version>).
+# One line per platform: <sha256>  wasmtime-runtime-<version>-<arch>-<os>.tar.xz
+# A platform without a line here builds the library from source.

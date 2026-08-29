@@ -28,3 +28,9 @@ First release.
 - `host => Pid` routes host calls to a dedicated process; `handle_host_call/2`
   serves them there.
 - Worker threads get a 4 MB stack on every platform.
+- Runtime-only builds (`WASMTIME_RUNTIME_ONLY=1`): no compiler, a 4 MB shared
+  library; `features/0` reports the linked library's capabilities and
+  `compile/1`, `{wat, _}`, `serialize/1` and the `wasi` option answer
+  `kind => unavailable` where absent. Automatic source build of the C API
+  for platforms without a prebuilt archive. FreeBSD archives published from
+  this repository.

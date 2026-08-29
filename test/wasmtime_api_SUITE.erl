@@ -5,7 +5,7 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
--export([all/0, groups/0]).
+-export([all/0, groups/0, init_per_suite/1, end_per_suite/1, init_per_group/2, end_per_group/2]).
 -export([
     module_from_binary/1,
     module_from_wat/1,
@@ -157,6 +157,24 @@ groups() ->
             host_process_gone
         ]}
     ].
+
+init_per_suite(Config) ->
+    case wasmtime:features() of
+        #{compiler := true, wat := true} -> Config;
+        _ -> {skip, "needs a build with a compiler and WAT"}
+    end.
+
+end_per_suite(_) -> ok.
+
+init_per_group(wasi, Config) ->
+    case wasmtime:features() of
+        #{wasi := true} -> Config;
+        _ -> {skip, "needs a build with WASI"}
+    end;
+init_per_group(_, Config) ->
+    Config.
+
+end_per_group(_, _) -> ok.
 
 compile(Wat) ->
     {ok, Mod} = wasmtime:compile({wat, Wat}),

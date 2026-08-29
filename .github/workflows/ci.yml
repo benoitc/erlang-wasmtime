@@ -116,6 +116,54 @@ jobs:
           name: ct-logs-asan
           path: _build/test/logs
 
+  runtime-only:
+    name: Runtime-only on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache the Wasmtime C API and source builds
+        uses: actions/cache@v4
+        with:
+          path: _build/wasmtime
+          key: wasmtime-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version', 'scripts/build-wasmtime.sh') }}
+      - name: Install Erlang (Linux)
+        if: runner.os == 'Linux'
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          rebar3-version: "3.24.0"
+      - name: Install Erlang (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install erlang@28 rebar3
+          echo "$(brew --prefix erlang@28)/bin" >> "$GITHUB_PATH"
+      # A Rust toolchain, for the source build that runs until the platform
+      # has a published runtime archive (scripts/wasmtime-runtime.sha256).
+      - name: Install Rust and cmake
+        run: |
+          rustup toolchain install stable --profile minimal && rustup default stable
+          which cmake >/dev/null || (sudo apt-get update && sudo apt-get install -y cmake)
+      - name: Full build, precompile the fixtures
+        run: |
+          rebar3 compile
+          escript scripts/precompile-fixtures.escript test/wasmtime_runtime_only_SUITE_data _build/cwasm
+      - name: Runtime-only build and suite
+        run: |
+          WASMTIME_RUNTIME_ONLY=1 rebar3 compile
+          ls -la priv
+          WASMTIME_RUNTIME_ONLY=1 WASMTIME_CWASM_DIR="$PWD/_build/cwasm" rebar3 ct
+      - name: Upload CT logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ct-logs-runtime-only-${{ matrix.os }}
+          path: _build/test/logs
+
   freebsd:
     name: Test on FreeBSD
     runs-on: ubuntu-24.04
@@ -123,15 +171,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # No upstream FreeBSD archive and the package ships only the CLI, so the
-      # C API is built from source inside the VM. The install prefix lives in
-      # the workspace so it is copied back and cached by Wasmtime version.
-      - name: Cache the Wasmtime C API built for FreeBSD
-        id: capi
+      # Wasmtime publishes no FreeBSD archive; fetch-wasmtime.sh downloads this
+      # project's or falls back to a source build inside the VM. The cache
+      # lives in the workspace so it is copied back, keyed by version.
+      - name: Cache the Wasmtime C API for FreeBSD
         uses: actions/cache@v4
         with:
-          path: wasmtime-c-api
-          key: wasmtime-c-api-freebsd-14-${{ env.WASMTIME_VERSION }}
+          path: _build/wasmtime
+          key: wasmtime-freebsd-14-${{ hashFiles('scripts/wasmtime.version', 'scripts/build-wasmtime.sh') }}
 
       - name: Build and test
         uses: vmactions/freebsd-vm@v1
@@ -145,16 +192,11 @@ jobs:
             pkg install -y erlang rebar3 git cmake rust curl
           run: |
             set -e
-            if [ ! -f wasmtime-c-api/include/wasmtime.h ]; then
-              git clone --depth 1 --branch "$WASMTIME_VERSION" https://github.com/bytecodealliance/wasmtime wasmtime-src
-              cmake -S wasmtime-src/crates/c-api -B wasmtime-build \
-                    -DCMAKE_BUILD_TYPE=Release \
-                    -DCMAKE_INSTALL_PREFIX="$PWD/wasmtime-c-api"
-              cmake --build wasmtime-build
-              cmake --install wasmtime-build
-              rm -rf wasmtime-src wasmtime-build
-            fi
-            export WASMTIME_C_API_DIR="$PWD/wasmtime-c-api"
             erl -noshell -eval 'io:format("OTP ~s~n", [erlang:system_info(otp_release)]), halt().'
             rebar3 compile
             rebar3 ct
+            escript scripts/precompile-fixtures.escript test/wasmtime_runtime_only_SUITE_data _build/cwasm
+            WASMTIME_RUNTIME_ONLY=1 rebar3 compile
+            WASMTIME_RUNTIME_ONLY=1 WASMTIME_CWASM_DIR="$PWD/_build/cwasm" rebar3 ct
+            # the source tree is large and not worth caching
+            rm -rf _build/wasmtime/*/wasmtime-src _build/wasmtime/*/build-*

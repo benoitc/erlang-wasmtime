@@ -38,6 +38,41 @@
 #include <wasm.h>
 #include <wasmtime.h>
 
+/* What the linked library can do. build-nif.sh probes the archive and passes
+ * these; a plain `cc` against a full tree gets them from conf.h. The NIF
+ * table is the same in every build; absent features answer
+ * {error, #{kind => unavailable}}. */
+#ifndef NIF_HAVE_COMPILER
+#if defined(WASMTIME_FEATURE_CRANELIFT) || defined(WASMTIME_FEATURE_WINCH)
+#define NIF_HAVE_COMPILER 1
+#else
+#define NIF_HAVE_COMPILER 0
+#endif
+#endif
+#ifndef NIF_HAVE_WAT
+#ifdef WASMTIME_FEATURE_WAT
+#define NIF_HAVE_WAT 1
+#else
+#define NIF_HAVE_WAT 0
+#endif
+#endif
+#ifndef NIF_HAVE_WASI
+#ifdef WASMTIME_FEATURE_WASI
+#define NIF_HAVE_WASI 1
+#else
+#define NIF_HAVE_WASI 0
+#endif
+#endif
+#if NIF_HAVE_COMPILER && !defined(WASMTIME_FEATURE_CRANELIFT) && !defined(WASMTIME_FEATURE_WINCH)
+#error "the library has a compiler but the headers do not declare one: include/ and lib/ differ"
+#endif
+#if NIF_HAVE_WAT && !defined(WASMTIME_FEATURE_WAT)
+#error "the library reads WAT but the headers do not declare it: include/ and lib/ differ"
+#endif
+#if NIF_HAVE_WASI && !defined(WASMTIME_FEATURE_WASI)
+#error "the library has WASI but the headers do not declare it: include/ and lib/ differ"
+#endif
+
 #include <errno.h>
 #include <math.h>
 #include <pthread.h>
@@ -51,11 +86,11 @@
 
 /* ---------------------------------------------------------------- atoms -- */
 
-static ERL_NIF_TERM atom_ok, atom_error, atom_true, atom_none, atom_undefined, atom_inherit,
-    atom_file, atom_read, atom_write, atom_nan, atom_infinity, atom_neg_infinity, atom_class,
-    atom_kind, atom_message, atom_status, atom_not_running, atom_func, atom_global, atom_table,
-    atom_memory, atom_tag, atom_wasmtime_result, atom_wasmtime_host_call, atom_no_pending_host_call,
-    atom_enqueued;
+static ERL_NIF_TERM atom_ok, atom_error, atom_true, atom_false, atom_compiler, atom_wat, atom_wasi,
+    atom_none, atom_undefined, atom_inherit, atom_file, atom_read, atom_write, atom_nan,
+    atom_infinity, atom_neg_infinity, atom_class, atom_kind, atom_message, atom_status,
+    atom_not_running, atom_func, atom_global, atom_table, atom_memory, atom_tag,
+    atom_wasmtime_result, atom_wasmtime_host_call, atom_no_pending_host_call, atom_enqueued;
 
 static ERL_NIF_TERM mk_atom(ErlNifEnv *env, const char *s) {
   ERL_NIF_TERM a;
@@ -496,11 +531,16 @@ static char *bin_to_cstr(ErlNifEnv *env, ERL_NIF_TERM t) {
 /* Wasi :: none | {Args, Env, Dirs, Stdin, Stdout, Stderr}
  * Std   :: none | inherit | {file, Path}
  * Dirs  :: [{GuestPath, HostPath, read | write}] */
-static const char *configure_wasi(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM wasi) {
+static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *out,
+                                   ERL_NIF_TERM wasi) {
   const ERL_NIF_TERM *t;
   int arity;
-  if (enif_is_identical(wasi, atom_none)) return NULL;
-  if (!enif_get_tuple(env, wasi, &arity, &t) || arity != 6) return "wasi option is malformed";
+  if (enif_is_identical(wasi, atom_none)) return 0;
+  if (!enif_get_tuple(env, wasi, &arity, &t) || arity != 6)
+    return mk_error_s(out, "wasi", "config", "wasi option is malformed");
+#if !NIF_HAVE_WASI
+  return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
+#else
 
   wasi_config_t *cfg = wasi_config_new();
   const char *err = NULL;
@@ -607,19 +647,20 @@ static const char *configure_wasi(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM
 done:
   if (err) {
     wasi_config_delete(cfg);
-    return err;
+    return mk_error_s(out, "wasi", "config", err);
   }
   wasmtime_error_t *werr = wasmtime_context_set_wasi(inst->ctx, cfg); /* consumes cfg */
   if (werr) {
     wasmtime_error_delete(werr);
-    return "wasi could not be configured";
+    return mk_error_s(out, "wasi", "config", "wasi could not be configured");
   }
   werr = wasmtime_linker_define_wasi(inst->linker);
   if (werr) {
     wasmtime_error_delete(werr);
-    return "wasi could not be linked";
+    return mk_error_s(out, "wasi", "config", "wasi could not be linked");
   }
-  return NULL;
+  return 0;
+#endif
 }
 
 /* Opts :: {Imports :: [{Module, Name}], Wasi, Limits, HostTimeoutMs, HostPid}
@@ -649,8 +690,8 @@ static ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out)
   wasmtime_context_set_epoch_deadline(inst->ctx, 1);
   inst->linker = wasmtime_linker_new(engine);
 
-  const char *werr = configure_wasi(inst, env, o[1]);
-  if (werr) return mk_error_s(out, "wasi", "config", werr);
+  ERL_NIF_TERM wasi_err = configure_wasi(inst, env, out, o[1]);
+  if (wasi_err) return wasi_err;
 
   /* Host functions: only imports named in the map are defined. Anything else
    * the module needs makes wasmtime_linker_instantiate fail with a link error. */
@@ -972,14 +1013,24 @@ static ERL_NIF_TERM nif_compile(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
   ErlNifBinary bin;
   if (!enif_inspect_binary(env, argv[0], &bin)) return enif_make_badarg(env);
   int is_wat = enif_is_identical(argv[1], atom_true);
+#if !NIF_HAVE_COMPILER
+  (void)is_wat;
+  return mk_error_s(env, "compile", "unavailable",
+                    "this build of erlang_wasmtime has no compiler: use deserialize/1");
+#else
   wasm_byte_vec_t wasm = {0, NULL};
   const uint8_t *data = bin.data;
   size_t size = bin.size;
   if (is_wat) {
+#if !NIF_HAVE_WAT
+    return mk_error_s(env, "compile", "unavailable",
+                      "this build of erlang_wasmtime cannot read the text format");
+#else
     wasmtime_error_t *e = wasmtime_wat2wasm((const char *)bin.data, bin.size, &wasm);
     if (e) return error_to_term(env, e, "compile");
     data = (const uint8_t *)wasm.data;
     size = wasm.size;
+#endif
   }
   wasmtime_module_t *mod = NULL;
   wasmtime_error_t *e = wasmtime_module_new(engine, data, size, &mod);
@@ -990,18 +1041,24 @@ static ERL_NIF_TERM nif_compile(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
   ERL_NIF_TERM t = enif_make_resource(env, m);
   enif_release_resource(m);
   return enif_make_tuple2(env, atom_ok, t);
+#endif
 }
 
 /* serialize(Module) -> {ok, Binary}: Wasmtime's own precompiled format */
 static ERL_NIF_TERM nif_serialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   module_res_t *m;
   if (!enif_get_resource(env, argv[0], module_type, (void **)&m)) return enif_make_badarg(env);
+#if !NIF_HAVE_COMPILER
+  return mk_error_s(env, "compile", "unavailable",
+                    "this build of erlang_wasmtime cannot serialize modules");
+#else
   wasm_byte_vec_t out;
   wasmtime_error_t *e = wasmtime_module_serialize(m->mod, &out);
   if (e) return error_to_term(env, e, "compile");
   ERL_NIF_TERM t = mk_binary(env, out.data, out.size);
   wasm_byte_vec_delete(&out);
   return enif_make_tuple2(env, atom_ok, t);
+#endif
 }
 
 /* deserialize(Binary) -> {ok, Module}. Wasmtime checks its own version and
@@ -1332,6 +1389,17 @@ static ERL_NIF_TERM nif_memory_size(ErlNifEnv *env, int argc, const ERL_NIF_TERM
   return r;
 }
 
+/* features() -> #{compiler => bool, wat => bool, wasi => bool} */
+static ERL_NIF_TERM nif_features(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  ERL_NIF_TERM keys[3] = {atom_compiler, atom_wat, atom_wasi};
+  ERL_NIF_TERM vals[3] = {NIF_HAVE_COMPILER ? atom_true : atom_false,
+                          NIF_HAVE_WAT ? atom_true : atom_false,
+                          NIF_HAVE_WASI ? atom_true : atom_false};
+  ERL_NIF_TERM map;
+  enif_make_map_from_arrays(env, keys, vals, 3, &map);
+  return map;
+}
+
 static ERL_NIF_TERM nif_version(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   return mk_binary(env, WASMTIME_VERSION, strlen(WASMTIME_VERSION));
 }
@@ -1343,6 +1411,10 @@ static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
   A(atom_ok, "ok");
   A(atom_error, "error");
   A(atom_true, "true");
+  A(atom_false, "false");
+  A(atom_compiler, "compiler");
+  A(atom_wat, "wat");
+  A(atom_wasi, "wasi");
   A(atom_none, "none");
   A(atom_undefined, "undefined");
   A(atom_inherit, "inherit");
@@ -1378,6 +1450,13 @@ static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
 
   wasm_config_t *cfg = wasm_config_new();
   wasmtime_config_epoch_interruption_set(cfg, true);
+  /* Engine settings are part of a precompiled module's compatibility check.
+   * Runtime-only builds have no component model, so the full build must
+   * not compile modules with the concurrency support it would otherwise
+   * enable by default; nothing here uses components. */
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  wasmtime_config_concurrency_support_set(cfg, false);
+#endif
   engine = wasm_engine_new_with_config(cfg); /* consumes cfg */
   if (!engine) return -1;
   ticker_stop = 0;
@@ -1412,6 +1491,7 @@ static ErlNifFunc funcs[] = {
     {"read_memory", 4, nif_read_memory, 0},
     {"write_memory", 4, nif_write_memory, 0},
     {"memory_size", 2, nif_memory_size, 0},
+    {"features", 0, nif_features, 0},
     {"version", 0, nif_version, 0},
 };
 

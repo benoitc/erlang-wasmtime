@@ -2,7 +2,7 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
--export([all/0, init_per_suite/1, end_per_suite/1]).
+-export([all/0, groups/0, init_per_suite/1, end_per_suite/1, init_per_group/2, end_per_group/2]).
 -export([
     compile_errors/1,
     imports_exports/1,
@@ -52,23 +52,36 @@ all() ->
         interrupt_from_other_process,
         caller_death,
         concurrent_callers,
-        wasi_stdout,
-        wasi_no_dirs,
-        wasi_dirs,
-        wasi_exit,
         instance_gc,
         interrupt_during_host_call,
         reentrant_call_refused,
         queued_call_from_dead_caller,
         cancelled_call_leaves_no_messages,
-        timeout_keeps_a_result_that_just_arrived
+        timeout_keeps_a_result_that_just_arrived,
+        {group, wasi}
     ].
 
+groups() ->
+    [{wasi, [], [wasi_stdout, wasi_no_dirs, wasi_dirs, wasi_exit]}].
+
 init_per_suite(Config) ->
-    {ok, Mod} = wasmtime:compile({wat, basic_wat()}),
-    [{basic, Mod} | Config].
+    case wasmtime:features() of
+        #{compiler := true, wat := true} ->
+            {ok, Mod} = wasmtime:compile({wat, basic_wat()}),
+            [{basic, Mod} | Config];
+        _ ->
+            {skip, "needs a build with a compiler and WAT"}
+    end.
 
 end_per_suite(_) -> ok.
+
+init_per_group(wasi, Config) ->
+    case wasmtime:features() of
+        #{wasi := true} -> Config;
+        _ -> {skip, "needs a build with WASI"}
+    end.
+
+end_per_group(_, _) -> ok.
 
 basic_wat() ->
     ~"""

@@ -38,6 +38,9 @@ on an instance at a time; concurrent callers are queued.
     table_grow/3,
     fuel_remaining/1,
     handle_host_call/2,
+    send/2,
+    close/1,
+    ref/1,
     read_memory/3, read_memory/4,
     write_memory/3, write_memory/4,
     memory_size/1, memory_size/2,
@@ -62,6 +65,7 @@ on an instance at a time; concurrent callers are queued.
 -define(DEFAULT_MEMORY_LIMIT, 256 * 1024 * 1024).
 -define(DEFAULT_HOST_TIMEOUT, 30000).
 -define(DEFAULT_OUTPUT_LIMIT, 16 * 1024 * 1024).
+-define(DEFAULT_INBOX_LIMIT, 16 * 1024 * 1024).
 
 %% `handle` is the NIF resource, `ref` the reference carried by every message
 %% the instance thread sends to a caller.
@@ -159,9 +163,12 @@ WASI configuration. Nothing is granted by default.
 
 - `args`, `env`: what the guest sees, or `inherit` for the VM's own.
 - `dirs`: preopened directories, read-only unless `write`.
-- `stdin`: end of file by default; a file, the VM's stdin, or bytes.
-- `stdout`, `stderr`: discarded by default; a file, the VM's own, or
-  `capture` into memory, read with `read_output/1`.
+- `stdin`: end of file by default; a file, the VM's stdin, bytes, or
+  `stream`: what `send/2` queues, as the guest reads it.
+- `stdout`, `stderr`: discarded by default; a file, the VM's own,
+  `capture` into memory, read with `read_output/1`, or `stream`: every
+  write goes to the `stream` process as `{wasmtime_stream, Ref, stdout |
+  stderr, Bytes}` at once.
 - `output_limit`: bytes kept per captured stream (default 16 MB); the guest
   never sees a short write, `read_output/1` reports what was dropped.
 """.
@@ -169,9 +176,9 @@ WASI configuration. Nothing is granted by default.
     args => inherit | [iodata()],
     env => inherit | [{iodata(), iodata()}],
     dirs => [{Guest :: iodata(), Host :: iodata(), read | write}],
-    stdin => none | inherit | {file, iodata()} | {binary, iodata()},
-    stdout => none | inherit | {file, iodata()} | capture,
-    stderr => none | inherit | {file, iodata()} | capture,
+    stdin => none | inherit | stream | {file, iodata()} | {binary, iodata()},
+    stdout => none | inherit | stream | {file, iodata()} | capture,
+    stderr => none | inherit | stream | {file, iodata()} | capture,
     output_limit => pos_integer()
 }.
 
@@ -183,7 +190,9 @@ WASI configuration. Nothing is granted by default.
     max_table_elements => pos_integer() | unlimited,
     max_instances => pos_integer() | unlimited,
     host_timeout => timeout(),
-    host => pid()
+    host => pid(),
+    stream => pid(),
+    inbox_limit => pos_integer()
 }.
 
 %% ------------------------------------------------------------------ modules
@@ -393,7 +402,19 @@ nif_options(Imports, Opts) ->
         end,
     HostPid = maps:get(host, Opts, undefined),
     true = HostPid =:= undefined orelse is_pid(HostPid),
-    {maps:keys(Imports), wasi_options(maps:get(wasi, Opts, none)), Limits, HostTimeout, HostPid}.
+    StreamPid = maps:get(stream, Opts, self()),
+    true = is_pid(StreamPid),
+    InboxLimit = maps:get(inbox_limit, Opts, ?DEFAULT_INBOX_LIMIT),
+    true = is_integer(InboxLimit) andalso InboxLimit > 0,
+    {
+        maps:keys(Imports),
+        wasi_options(maps:get(wasi, Opts, none)),
+        Limits,
+        HostTimeout,
+        HostPid,
+        StreamPid,
+        InboxLimit
+    }.
 
 limit(Key, Opts, Default) ->
     case maps:get(Key, Opts, Default) of
@@ -423,6 +444,7 @@ wasi_options(Wasi) when is_map(Wasi) ->
 stdio(none) -> none;
 stdio(inherit) -> inherit;
 stdio(capture) -> capture;
+stdio(stream) -> stream;
 stdio({file, Path}) -> {file, bin(Path)};
 stdio({binary, Bytes}) -> {binary, iolist_to_binary(Bytes)}.
 
@@ -589,6 +611,33 @@ table_grow(#instance{handle = H}, Name, Delta) -> wasmtime_nif:table_grow(H, Nam
 -doc "Fuel left after the last call, for a module compiled with `fuel => true`.".
 -spec fuel_remaining(instance()) -> {ok, non_neg_integer()} | error().
 fuel_remaining(#instance{handle = H}) -> wasmtime_nif:fuel_remaining(H).
+
+-doc """
+The reference carried by every message this instance sends:
+`{wasmtime_stream, Ref, Kind, Bytes}` and `{wasmtime_host_call, Ref, ...}`.
+A process serving several instances matches on it.
+""".
+-spec ref(instance()) -> reference().
+ref(#instance{ref = Ref}) -> Ref.
+
+-doc """
+Queue one message for the guest.
+
+The guest reads it through `stdin => stream` (as bytes, without message
+boundaries) or the `erlang.recv` import (one whole message). Never blocks:
+once `inbox_limit` bytes (default 16 MB) are queued and unread it returns
+`{error, #{kind := inbox_full}}` and the sender retries later. After
+`close/1` it returns `{error, #{kind := closed}}`.
+""".
+-spec send(instance(), iodata()) -> ok | error().
+send(#instance{handle = H}, Bytes) -> wasmtime_nif:send(H, Bytes).
+
+-doc """
+End the guest's input. What is queued is still delivered; after that stdin
+reads return end of file and `erlang.recv` returns -1. Idempotent.
+""".
+-spec close(instance()) -> ok.
+close(#instance{handle = H}) -> wasmtime_nif:close(H).
 
 -doc """
 Take what the captured `stdout` and `stderr` hold and empty them.

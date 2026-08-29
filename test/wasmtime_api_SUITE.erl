@@ -89,7 +89,21 @@
     proposals_precompiled_loads_on_defaults/1,
     module_options_roundtrip/1,
     bad_compile_options/1,
-    engine_cap/1
+    engine_cap/1,
+    stream_channel_echo/1,
+    stream_recv_small_buffer/1,
+    stream_inbox_full/1,
+    stream_close_then_send/1,
+    stream_blocked_recv_interrupted/1,
+    stream_blocked_recv_caller_dies/1,
+    stream_reserved_import/1,
+    stream_bad_import_type/1,
+    stream_other_process/1,
+    stream_dead_receiver/1,
+    wasi_stdin_stream/1,
+    wasi_stdin_stream_blocked/1,
+    wasi_stdin_stream_other_fds/1,
+    wasi_stdout_stream/1
 ]).
 
 all() ->
@@ -208,7 +222,23 @@ groups() ->
             wasi_capture_output,
             wasi_capture_limit,
             wasi_inherit_args_env,
-            wasi_read_output_while_running
+            wasi_read_output_while_running,
+            wasi_stdin_stream,
+            wasi_stdin_stream_blocked,
+            wasi_stdin_stream_other_fds,
+            wasi_stdout_stream
+        ]},
+        {streams, [], [
+            stream_channel_echo,
+            stream_recv_small_buffer,
+            stream_inbox_full,
+            stream_close_then_send,
+            stream_blocked_recv_interrupted,
+            stream_blocked_recv_caller_dies,
+            stream_reserved_import,
+            stream_bad_import_type,
+            stream_other_process,
+            stream_dead_receiver
         ]}
     ].
 
@@ -1603,3 +1633,240 @@ simd_binary() ->
 %% (module (memory 1 1 shared))
 threads_binary() ->
     <<0, "asm", 1, 0, 0, 0, 5, 4, 1, 3, 1, 1>>.
+
+%% --------------------------------------------------------------- streams
+
+channel_wat() ->
+    ~"""
+    (module
+      (import "erlang" "send" (func $send (param i32 i32)))
+      (import "erlang" "recv" (func $recv (param i32 i32) (result i32)))
+      (memory (export "memory") 1)
+      ;; echo every message back until the input is closed; count them
+      (func (export "echo") (result i32) (local $n i32) (local $count i32)
+        (block (loop
+          (local.set $n (call $recv (i32.const 0) (i32.const 1024)))
+          (br_if 1 (i32.lt_s (local.get $n) (i32.const 0)))
+          (call $send (i32.const 0) (local.get $n))
+          (local.set $count (i32.add (local.get $count) (i32.const 1)))
+          (br 0)))
+        (local.get $count))
+      (func (export "recv_into") (param i32) (result i32)
+        (call $recv (i32.const 0) (local.get 0)))
+      (func (export "send_at") (param i32 i32) (call $send (local.get 0) (local.get 1))))
+    """.
+
+channel_inst() -> channel_inst(#{}).
+channel_inst(Opts) -> instance(channel_wat(), Opts).
+
+collect(Kind, N) -> collect(Kind, N, []).
+collect(_, 0, Acc) ->
+    lists:reverse(Acc);
+collect(Kind, N, Acc) ->
+    receive
+        {wasmtime_stream, _, Kind, Bytes} -> collect(Kind, N - 1, [Bytes | Acc])
+    after 2000 -> error({missing_stream_message, Kind, N})
+    end.
+
+stream_channel_echo(_) ->
+    Inst = channel_inst(),
+    {ok, R} = wasmtime:call_async(Inst, ~"echo", []),
+    ok = wasmtime:send(Inst, ~"one"),
+    ok = wasmtime:send(Inst, [~"tw", <<"o">>]),
+    ok = wasmtime:send(Inst, <<>>),
+    %% one message in, one message out: framing is kept
+    [~"one", ~"two", <<>>] = collect(channel, 3),
+    ok = wasmtime:close(Inst),
+    {ok, [3]} = wasmtime:await(Inst, R),
+    %% closed and drained: recv answers -1 at once
+    {ok, [-1]} = wasmtime:call(Inst, ~"recv_into", [1024]),
+    ok.
+
+stream_recv_small_buffer(_) ->
+    Inst = channel_inst(),
+    ok = wasmtime:send(Inst, ~"hello world"),
+    %% -2 - Needed, and the message stays queued
+    {ok, [-13]} = wasmtime:call(Inst, ~"recv_into", [4]),
+    {ok, [11]} = wasmtime:call(Inst, ~"recv_into", [11]),
+    %% out of bounds pointers trap instead of touching memory
+    {error, #{class := trap, message := Msg}} = wasmtime:call(Inst, ~"send_at", [65530, 100]),
+    ?assertMatch({_, _}, binary:match(Msg, ~"out of bounds")),
+    ok.
+
+stream_inbox_full(_) ->
+    Inst = channel_inst(#{inbox_limit => 16}),
+    ok = wasmtime:send(Inst, ~"0123456789"),
+    {error, #{kind := inbox_full}} = wasmtime:send(Inst, ~"0123456789"),
+    ok = wasmtime:send(Inst, ~"123456"),
+    {ok, R} = wasmtime:call_async(Inst, ~"echo", []),
+    [~"0123456789", ~"123456"] = collect(channel, 2),
+    %% room again once the guest has read
+    ok = wasmtime:send(Inst, ~"0123456789"),
+    [~"0123456789"] = collect(channel, 1),
+    ok = wasmtime:close(Inst),
+    {ok, [3]} = wasmtime:await(Inst, R),
+    ok.
+
+stream_close_then_send(_) ->
+    Inst = channel_inst(),
+    ok = wasmtime:send(Inst, ~"last"),
+    ok = wasmtime:close(Inst),
+    ok = wasmtime:close(Inst),
+    {error, #{kind := closed}} = wasmtime:send(Inst, ~"late"),
+    %% what was queued before close is still delivered
+    {ok, [4]} = wasmtime:call(Inst, ~"recv_into", [1024]),
+    {ok, [-1]} = wasmtime:call(Inst, ~"recv_into", [1024]),
+    ok.
+
+stream_blocked_recv_interrupted(_) ->
+    Inst = channel_inst(),
+    {error, #{kind := timeout}} = wasmtime:call(Inst, ~"echo", [], #{timeout => 100}),
+    {ok, R} = wasmtime:call_async(Inst, ~"echo", []),
+    timer:sleep(50),
+    ok = wasmtime:interrupt(Inst),
+    {error, #{kind := interrupt}} = wasmtime:await(Inst, R),
+    %% the instance and its inbox are still usable
+    ok = wasmtime:send(Inst, ~"still here"),
+    {ok, [10]} = wasmtime:call(Inst, ~"recv_into", [1024]),
+    ok.
+
+stream_blocked_recv_caller_dies(_) ->
+    Inst = channel_inst(#{stream => self()}),
+    Pid = spawn(fun() -> wasmtime:call(Inst, ~"echo", []) end),
+    timer:sleep(50),
+    exit(Pid, kill),
+    timer:sleep(50),
+    %% the thread is free again
+    ok = wasmtime:send(Inst, ~"x"),
+    {ok, [1]} = wasmtime:call(Inst, ~"recv_into", [1024]),
+    ok.
+
+stream_reserved_import(_) ->
+    Fun = fun(_, _) -> {ok, []} end,
+    {error, #{class := link, kind := reserved_import}} =
+        wasmtime:instantiate(compile(channel_wat()), #{imports => #{{~"erlang", ~"send"} => Fun}}),
+    ok.
+
+stream_bad_import_type(_) ->
+    Wat =
+        ~"""
+    (module (import "erlang" "recv" (func (param i32) (result i64))))
+    """,
+    {error, #{class := link, kind := unsupported_type}} = wasmtime:instantiate(compile(Wat)),
+    ok.
+
+stream_other_process(_) ->
+    Self = self(),
+    Collector = spawn_link(fun() ->
+        receive
+            {wasmtime_stream, Ref, channel, B} -> Self ! {got, Ref, B}
+        end
+    end),
+    Inst = channel_inst(#{stream => Collector}),
+    ok = wasmtime:send(Inst, ~"routed"),
+    ok = wasmtime:close(Inst),
+    {ok, [1]} = wasmtime:call(Inst, ~"echo", []),
+    receive
+        {got, Ref, ~"routed"} when is_reference(Ref) -> ok
+    after 2000 -> error(no_message)
+    end,
+    ok.
+
+stream_dead_receiver(_) ->
+    Dead = spawn(fun() -> ok end),
+    timer:sleep(20),
+    Inst = channel_inst(#{stream => Dead}),
+    ok = wasmtime:send(Inst, ~"dropped"),
+    ok = wasmtime:close(Inst),
+    %% output to a gone process is discarded, the guest keeps going
+    {ok, [1]} = wasmtime:call(Inst, ~"echo", []),
+    ok.
+
+wasi_stdin_stream(_) ->
+    Inst = instance(stdio_wat(), #{wasi => #{stdin => stream, stdout => stream, stderr => capture}}),
+    ok = wasmtime:send(Inst, ~"ab"),
+    ok = wasmtime:send(Inst, ~"cd"),
+    %% stdin is a byte stream: one read takes both chunks
+    {ok, [4]} = wasmtime:call(Inst, ~"cat", []),
+    [~"abcd"] = collect(stdout, 1),
+    {ok, {<<>>, ~"err", {0, 0}}} = wasmtime:read_output(Inst),
+    ok = wasmtime:close(Inst),
+    %% end of file once closed and drained
+    {ok, [0]} = wasmtime:call(Inst, ~"cat", []),
+    {ok, [0]} = wasmtime:call(Inst, ~"cat", []),
+    ok.
+
+wasi_stdin_stream_blocked(_) ->
+    Inst = instance(stdio_wat(), #{wasi => #{stdin => stream, stdout => stream}}),
+    %% a read with nothing queued waits for send/2
+    {ok, R} = wasmtime:call_async(Inst, ~"cat", []),
+    timer:sleep(50),
+    ok = wasmtime:send(Inst, ~"late"),
+    {ok, [4]} = wasmtime:await(Inst, R),
+    [~"late"] = collect(stdout, 1),
+    %% and can be interrupted
+    {error, #{kind := timeout}} = wasmtime:call(Inst, ~"cat", [], #{timeout => 100}),
+    ok = wasmtime:send(Inst, ~"x"),
+    {ok, [1]} = wasmtime:call(Inst, ~"cat", []),
+    ok.
+
+wasi_stdin_stream_other_fds(_) ->
+    %% fd_read on anything but 0 still goes to Wasmtime: same answer with
+    %% and without the override
+    Wat =
+        ~"""
+    (module
+      (import "wasi_snapshot_preview1" "fd_read" (func $fd_read (param i32 i32 i32 i32) (result i32)))
+      (memory (export "memory") 1)
+      (func (export "read_fd") (param i32) (result i32)
+        (i32.store (i32.const 0) (i32.const 100))
+        (i32.store (i32.const 4) (i32.const 10))
+        (call $fd_read (local.get 0) (i32.const 0) (i32.const 1) (i32.const 8)))
+      (func (export "read_bad") (result i32)
+        (call $fd_read (i32.const 0) (i32.const 70000) (i32.const 1) (i32.const 8))))
+    """,
+    Plain = instance(Wat, #{wasi => #{}}),
+    Streamed = instance(Wat, #{wasi => #{stdin => stream}}),
+    {ok, [Errno]} = wasmtime:call(Plain, ~"read_fd", [1]),
+    ?assert(Errno > 0),
+    {ok, [Errno]} = wasmtime:call(Streamed, ~"read_fd", [1]),
+    {ok, [Errno]} = wasmtime:call(Streamed, ~"read_fd", [99]),
+    %% bad iovec pointers answer EFAULT instead of trapping
+    {ok, [21]} = wasmtime:call(Streamed, ~"read_bad", []),
+    ok.
+
+wasi_stdout_stream(_) ->
+    Self = self(),
+    Collector = spawn_link(fun Loop() ->
+        receive
+            {wasmtime_stream, _, K, B} ->
+                Self ! {K, B},
+                Loop()
+        end
+    end),
+    Inst = instance(stdio_wat(), #{
+        wasi => #{stdin => {binary, ~"in"}, stdout => stream, stderr => stream},
+        stream => Collector
+    }),
+    {ok, []} = wasmtime:call(Inst, ~"spam", [2]),
+    %% one message per write, as it happens
+    receive
+        {stdout, ~"0123456789"} -> ok
+    after 2000 -> error(no_stdout)
+    end,
+    receive
+        {stdout, ~"0123456789"} -> ok
+    after 2000 -> error(no_stdout)
+    end,
+    {ok, [2]} = wasmtime:call(Inst, ~"cat", []),
+    receive
+        {stdout, ~"in"} -> ok
+    after 2000 -> error(no_stdout)
+    end,
+    receive
+        {stderr, ~"err"} -> ok
+    after 2000 -> error(no_stderr)
+    end,
+    %% nothing was captured
+    {ok, {<<>>, <<>>, {0, 0}}} = wasmtime:read_output(Inst),
+    ok.

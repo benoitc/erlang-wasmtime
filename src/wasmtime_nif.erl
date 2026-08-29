@@ -17,6 +17,8 @@
     table_grow/3,
     fuel_remaining/1,
     host_reply/3,
+    send/2,
+    close/1,
     interrupt/1,
     cancel/2,
     read_memory/4,
@@ -42,6 +44,8 @@
     table_grow/3,
     fuel_remaining/1,
     host_reply/3,
+    send/2,
+    close/1,
     interrupt/1,
     cancel/2,
     read_memory/4,
@@ -78,6 +82,8 @@ table_size(_Handle, _Name) -> erlang:nif_error(not_loaded).
 table_grow(_Handle, _Name, _Delta) -> erlang:nif_error(not_loaded).
 fuel_remaining(_Handle) -> erlang:nif_error(not_loaded).
 host_reply(_Handle, _Id, _Reply) -> erlang:nif_error(not_loaded).
+send(_Handle, _Bytes) -> erlang:nif_error(not_loaded).
+close(_Handle) -> erlang:nif_error(not_loaded).
 interrupt(_Handle) -> erlang:nif_error(not_loaded).
 cancel(_Handle, _Id) -> erlang:nif_error(not_loaded).
 read_memory(_Handle, _Name, _Ptr, _Len) -> erlang:nif_error(not_loaded).

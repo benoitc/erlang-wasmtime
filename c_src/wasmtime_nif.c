@@ -12,6 +12,11 @@
  *   - A host function (an import provided by an Erlang fun) sends
  *         {wasmtime_host_call, Ref, HostId, {Module, Name}, Args}
  *     to the calling process and waits, bounded, for host_reply/3.
+ *   - A guest that runs for long exchanges bytes without stopping: send/2
+ *     queues a message in the instance inbox, read by the guest through
+ *     `stdin => stream` or the `erlang.recv` import; guest writes to a
+ *     `stream` stdout/stderr or `erlang.send` arrive as
+ *         {wasmtime_stream, Ref, stdout | stderr | channel, Bytes}
  *   - Interruption uses Wasmtime epochs. One ticker thread bumps the engine
  *     epoch every 10 ms; each store's deadline callback checks the instance's
  *     interrupt flag and either extends the deadline or fails the call.
@@ -26,8 +31,8 @@
  *   Messages carry an Erlang reference (`Ref`, created by the Erlang side),
  *   not a resource term, so a worker thread never resurrects a resource.
  *
- * Sections: atoms and errors, values, instance state, host calls, worker
- * thread, resources, NIF entry points, load/unload.
+ * Sections: atoms and errors, values, instance state, host calls, streams,
+ * worker thread, resources, NIF entry points, load/unload.
  */
 /* clock_gettime, nanosleep and pthread_cond_timedwait under -std=c11 */
 #define _POSIX_C_SOURCE 200809L
@@ -92,7 +97,7 @@ static ERL_NIF_TERM atom_ok, atom_error, atom_true, atom_false, atom_compiler, a
     atom_read, atom_write, atom_nan, atom_infinity, atom_neg_infinity, atom_class, atom_kind,
     atom_message, atom_status, atom_not_running, atom_func, atom_global, atom_table, atom_memory,
     atom_tag, atom_wasmtime_result, atom_wasmtime_host_call, atom_no_pending_host_call,
-    atom_enqueued;
+    atom_enqueued, atom_stream, atom_wasmtime_stream, atom_stdout, atom_stderr, atom_channel;
 
 static ERL_NIF_TERM mk_atom(ErlNifEnv *env, const char *s) {
   ERL_NIF_TERM a;
@@ -352,6 +357,12 @@ typedef struct {
 
 enum state { ST_IDLE, ST_RUNNING, ST_IN_HOST };
 
+typedef struct chunk {
+  unsigned char *data;
+  size_t len, off; /* off: what stdin already consumed */
+  struct chunk *next;
+} chunk_t;
+
 typedef struct instance {
   pthread_mutex_t mu;
   pthread_cond_t cv;
@@ -381,6 +392,18 @@ typedef struct instance {
   ErlNifEnv *reply_env;
   ERL_NIF_TERM reply;
   unsigned host_timeout_ms;
+
+  /* Bytes sent to the guest with send/2, one chunk per call, read by the
+   * guest through stdin (`stdin => stream`) or the `erlang.recv` import.
+   * Guarded by mu, signalled on cv. */
+  struct chunk *inbox_head, *inbox_tail;
+  size_t inbox_bytes, inbox_limit;
+  int inbox_closed;
+  ErlNifPid stream_pid; /* receives {wasmtime_stream, Ref, Kind, Bytes} */
+  int stdin_stream;
+  wasmtime_func_t real_fd_read; /* Wasmtime's own, taken before it is shadowed */
+  wasmtime_func_t wasi_fd_read; /* the shim in front of it, for fds other than 0 */
+  int has_fd_read;
 
   /* set under mu by interrupt/cancel/down, read by the epoch callback */
   volatile int interrupt;
@@ -434,6 +457,7 @@ typedef struct engine_entry {
   int fuel;
   int opt_level;               /* 0 none, 1 speed, 2 speed_and_size */
   uint32_t set_mask, val_mask; /* proposal overrides: which, and to what */
+  wasmtime_module_t *shim;     /* the stdin stream forwarder, compiled on first use */
   struct engine_entry *next;
 } engine_t;
 static engine_t *engines_head;
@@ -743,6 +767,328 @@ static wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtim
   return NULL;
 }
 
+/* --------------------------------------------------------------- streams -- */
+/* A guest reads Erlang's send/2 bytes from the inbox and writes back with
+ * enif_send, without stopping. Two guest-side faces share the inbox: the
+ * `erlang` imports for modules that can import, and stdin/stdout for stock
+ * WASI programs. All of it runs on the instance thread; the inbox is under
+ * the instance mutex, and cv is the one condition variable, so stop_current
+ * wakes a guest parked here the same way it wakes one parked in a host
+ * function. */
+
+/* Called with the mutex held. */
+static void inbox_drop_head(instance_t *inst) {
+  chunk_t *c = inst->inbox_head;
+  inst->inbox_head = c->next;
+  if (!inst->inbox_head) inst->inbox_tail = NULL;
+  inst->inbox_bytes -= c->len - c->off;
+  enif_free(c->data);
+  enif_free(c);
+}
+
+enum inbox_status { INBOX_DATA, INBOX_CLOSED, INBOX_INTERRUPTED };
+
+/* Wait, with the mutex held, until the inbox has bytes, is closed, or the
+ * running request is being stopped. */
+static enum inbox_status inbox_wait(instance_t *inst) {
+  for (;;) {
+    if (inst->abort || inst->current->cancelled) return INBOX_INTERRUPTED;
+    if (inst->inbox_head) return INBOX_DATA;
+    if (inst->inbox_closed) return INBOX_CLOSED;
+    pthread_cond_wait(&inst->cv, &inst->mu);
+  }
+}
+
+static wasm_trap_t *interrupted_trap(instance_t *inst) {
+  inst->interrupted_fired = 1;
+  return wasmtime_trap_new("interrupted", 11);
+}
+
+/* The caller's exported memory, "memory" by name as WASI and every
+ * toolchain export it. */
+static int guest_mem(wasmtime_caller_t *caller, unsigned char **base, size_t *size) {
+  wasmtime_extern_t ext;
+  if (!wasmtime_caller_export_get(caller, "memory", 6, &ext) || ext.kind != WASMTIME_EXTERN_MEMORY)
+    return 0;
+  wasmtime_context_t *ctx = wasmtime_caller_context(caller);
+  *base = wasmtime_memory_data(ctx, &ext.of.memory);
+  *size = wasmtime_memory_data_size(ctx, &ext.of.memory);
+  return 1;
+}
+
+static int in_bounds(size_t size, uint32_t ptr, uint32_t len) {
+  return (uint64_t)ptr + len <= size;
+}
+
+/* {wasmtime_stream, Ref, Kind, Bytes} to the stream process. A receiver
+ * that is gone drops the bytes, like `none` does. */
+static void stream_send(instance_t *inst, ERL_NIF_TERM kind, const unsigned char *data,
+                        size_t len) {
+  ErlNifEnv *menv = enif_alloc_env();
+  ERL_NIF_TERM msg = enif_make_tuple4(menv, atom_wasmtime_stream, enif_make_copy(menv, inst->ref),
+                                      kind, mk_binary(menv, data, len));
+  enif_send(NULL, &inst->stream_pid, menv, msg);
+  enif_free_env(menv);
+}
+
+/* erlang.send(ptr: i32, len: i32): one message to the stream process */
+static wasm_trap_t *erlang_send_cb(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
+                                   size_t nvals) {
+  instance_t *inst = envp;
+  unsigned char *base;
+  size_t size;
+  uint32_t ptr = (uint32_t)vals[0].i32, len = (uint32_t)vals[1].i32;
+  if (!guest_mem(caller, &base, &size) || !in_bounds(size, ptr, len))
+    return wasmtime_trap_new("erlang.send: out of bounds", 26);
+  stream_send(inst, atom_channel, base + ptr, len);
+  return NULL;
+}
+
+/* erlang.recv(ptr: i32, cap: i32) -> i32: one whole message copied to ptr,
+ * its length returned; blocks until one is queued. -1 once closed and
+ * drained; -2 - Needed when cap is too small (the message stays queued). */
+static wasm_trap_t *erlang_recv_cb(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
+                                   size_t nvals) {
+  instance_t *inst = envp;
+  unsigned char *base;
+  size_t size;
+  uint32_t ptr = (uint32_t)vals[0].i32, cap = (uint32_t)vals[1].i32;
+  if (!guest_mem(caller, &base, &size) || !in_bounds(size, ptr, cap))
+    return wasmtime_trap_new("erlang.recv: out of bounds", 26);
+  pthread_mutex_lock(&inst->mu);
+  enum inbox_status st = inbox_wait(inst);
+  int32_t r = -1;
+  if (st == INBOX_DATA) {
+    chunk_t *c = inst->inbox_head;
+    size_t len = c->len - c->off;
+    if (len > cap) {
+      r = -2 - (int32_t)len;
+    } else {
+      memcpy(base + ptr, c->data + c->off, len);
+      r = (int32_t)len;
+      inbox_drop_head(inst);
+    }
+  }
+  pthread_mutex_unlock(&inst->mu);
+  if (st == INBOX_INTERRUPTED) return interrupted_trap(inst);
+  vals[0].i32 = r;
+  return NULL;
+}
+
+#if NIF_HAVE_WASI
+/* wasi_snapshot_preview1.fd_read(fd, iovs, iovs_len, nread) -> errno, in
+ * front of Wasmtime's own: fd 0 reads the inbox as a byte stream, any other
+ * fd is forwarded. Wasmtime has no custom stdin hook; this is the one place
+ * the preview 1 surface is reimplemented. */
+#define WASI_EFAULT 21
+static wasm_trap_t *fd_read_cb(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
+                               size_t nvals) {
+  instance_t *inst = envp;
+  if (vals[0].i32 != 0) {
+    if (!inst->has_fd_read) return wasmtime_trap_new("fd_read before the instance is linked", 38);
+    wasm_trap_t *trap = NULL;
+    wasmtime_error_t *e = wasmtime_func_call_unchecked(wasmtime_caller_context(caller),
+                                                       &inst->wasi_fd_read, vals, 4, &trap);
+    if (e) {
+      wasm_name_t msg;
+      wasmtime_error_message(e, &msg);
+      trap = wasmtime_trap_new(msg.data, msg.size);
+      wasm_byte_vec_delete(&msg);
+      wasmtime_error_delete(e);
+    }
+    return trap;
+  }
+  unsigned char *base;
+  size_t size;
+  uint32_t iovs = (uint32_t)vals[1].i32, niovs = (uint32_t)vals[2].i32,
+           nread = (uint32_t)vals[3].i32;
+  if (!guest_mem(caller, &base, &size) || niovs > size / 8 || !in_bounds(size, iovs, niovs * 8) ||
+      !in_bounds(size, nread, 4)) {
+    vals[0].i32 = WASI_EFAULT;
+    return NULL;
+  }
+  /* Each iovec is {buf: u32, len: u32}, little endian. */
+  uint64_t want = 0;
+  for (uint32_t i = 0; i < niovs; i++) {
+    uint32_t buf, len;
+    memcpy(&buf, base + iovs + i * 8, 4);
+    memcpy(&len, base + iovs + i * 8 + 4, 4);
+    if (!in_bounds(size, buf, len)) {
+      vals[0].i32 = WASI_EFAULT;
+      return NULL;
+    }
+    want += len;
+  }
+  uint32_t got = 0;
+  if (want > 0) {
+    pthread_mutex_lock(&inst->mu);
+    enum inbox_status st = inbox_wait(inst);
+    if (st == INBOX_INTERRUPTED) {
+      pthread_mutex_unlock(&inst->mu);
+      return interrupted_trap(inst);
+    }
+    /* A short read: what is queued now, never a wait for more. */
+    for (uint32_t i = 0; i < niovs && inst->inbox_head; i++) {
+      uint32_t buf, len;
+      memcpy(&buf, base + iovs + i * 8, 4);
+      memcpy(&len, base + iovs + i * 8 + 4, 4);
+      while (len > 0 && inst->inbox_head) {
+        chunk_t *c = inst->inbox_head;
+        size_t n = c->len - c->off;
+        if (n > len) n = len;
+        memcpy(base + buf, c->data + c->off, n);
+        buf += (uint32_t)n;
+        len -= (uint32_t)n;
+        got += (uint32_t)n;
+        c->off += n;
+        inst->inbox_bytes -= n;
+        if (c->off == c->len) inbox_drop_head(inst);
+      }
+    }
+    pthread_mutex_unlock(&inst->mu);
+  }
+  memcpy(base + nread, &got, 4);
+  vals[0].i32 = 0;
+  return NULL;
+}
+#endif
+
+/* Put fd_read in front of Wasmtime's own. Called after the WASI definitions
+ * are in the linker. */
+static ERL_NIF_TERM define_stdin_stream(instance_t *inst, ErlNifEnv *out) {
+#if NIF_HAVE_WASI
+  wasmtime_extern_t real;
+  if (!wasmtime_linker_get(inst->linker, inst->ctx, "wasi_snapshot_preview1", 22, "fd_read", 7,
+                           &real) ||
+      real.kind != WASMTIME_EXTERN_FUNC)
+    return mk_error_s(out, "wasi", "config", "wasi fd_read is not in the linker");
+  inst->real_fd_read = real.of.func;
+  wasm_valtype_t *ps[4] = {wasm_valtype_new(WASM_I32), wasm_valtype_new(WASM_I32),
+                           wasm_valtype_new(WASM_I32), wasm_valtype_new(WASM_I32)};
+  wasm_valtype_t *rs[1] = {wasm_valtype_new(WASM_I32)};
+  wasm_valtype_vec_t pv, rv;
+  wasm_valtype_vec_new(&pv, 4, (wasm_valtype_t *const *)ps);
+  wasm_valtype_vec_new(&rv, 1, (wasm_valtype_t *const *)rs);
+  wasm_functype_t *ft = wasm_functype_new(&pv, &rv);
+  wasmtime_linker_allow_shadowing(inst->linker, true);
+  wasmtime_error_t *e = wasmtime_linker_define_func_unchecked(
+      inst->linker, "wasi_snapshot_preview1", 22, "fd_read", 7, ft, fd_read_cb, inst, NULL);
+  wasmtime_linker_allow_shadowing(inst->linker, false);
+  wasm_functype_delete(ft);
+  if (e) return error_to_term(out, e, "wasi");
+  return 0;
+#else
+  return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
+#endif
+}
+
+/* Wasmtime's WASI functions find the guest memory through their caller's
+ * "memory" export, and a host-to-host call has no caller. This module
+ * imports the guest memory, exports it under that name and forwards to
+ * Wasmtime's fd_read, so fd_read_cb calls it for every fd but 0:
+ *
+ *   (module
+ *     (import "wasi" "fd_read" (func $r (param i32 i32 i32 i32) (result i32)))
+ *     (import "guest" "memory" (memory 0))
+ *     (export "memory" (memory 0))
+ *     (func (export "fd_read") (param i32 i32 i32 i32) (result i32)
+ *       local.get 0 local.get 1 local.get 2 local.get 3 call $r))
+ */
+#if NIF_HAVE_COMPILER
+static const uint8_t SHIM_WASM[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x01, 0x60, 0x04, 0x7f, 0x7f, 0x7f,
+    0x7f, 0x01, 0x7f, 0x02, 0x20, 0x02, 0x04, 0x77, 0x61, 0x73, 0x69, 0x07, 0x66, 0x64, 0x5f, 0x72,
+    0x65, 0x61, 0x64, 0x00, 0x00, 0x05, 0x67, 0x75, 0x65, 0x73, 0x74, 0x06, 0x6d, 0x65, 0x6d, 0x6f,
+    0x72, 0x79, 0x02, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x14, 0x02, 0x06, 0x6d, 0x65, 0x6d,
+    0x6f, 0x72, 0x79, 0x02, 0x00, 0x07, 0x66, 0x64, 0x5f, 0x72, 0x65, 0x61, 0x64, 0x00, 0x01, 0x0a,
+    0x0e, 0x01, 0x0c, 0x00, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x20, 0x03, 0x10, 0x00, 0x0b};
+#endif
+
+/* The shim compiled once per engine. NULL without a compiler. */
+static wasmtime_module_t *engine_shim(engine_t *e) {
+#if NIF_HAVE_COMPILER
+  pthread_mutex_lock(&engines_mu);
+  if (!e->shim) {
+    wasmtime_module_t *m = NULL;
+    wasmtime_error_t *err = wasmtime_module_new(e->engine, SHIM_WASM, sizeof SHIM_WASM, &m);
+    if (err) wasmtime_error_delete(err);
+    e->shim = m;
+  }
+  pthread_mutex_unlock(&engines_mu);
+  return e->shim;
+#else
+  (void)e;
+  return NULL;
+#endif
+}
+
+/* Called once the guest is instantiated and its memory is known. */
+static ERL_NIF_TERM link_stdin_shim(instance_t *inst, ErlNifEnv *out) {
+  wasmtime_module_t *shim = engine_shim(inst->mod->engine);
+  if (!shim)
+    return mk_error_s(out, "wasi", "unavailable", "stdin => stream needs a build with a compiler");
+  if (!inst->has_memory)
+    return mk_error_s(out, "wasi", "config", "stdin => stream needs an exported memory");
+  wasmtime_extern_t real = {.kind = WASMTIME_EXTERN_FUNC, .of.func = inst->real_fd_read};
+  wasmtime_extern_t mem = {.kind = WASMTIME_EXTERN_MEMORY, .of.memory = inst->memory};
+  wasmtime_linker_t *l = wasmtime_linker_new(inst->mod->engine->engine);
+  wasmtime_error_t *e = wasmtime_linker_define(l, inst->ctx, "wasi", 4, "fd_read", 7, &real);
+  if (!e) e = wasmtime_linker_define(l, inst->ctx, "guest", 5, "memory", 6, &mem);
+  wasmtime_instance_t si;
+  wasm_trap_t *trap = NULL;
+  if (!e) e = wasmtime_linker_instantiate(l, inst->ctx, shim, &si, &trap);
+  wasmtime_linker_delete(l);
+  if (trap) wasm_trap_delete(trap);
+  if (e) {
+    wasmtime_error_delete(e);
+    return mk_error_s(out, "wasi", "config",
+                      "stdin => stream could not link to this memory (shared or 64-bit?)");
+  }
+  wasmtime_extern_t fwd;
+  if (!wasmtime_instance_export_get(inst->ctx, &si, "fd_read", 7, &fwd) ||
+      fwd.kind != WASMTIME_EXTERN_FUNC)
+    return mk_error_s(out, "wasi", "config", "stdin shim has no fd_read");
+  inst->wasi_fd_read = fwd.of.func;
+  inst->has_fd_read = 1;
+  return 0;
+}
+
+/* The `erlang` imports a module may declare: send (i32 i32) and
+ * recv (i32 i32) -> i32. Bound natively when present with that exact type. */
+static int functype_is(const wasm_functype_t *ft, size_t np, size_t nr) {
+  const wasm_valtype_vec_t *ps = wasm_functype_params(ft), *rs = wasm_functype_results(ft);
+  if (ps->size != np || rs->size != nr) return 0;
+  for (size_t i = 0; i < np; i++)
+    if (kind_of(ps->data[i]) != WASMTIME_I32) return 0;
+  for (size_t i = 0; i < nr; i++)
+    if (kind_of(rs->data[i]) != WASMTIME_I32) return 0;
+  return 1;
+}
+
+static ERL_NIF_TERM define_erlang_imports(instance_t *inst, ErlNifEnv *out,
+                                          const wasm_importtype_vec_t *imports) {
+  for (size_t i = 0; i < imports->size; i++) {
+    const wasm_name_t *m = wasm_importtype_module(imports->data[i]);
+    const wasm_name_t *n = wasm_importtype_name(imports->data[i]);
+    if (m->size != 6 || memcmp(m->data, "erlang", 6) != 0) continue;
+    int is_send = n->size == 4 && memcmp(n->data, "send", 4) == 0;
+    int is_recv = n->size == 4 && memcmp(n->data, "recv", 4) == 0;
+    if (!is_send && !is_recv) continue;
+    const wasm_externtype_t *et = wasm_importtype_type(imports->data[i]);
+    const wasm_functype_t *ft =
+        wasm_externtype_kind(et) == WASM_EXTERN_FUNC ? wasm_externtype_as_functype_const(et) : NULL;
+    if (!ft || !functype_is(ft, 2, is_recv ? 1 : 0))
+      return mk_error_s(out, "link", "unsupported_type",
+                        is_send ? "erlang.send must be a function (i32 i32)"
+                                : "erlang.recv must be a function (i32 i32) -> i32");
+    wasmtime_error_t *e = wasmtime_linker_define_func_unchecked(
+        inst->linker, "erlang", 6, is_send ? "send" : "recv", 4, ft,
+        is_send ? erlang_send_cb : erlang_recv_cb, inst, NULL);
+    if (e) return error_to_term(out, e, "link");
+  }
+  return 0;
+}
+
 /* --------------------------------------------------------- worker thread -- */
 
 static wasmtime_error_t *epoch_callback(wasmtime_context_t *ctx, void *data, uint64_t *delta,
@@ -796,6 +1142,13 @@ static ptrdiff_t capture_write(void *envp, const unsigned char *data, size_t len
   inst->dropped[ce->which] += len - keep;
   pthread_mutex_unlock(&inst->mu);
   return (ptrdiff_t)len; /* the guest sees a complete write either way */
+}
+
+/* stdout/stderr `stream`: every write goes out as a message at once. */
+static ptrdiff_t stream_write(void *envp, const unsigned char *data, size_t len) {
+  capture_env_t *ce = envp;
+  stream_send(ce->inst, ce->which == 0 ? atom_stdout : atom_stderr, data, len);
+  return (ptrdiff_t)len;
 }
 #endif
 
@@ -909,14 +1262,20 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
         wasi_config_inherit_stderr(cfg);
       continue;
     }
-    if (fd > 0 && enif_is_identical(s, atom_capture)) {
+    if (fd == 0 && enif_is_identical(s, atom_stream)) {
+      inst->stdin_stream = 1; /* fd_read is put in front of WASI's below */
+      continue;
+    }
+    if (fd > 0 && (enif_is_identical(s, atom_capture) || enif_is_identical(s, atom_stream))) {
       capture_env_t *ce = enif_alloc(sizeof *ce);
       ce->inst = inst;
       ce->which = fd - 1;
+      ptrdiff_t (*cb)(void *, const unsigned char *, size_t) =
+          enif_is_identical(s, atom_capture) ? capture_write : stream_write;
       if (fd == 1)
-        wasi_config_set_stdout_custom(cfg, capture_write, ce, enif_free);
+        wasi_config_set_stdout_custom(cfg, cb, ce, enif_free);
       else
-        wasi_config_set_stderr_custom(cfg, capture_write, ce, enif_free);
+        wasi_config_set_stderr_custom(cfg, cb, ce, enif_free);
       continue;
     }
     ErlNifBinary bytes;
@@ -940,8 +1299,8 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
       }
       continue;
     }
-    err = fd == 0 ? "wasi stdin must be none, inherit, {file, Path} or {binary, Bytes}"
-                  : "wasi stdout and stderr must be none, inherit, {file, Path} or capture";
+    err = fd == 0 ? "wasi stdin must be none, inherit, stream, {file, Path} or {binary, Bytes}"
+                  : "wasi stdout and stderr must be none, inherit, stream, {file, Path} or capture";
     goto done;
   }
 
@@ -960,29 +1319,35 @@ done:
     wasmtime_error_delete(werr);
     return mk_error_s(out, "wasi", "config", "wasi could not be linked");
   }
+  if (inst->stdin_stream) return define_stdin_stream(inst, out);
   return 0;
 #endif
 }
 
-/* Opts :: {Imports :: [{Module, Name}], Wasi, Limits, HostTimeoutMs, HostPid}
+/* Opts :: {Imports :: [{Module, Name}], Wasi, Limits, HostTimeoutMs, HostPid,
+ *          StreamPid, InboxLimit}
  * Limits :: {MemoryBytes, Tables, TableElements, Instances}, -1 = unlimited
  * HostPid :: pid() | undefined */
 static ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
   ErlNifEnv *env = req->env;
   const ERL_NIF_TERM *o, *lim;
   int arity;
-  if (!enif_get_tuple(env, req->opts, &arity, &o) || arity != 5 ||
+  if (!enif_get_tuple(env, req->opts, &arity, &o) || arity != 7 ||
       !enif_get_tuple(env, o[2], &arity, &lim) || arity != 4)
     return mk_error_s(out, "link", "badarg", "malformed options");
   inst->has_host_pid = enif_get_local_pid(env, o[4], &inst->host_pid);
 
   ErlNifSInt64 mem, tables, elems, instances;
   unsigned host_timeout;
+  ErlNifUInt64 inbox_limit;
   if (!enif_get_int64(env, lim[0], &mem) || !enif_get_int64(env, lim[1], &tables) ||
       !enif_get_int64(env, lim[2], &elems) || !enif_get_int64(env, lim[3], &instances) ||
-      !enif_get_uint(env, o[3], &host_timeout))
+      !enif_get_uint(env, o[3], &host_timeout) ||
+      !enif_get_local_pid(env, o[5], &inst->stream_pid) ||
+      !enif_get_uint64(env, o[6], &inbox_limit))
     return mk_error_s(out, "link", "badarg", "malformed limits");
   inst->host_timeout_ms = host_timeout;
+  inst->inbox_limit = inbox_limit;
 
   inst->store = wasmtime_store_new(inst->mod->engine->engine, NULL, NULL);
   inst->ctx = wasmtime_store_context(inst->store);
@@ -1037,6 +1402,13 @@ static ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out)
       enif_free(name);
       continue;
     }
+    if (strcmp(module, "erlang") == 0 && (strcmp(name, "send") == 0 || strcmp(name, "recv") == 0)) {
+      enif_free(module);
+      enif_free(name);
+      result = mk_error_s(out, "link", "reserved_import",
+                          "erlang.send and erlang.recv are provided by the runtime");
+      break;
+    }
     const wasm_externtype_t *et = wasm_importtype_type(found);
     if (wasm_externtype_kind(et) != WASM_EXTERN_FUNC) {
       enif_free(module);
@@ -1075,6 +1447,10 @@ static ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out)
       break;
     }
   }
+  if (enif_is_identical(result, atom_ok)) {
+    ERL_NIF_TERM e = define_erlang_imports(inst, out, &imports);
+    if (e) result = e;
+  }
   wasm_importtype_vec_delete(&imports);
   if (!enif_is_identical(result, atom_ok)) return result;
 
@@ -1084,7 +1460,6 @@ static ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out)
       wasmtime_linker_instantiate(inst->linker, inst->ctx, inst->mod->mod, &inst->instance, &trap);
   result = outcome(inst, out, e, trap, "link");
   if (!enif_is_identical(result, atom_ok)) return result;
-  inst->instantiated = 1;
 
   /* Cache the exported memory, "memory" by name or the first one exported. */
   wasmtime_extern_t ext;
@@ -1104,6 +1479,11 @@ static ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out)
       }
     }
   }
+  if (inst->stdin_stream) {
+    ERL_NIF_TERM r = link_stdin_shim(inst, out);
+    if (r) return r;
+  }
+  inst->instantiated = 1;
   return atom_ok;
 }
 
@@ -1283,6 +1663,7 @@ static void instance_dtor(ErlNifEnv *env, void *obj) {
   if (inst->ref_env) enif_free_env(inst->ref_env);
   enif_free(inst->capture[0].data);
   enif_free(inst->capture[1].data);
+  while (inst->inbox_head) inbox_drop_head(inst);
   enif_free(inst->host_msg);
   if (inst->mod) enif_release_resource(inst->mod);
   pthread_mutex_destroy(&inst->mu);
@@ -1804,6 +2185,50 @@ static ERL_NIF_TERM nif_host_reply(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
   return r;
 }
 
+/* send(Handle, Bytes) -> ok | {error, Map}: queue one message for the guest */
+static ERL_NIF_TERM nif_send(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  instance_t *inst;
+  ErlNifBinary bin;
+  if (!get_handle(env, argv[0], &inst) || !enif_inspect_iolist_as_binary(env, argv[1], &bin))
+    return enif_make_badarg(env);
+  pthread_mutex_lock(&inst->mu);
+  ERL_NIF_TERM r = atom_ok;
+  if (inst->stopping) {
+    r = mk_error_s(env, "stream", "stopped", "instance is stopped");
+  } else if (inst->inbox_closed) {
+    r = mk_error_s(env, "stream", "closed", "the guest's input is closed");
+  } else if (inst->inbox_bytes + bin.size > inst->inbox_limit) {
+    r = mk_error_s(env, "stream", "inbox_full", "the guest has not read what was sent");
+  } else {
+    chunk_t *c = enif_alloc(sizeof *c);
+    c->data = enif_alloc(bin.size ? bin.size : 1);
+    memcpy(c->data, bin.data, bin.size);
+    c->len = bin.size;
+    c->off = 0;
+    c->next = NULL;
+    if (inst->inbox_tail)
+      inst->inbox_tail->next = c;
+    else
+      inst->inbox_head = c;
+    inst->inbox_tail = c;
+    inst->inbox_bytes += bin.size;
+    pthread_cond_broadcast(&inst->cv);
+  }
+  pthread_mutex_unlock(&inst->mu);
+  return r;
+}
+
+/* close(Handle) -> ok: end of input once the inbox is drained */
+static ERL_NIF_TERM nif_close(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  instance_t *inst;
+  if (!get_handle(env, argv[0], &inst)) return enif_make_badarg(env);
+  pthread_mutex_lock(&inst->mu);
+  inst->inbox_closed = 1;
+  pthread_cond_broadcast(&inst->cv);
+  pthread_mutex_unlock(&inst->mu);
+  return atom_ok;
+}
+
 /* interrupt(Handle) -> ok | not_running: end whatever runs, keep its result */
 static ERL_NIF_TERM nif_interrupt(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   instance_t *inst;
@@ -2014,6 +2439,11 @@ static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
   A(atom_wasmtime_host_call, "wasmtime_host_call");
   A(atom_no_pending_host_call, "no_pending_host_call");
   A(atom_enqueued, "enqueued");
+  A(atom_stream, "stream");
+  A(atom_wasmtime_stream, "wasmtime_stream");
+  A(atom_stdout, "stdout");
+  A(atom_stderr, "stderr");
+  A(atom_channel, "channel");
 #undef A
 
   ErlNifResourceTypeInit mi = {.dtor = module_dtor};
@@ -2043,6 +2473,7 @@ static void unload(ErlNifEnv *env, void *priv) {
   while (engines_head) {
     engine_t *e = engines_head;
     engines_head = e->next;
+    if (e->shim) wasmtime_module_delete(e->shim);
     wasm_engine_delete(e->engine);
     enif_free(e);
   }
@@ -2066,6 +2497,8 @@ static ErlNifFunc funcs[] = {
     {"table_grow", 3, nif_table_grow, 0},
     {"fuel_remaining", 1, nif_fuel_remaining, 0},
     {"host_reply", 3, nif_host_reply, 0},
+    {"send", 2, nif_send, 0},
+    {"close", 1, nif_close, 0},
     {"interrupt", 1, nif_interrupt, 0},
     {"cancel", 2, nif_cancel, 0},
     {"read_memory", 4, nif_read_memory, 0},

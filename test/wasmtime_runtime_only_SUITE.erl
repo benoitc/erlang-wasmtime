@@ -15,7 +15,8 @@
     deserialize_garbage/1,
     host_functions/1,
     memory_access/1,
-    interrupt/1
+    interrupt/1,
+    streams/1
 ]).
 
 all() ->
@@ -28,7 +29,8 @@ all() ->
         deserialize_garbage,
         host_functions,
         memory_access,
-        interrupt
+        interrupt,
+        streams
     ].
 
 init_per_suite(Config) ->
@@ -119,3 +121,23 @@ interrupt(Config) ->
     {error, #{class := trap, kind := timeout}} = wasmtime:call(Inst, ~"loop", [], #{timeout => 100}),
     {ok, [3]} = wasmtime:call(Inst, ~"add", [1, 2]),
     ok.
+
+streams(Config) ->
+    %% the erlang imports need no compiler
+    {ok, Inst} = wasmtime:instantiate(load(Config, "channel")),
+    ok = wasmtime:send(Inst, ~"hi"),
+    ok = wasmtime:close(Inst),
+    {ok, [1]} = wasmtime:call(Inst, ~"echo", []),
+    Ref = wasmtime:ref(Inst),
+    receive
+        {wasmtime_stream, Ref, channel, ~"hi"} -> ok
+    after 2000 -> error(no_message)
+    end,
+    %% stdin => stream forwards through a module compiled on first use
+    case wasmtime:features() of
+        #{wasi := true} ->
+            {error, #{kind := unavailable}} =
+                wasmtime:instantiate(load(Config, "wasi"), #{wasi => #{stdin => stream}});
+        _ ->
+            ok
+    end.

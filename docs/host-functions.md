@@ -99,6 +99,9 @@ hand long work to another process.
 
 ## Notes
 
+- A host function is the guest asking Erlang and waiting for the answer. For
+  the other direction, Erlang sending to a guest that keeps running, see
+  [streams](streams.md).
 - Only function imports can be provided from Erlang. A memory, table or global
   import fails instantiation with `kind => unsupported_import`.
 - Imports with reference-typed parameters or results (`funcref`, `externref`)

@@ -83,6 +83,52 @@ A script that allocates past `memory_limit` fails inside the engine and exits
 non-zero. In every case the instance can be dropped and the next run starts
 clean.
 
+## Talk to a running script
+
+The runs above are one shot: arguments in, output out when `_start` returns.
+A script can instead stay up and serve requests. Its only channels are stdin
+and stdout, so make them streams: what `send/2` queues appears on stdin as
+the script reads it, and every write to stdout arrives in your mailbox at
+once.
+
+```js
+// /srv/scripts/worker.js: one JSON request per line in, one reply per line out
+import * as std from "qjs:std";
+let line;
+while ((line = std.in.getline()) !== null) {
+  const req = JSON.parse(line);
+  std.out.puts(JSON.stringify({sku: req.sku, price: 42}) + "\n");
+}
+```
+
+```erlang
+{ok, Inst} = wasmtime:instantiate(Engine, #{
+    wasi => #{args => [~"qjs", ~"/app/worker.js"],
+              dirs => [{~"/app", "/srv/scripts", read}],
+              stdin => stream, stdout => stream, stderr => capture},
+    stream => self()}),
+{ok, Req} = wasmtime:call_async(Inst, ~"_start", []),
+Ref = wasmtime:ref(Inst),
+ok = wasmtime:send(Inst, [json:encode(#{sku => ~"A1"}), $\n]),
+receive {wasmtime_stream, Ref, stdout, Line} -> json:decode(string:chomp(Line)) end,
+ok = wasmtime:send(Inst, [json:encode(#{sku => ~"B2"}), $\n]),
+receive {wasmtime_stream, Ref, stdout, Line2} -> json:decode(string:chomp(Line2)) end,
+ok = wasmtime:close(Inst),
+{ok, []} = wasmtime:await(Inst, Req).
+```
+
+`call_async` starts `_start` without waiting for it: the script blocks in
+`getline` for the next line while your process goes on. `close/1` ends its
+input, `getline` returns `null`, the loop ends and `await` returns. A
+`timeout` on `await/3` or `wasmtime:interrupt/1` still stops it at any time.
+
+Measured with `qjs-wasi.wasm`: `std.out.puts` and `console.log` each hand
+the line to Erlang at once, no `std.out.flush()` needed. One line per
+request is the script's convention, not a rule: stdin is a byte stream, and
+a message from `send/2` can be split or merged by the script's own reads.
+
+`examples/js/js.erl` wraps this as `js:serve/3`, `js:ask/2` and `js:stop/1`.
+
 ## A small wrapper
 
 `examples/js/js.erl` packages the above:
@@ -98,13 +144,19 @@ clean.
 {error, {exit, 1, ~"Error: no\n    at <anonymous> (<cmdline>:1:11)\n\n"}}
 6> js:run_file(Engine, "/srv/scripts", "main.js").
 {ok, ~"from file: 2,4,6\nGREETING = undefined\n"}
+7> {ok, W} = js:serve(Engine, "/srv/scripts", "worker.js").
+8> js:ask(W, ~"{\"sku\": \"A1\"}").
+{ok, ~"{\"sku\":\"A1\",\"price\":42}\n"}
+9> js:stop(W).
+ok
 ```
 
 ## Notes
 
 - Input goes in through `args`, `env`, `stdin => {binary, Bytes}` or a
   granted directory; output comes back with `stdout`/`stderr => capture` and
-  `read_output/1`, or through files. QuickJS has no imports of its own, so
+  `read_output/1`, or through files. `stream` on both sides keeps a script
+  running and talking. QuickJS has no imports of its own, so
   `imports` host functions do not apply to it. For
   guest code that should call Erlang directly, see
   [host functions](host-functions.md) with a module you build.

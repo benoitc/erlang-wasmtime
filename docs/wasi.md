@@ -49,6 +49,7 @@ all, not the working directory.
 | `{file, Path}` | read from that host file | appended to that host file |
 | `{binary, Bytes}` | the bytes, then end of file | |
 | `capture` | | kept in memory, read with `read_output/1` |
+| `stream` | what `send/2` queues, as the guest reads it | each write sent to the `stream` process at once |
 
 Capture is the simplest way to get a script's output back:
 
@@ -64,6 +65,9 @@ buffers; it works while the guest runs, so another process can drain a
 long-running guest. `output_limit` (default 16 MB per stream) caps what is
 kept: the guest still sees complete writes, and the two counters in the
 result say how many bytes were dropped.
+
+`stream` is for a guest that keeps running and exchanges messages with
+Erlang; see [streams](streams.md).
 
 `args => inherit` and `env => inherit` hand the guest the VM's own command
 line and environment; the default is none of either. The inherited command

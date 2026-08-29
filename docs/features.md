@@ -25,6 +25,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Compile options | `compile/2`: `opt_level` (`none`, `speed`, `speed_and_size`), `proposals` on or off, `fuel`; `module_options/1`; `deserialize/2` to pick the engine |
 | Globals and tables from Erlang | `global_get/2`, `global_set/3`, `table_size/2`, `table_grow/3` (null elements) |
 | WASI stdio in memory | `stdin => {binary, _}`, `stdout`/`stderr => capture` with `read_output/1` and `output_limit`; `args`/`env => inherit` |
+| Streams | `send/2`, `close/1`, `inbox_limit`; `stdin`/`stdout`/`stderr => stream`; the `erlang.send` and `erlang.recv` imports; `{wasmtime_stream, Ref, Kind, Bytes}` to the `stream` process; see [streams](streams.md) |
 | Runtime-only builds | `WASMTIME_RUNTIME_ONLY=1`: no compiler, 4 MB; `features/0` reports the linked library's capabilities; see [building](building.md) |
 | Source build fallback | a platform without a prebuilt archive compiles the C API itself |
 | WASI preview 1 | args, env, preopened dirs with read or write, stdio to file or inherited |
@@ -64,6 +65,10 @@ feature is missing the runtime says so with an error; it does not approximate.
 | A 33rd distinct compile option set | `kind => too_many_configurations` |
 | `opt_level` other than `speed`, or a proposal the library lacks, on a build without it | `kind => unavailable` |
 | Writing a constant global | `kind => immutable` |
+| `send/2` past `inbox_limit`, or after `close/1` | `kind => inbox_full`, `kind => closed` |
+| An `imports` entry for `erlang.send` or `erlang.recv` | `kind => reserved_import` |
+| `erlang.send` or `erlang.recv` imported with another type | `kind => unsupported_type` |
+| `stdin => stream` on a runtime-only build | `kind => unavailable` (its forwarder is compiled on first use) |
 | Reading a reference-typed global | `kind => unsupported_type` |
 
 ## Deferred

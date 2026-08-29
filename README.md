@@ -36,6 +36,9 @@ all come back as `{error, #{class => ..., kind => ..., message => ...}}`.
 - Runtime-only builds: `WASMTIME_RUNTIME_ONLY=1` gives a 4 MB NIF without the
   compiler for nodes that only load precompiled modules.
 - Host functions served by the caller or by a dedicated process.
+- Streams: a long-running guest reads what `send/2` queues and its writes
+  arrive as messages, through stdin/stdout for stock WASI programs or the
+  `erlang` imports for modules you build.
 
 ## Install
 
@@ -58,6 +61,7 @@ Requires OTP 27 or later.
 - [Getting started](docs/getting-started.md)
 - [Host functions](docs/host-functions.md)
 - [WASI](docs/wasi.md)
+- [Streams](docs/streams.md): talk to a guest while it runs
 - [Precompiled modules](docs/precompiled.md): compile once, load in milliseconds
 - [Building and shipping](docs/building.md)
 - [Features](docs/features.md): what is implemented, what is refused, what is deferred

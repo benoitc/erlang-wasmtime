@@ -90,6 +90,39 @@ An endless loop is stopped by the `timeout`:
 {error, #{kind := timeout}} = wasmtime:call(Inst, ~"_start", [], #{timeout => 30000}).
 ```
 
+## Talk to a running script
+
+A script can stay up and serve requests over stdin and stdout made into
+streams (see [streams](streams.md)). Run the interpreter with `-u`: without
+it stdout is block buffered and nothing leaves until the script ends.
+
+```python
+# /srv/scripts/worker.py
+import sys, json
+for line in sys.stdin:
+    req = json.loads(line)
+    sys.stdout.write(json.dumps({"sku": req["sku"], "price": 42}) + "\n")
+```
+
+```erlang
+{ok, Inst} = wasmtime:instantiate(Py, #{
+    wasi => #{args => [~"python", ~"-u", ~"/app/worker.py"],
+              dirs => [{~"/", "/opt/python-wasi", read}, {~"/app", "/srv/scripts", read}],
+              stdin => stream, stdout => stream, stderr => capture},
+    stream => self()}),
+{ok, Req} = wasmtime:call_async(Inst, ~"_start", []),
+Ref = wasmtime:ref(Inst),
+ok = wasmtime:send(Inst, [json:encode(#{sku => ~"A1"}), $\n]),
+receive {wasmtime_stream, Ref, stdout, Line} -> json:decode(string:chomp(Line)) end,
+ok = wasmtime:close(Inst),
+{ok, []} = wasmtime:await(Inst, Req, 30000).
+```
+
+Each write is one message. With `-u`, `print(x)` writes `x` and the newline
+separately, so it arrives as two messages; `sys.stdout.write(s + "\n")` is
+one. Without `-u`, `print(..., flush=True)` after each reply also works.
+`close/1` ends the input, the `for` loop finishes and `await` returns.
+
 ## A small wrapper
 
 `examples/py/py.erl` packages the above:

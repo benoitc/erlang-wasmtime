@@ -49,12 +49,16 @@ WASMTIME_NIF_SANITIZE=address rebar3 compile     # ASan build of the NIF
 ## Architecture
 
 - `c_src/wasmtime_nif.c`: one file, sections in order: atoms and errors,
-  values, instance state, host calls, worker thread, resources, NIF entry
-  points, load/unload. One OS thread per instance owns the Wasmtime store.
+  values, instance state, host calls, streams, worker thread, resources, NIF
+  entry points, load/unload. One OS thread per instance owns the Wasmtime store.
   Calls are queued and answered with `enif_send`
   (`{wasmtime_result, Ref, Id, Result}`); host functions send
   `{wasmtime_host_call, Ref, HostId, {Module, Name}, Args}` to the caller and
-  wait, bounded, for `host_reply/3`. `Ref` is an Erlang reference made at
+  wait, bounded, for `host_reply/3`. Streams: `send/2` queues bytes in the
+  instance inbox, read by the guest through `stdin => stream` (an `fd_read`
+  in front of Wasmtime's, forwarding other fds through a compiled shim) or
+  the `erlang.recv` import; guest writes to a `stream` stdio or
+  `erlang.send` arrive as `{wasmtime_stream, Ref, Kind, Bytes}`. `Ref` is an Erlang reference made at
   instantiate time, never a resource term, so worker threads cannot resurrect
   a resource. Two resource types: the handle Erlang holds (its destructor
   only signals) and the instance, owned by the handle and by its detached

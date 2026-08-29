@@ -11,11 +11,16 @@
     {files, [
         "src",
         "c_src/*.c",
+        "c_src/*.h",
+        "priv/shims/*.cwasm",
         "scripts",
         "docs",
+        "examples",
         "rebar.config",
         "README.md",
         "CHANGELOG.md",
+        "CONTRIBUTING.md",
+        "RELEASING.md",
         "LICENSE"
     ]}
 ]}.

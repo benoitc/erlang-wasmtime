@@ -19,6 +19,10 @@
  * Sections: atoms and errors, values, instance state, host calls, worker
  * thread, NIF entry points, load/unload.
  */
+/* clock_gettime, nanosleep and pthread_cond_timedwait under -std=c11 */
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+
 #include <erl_nif.h>
 #include <wasi.h>
 #include <wasm.h>

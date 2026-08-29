@@ -1471,7 +1471,7 @@ static ERL_NIF_TERM nif_global_get(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
   if (err) return err;
   wasmtime_val_t v;
   wasmtime_global_get(inst->ctx, &ext.of.global, &v);
-  ERL_NIF_TERM value;
+  ERL_NIF_TERM value = atom_undefined;
   err = typed_val_to_term(env, &v, &value);
   pthread_mutex_unlock(&inst->mu);
   return err ? err : enif_make_tuple2(env, atom_ok, value);

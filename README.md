@@ -49,6 +49,7 @@ Requires OTP 27 or later.
 ## Documentation
 
 - [Run JavaScript](docs/javascript.md): QuickJS in the sandbox, the shortest path to a demo
+- [Run Python](docs/python.md): CPython's WASI build, with the standard library
 - [Getting started](docs/getting-started.md)
 - [Host functions](docs/host-functions.md)
 - [WASI](docs/wasi.md)

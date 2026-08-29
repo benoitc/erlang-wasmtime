@@ -35,7 +35,8 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(tr -d '[:space:]' < "$ROOT/scripts/wasmtime.version")"
 CACHE="${WASMTIME_CACHE_DIR:-$ROOT/_build/wasmtime}/$VERSION"
-RELEASE_URL="${WASMTIME_RELEASE_URL:-https://github.com/benoitc/erlang-wasmtime/releases/download/wasmtime-runtime-$VERSION}"
+REV="$(tr -d '[:space:]' < "$ROOT/scripts/wasmtime-runtime.rev")"
+RELEASE_URL="${WASMTIME_RELEASE_URL:-https://github.com/benoitc/erlang-wasmtime/releases/download/wasmtime-runtime-$VERSION-r$REV}"
 UPSTREAM_URL="${WASMTIME_UPSTREAM_URL:-https://github.com/bytecodealliance/wasmtime/releases/download/$VERSION}"
 BUILD_SCRIPT="${WASMTIME_BUILD_SCRIPT:-$ROOT/scripts/build-wasmtime.sh}"
 

@@ -5,6 +5,8 @@ name: wasmtime-runtime
 # publish, and attaches them to the release tagged wasmtime-runtime-<version>.
 # The checksums it prints are then pasted into scripts/wasmtime-runtime.sha256
 # (and the FreeBSD line of scripts/wasmtime.sha256) by hand and committed.
+# The release tag carries scripts/wasmtime-runtime.rev: bump it to rebuild
+# after a recipe change, so pinned assets are never replaced.
 
 on:
   workflow_dispatch:
@@ -169,10 +171,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           V="$(tr -d '[:space:]' < scripts/wasmtime.version)"
-          TAG="wasmtime-runtime-$V"
+          REV="$(tr -d '[:space:]' < scripts/wasmtime-runtime.rev)"
+          TAG="wasmtime-runtime-$V-r$REV"
           gh release view "$TAG" >/dev/null 2>&1 || \
             gh release create "$TAG" --prerelease --title "Wasmtime C API $V for erlang_wasmtime" \
-              --notes "Runtime-only (no compiler, with WASI) builds of the Wasmtime C API, and the full C API for FreeBSD. Built by .github/workflows/wasmtime-runtime.yml with scripts/build-wasmtime.sh. Pinned by checksum in scripts/wasmtime-runtime.sha256 and scripts/wasmtime.sha256 of the erlang_wasmtime releases that use it; assets are never replaced once pinned."
+              --notes "Runtime-only (no compiler, with WASI) builds of the Wasmtime C API, and the full C API for FreeBSD, build revision $REV of the recipe in scripts/build-wasmtime.sh at $GITHUB_SHA. Pinned by checksum in scripts/wasmtime-runtime.sha256 and scripts/wasmtime.sha256 of the erlang_wasmtime releases that use it; assets are never replaced: a rebuild bumps scripts/wasmtime-runtime.rev and gets its own release."
           # Assets that exist are pinned somewhere: refuse to replace them
           # unless the run says so explicitly.
           if [ "${{ inputs.force }}" != "true" ]; then

@@ -142,7 +142,8 @@ provides what it needs.
 native runners for macOS (arm64, x86_64), Linux glibc and musl (arm64,
 x86_64) and FreeBSD (x86_64, in a VM), plus the full FreeBSD library, with
 `scripts/build-wasmtime.sh`, and attaches them to the release
-`wasmtime-runtime-<version>`. Its checksums go into
+`wasmtime-runtime-<version>-r<revision>` (`scripts/wasmtime-runtime.rev`,
+bumped for a rebuild so pinned assets are never replaced). Its checksums go into
 `scripts/wasmtime-runtime.sha256` (and the FreeBSD line of
 `scripts/wasmtime.sha256`) by hand, reviewed like any other change.
 

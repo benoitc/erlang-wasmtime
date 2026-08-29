@@ -40,6 +40,7 @@ FAKE="$TMP/tree"
 mkdir -p "$FAKE/scripts"
 cp "$FETCH" "$FAKE/scripts/"
 cp "$ROOT/scripts/wasmtime.version" "$FAKE/scripts/"
+cp "$ROOT/scripts/wasmtime-runtime.rev" "$FAKE/scripts/"
 echo "$SUM  $FULL.tar.xz" > "$FAKE/scripts/wasmtime.sha256"
 : > "$FAKE/scripts/wasmtime-runtime.sha256"
 

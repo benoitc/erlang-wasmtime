@@ -26,25 +26,32 @@ that compiles the shims, the precompiled fixtures.
 2. Download the six upstream C API archives (`x86_64` and `aarch64` for
    `linux`, `musl`, `macos`) and replace their lines in
    `scripts/wasmtime.sha256`.
-3. Run the runtime workflow: `gh workflow run wasmtime-runtime.yml`. It
-   builds the runtime-only library on native runners for every platform
-   plus the full FreeBSD library, and attaches them to the release
-   `wasmtime-runtime-<version>` (assets are immutable; pass `force` to
-   replace). Paste its `SHA256SUMS` into `scripts/wasmtime-runtime.sha256`
-   and the FreeBSD line into `scripts/wasmtime.sha256`.
-4. Pin the CLI archives (`wasmtime-<version>-aarch64-macos.tar.xz` and
+3. Set `scripts/wasmtime-runtime.rev` to `1` for a new Wasmtime version
+   (bump it instead when only the build recipe changed), then run the
+   runtime workflow: `gh workflow run wasmtime-runtime.yml`. It builds the
+   runtime-only library on native runners for every platform plus the full
+   FreeBSD library, and attaches them to the release
+   `wasmtime-runtime-<version>-r<rev>`. Assets are immutable: a rebuild
+   gets a new revision and a new release, so a tagged erlang_wasmtime
+   always downloads exactly what it pinned. Paste the workflow's
+   `SHA256SUMS` into `scripts/wasmtime-runtime.sha256` and the FreeBSD line
+   into `scripts/wasmtime.sha256`.
+4. Any change to `scripts/build-wasmtime.sh` or the workflow after the
+   archives were built means step 3 again with a bumped revision before
+   the release: the archives must come from the recipe the tag ships.
+5. Pin the CLI archives (`wasmtime-<version>-aarch64-macos.tar.xz` and
    `x86_64-linux`) in `scripts/wasmtime-cli.sha256`, then run
    `scripts/precompile-shims.sh` on an aarch64 machine and on an x86_64
    machine; commit the 14 files in `priv/shims/`. The flags in the script
    must match `make_config()` in `c_src/nif_engine.c`; `shim_files_load`
    in the tests fails when they drift.
-5. Check the C API for changes that matter here: `wasmtime/conf.h`
+6. Check the C API for changes that matter here: `wasmtime/conf.h`
    feature macros, the `wasmtime_val_t` layout, the reference API
    (`*_unroot` signatures), `wasi.h` stdio hooks. `docs/design.md` lists
    what the code relies on.
-6. `rebar3 compile && rebar3 ct` on a full build, then the runtime-only
+7. `rebar3 compile && rebar3 ct` on a full build, then the runtime-only
    recipe with fresh fixtures from `scripts/precompile-fixtures.escript`.
    The runtime-only CI job proves the full and runtime builds still
    accept the same precompiled modules.
-7. `CHANGELOG.md`: note the new Wasmtime version. `README.md` and
+8. `CHANGELOG.md`: note the new Wasmtime version. `README.md` and
    `docs/features.md` mention the major version.

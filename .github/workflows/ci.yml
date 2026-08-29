@@ -1,0 +1,126 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  WASMTIME_VERSION: v48.0.1
+
+jobs:
+  static:
+    name: Format and lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          rebar3-version: "3.24.0"
+      - name: Cache the Wasmtime C API
+        uses: actions/cache@v4
+        with:
+          path: _build/wasmtime
+          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version') }}
+      - name: Install clang-format and shellcheck
+        run: sudo apt-get update && sudo apt-get install -y clang-format shellcheck
+      - run: rebar3 fmt --check
+      - run: clang-format --dry-run -Werror c_src/*.c
+      - run: shellcheck scripts/*.sh
+      - run: rebar3 compile
+      - run: rebar3 lint
+      - run: rebar3 xref
+      - run: rebar3 dialyzer
+      - name: Hex package stays under the 8 MB cap
+        run: |
+          rebar3 hex build
+          f=$(ls _build/default/lib/erlang_wasmtime/hex/erlang_wasmtime-*.tar | grep -v docs)
+          ls -la "$f"
+          test "$(stat -c %s "$f")" -lt 8000000
+
+  test:
+    name: Test OTP ${{ matrix.otp }} on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            otp: "27"
+          - os: ubuntu-24.04
+            otp: "28"
+          - os: macos-15
+            otp: "28"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the Wasmtime C API
+        uses: actions/cache@v4
+        with:
+          path: _build/wasmtime
+          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version') }}
+
+      - name: Install Erlang (Linux)
+        if: runner.os == 'Linux'
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          rebar3-version: "3.24.0"
+
+      - name: Install Erlang (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install erlang@${{ matrix.otp }} rebar3
+          echo "$(brew --prefix erlang@${{ matrix.otp }})/bin" >> "$GITHUB_PATH"
+
+      - run: rebar3 compile
+      - run: rebar3 ct
+      - name: Upload CT logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ct-logs-${{ matrix.os }}-otp${{ matrix.otp }}
+          path: _build/test/logs
+
+  freebsd:
+    name: Test on FreeBSD
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      # No upstream FreeBSD archive and the package ships only the CLI, so the
+      # C API is built from source inside the VM. The install prefix lives in
+      # the workspace so it is copied back and cached by Wasmtime version.
+      - name: Cache the Wasmtime C API built for FreeBSD
+        id: capi
+        uses: actions/cache@v4
+        with:
+          path: wasmtime-c-api
+          key: wasmtime-c-api-freebsd-14-${{ env.WASMTIME_VERSION }}
+
+      - name: Build and test
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.3"
+          usesh: true
+          sync: rsync
+          copyback: true
+          prepare: |
+            pkg install -y erlang rebar3 git cmake rust curl
+          run: |
+            set -e
+            if [ ! -f wasmtime-c-api/include/wasmtime.h ]; then
+              git clone --depth 1 --branch "$WASMTIME_VERSION" https://github.com/bytecodealliance/wasmtime wasmtime-src
+              cmake -S wasmtime-src/crates/c-api -B wasmtime-build \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_INSTALL_PREFIX="$PWD/wasmtime-c-api"
+              cmake --build wasmtime-build
+              cmake --install wasmtime-build
+              rm -rf wasmtime-src wasmtime-build
+            fi
+            export WASMTIME_C_API_DIR="$PWD/wasmtime-c-api"
+            erl -noshell -eval 'io:format("OTP ~s~n", [erlang:system_info(otp_release)]), halt().'
+            rebar3 compile
+            rebar3 ct

@@ -1,0 +1,21 @@
+{application, erlang_wasmtime, [
+    {description,
+        "Wasmtime bindings for Erlang: run WebAssembly natively, call Erlang from the guest"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {applications, [kernel, stdlib]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [{"GitHub", "https://github.com/benoitc/erlang-wasmtime"}]},
+    {files, [
+        "src",
+        "c_src/*.c",
+        "scripts",
+        "docs",
+        "rebar.config",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE"
+    ]}
+]}.

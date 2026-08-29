@@ -1,0 +1,12 @@
+_build/
+doc/
+priv/*.so
+priv/*.dylib
+priv/*.dll
+*.beam
+*.dump
+erl_crash.dump
+.rebar3/
+rebar3.crashdump
+c_src/*.o
+priv/*.dSYM/

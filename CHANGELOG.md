@@ -43,6 +43,9 @@ First release.
   arrives as `{wasmtime_stream, Ref, Kind, Bytes}` in the `stream` process;
   `inbox_limit`; `ref/1`. Runtime-only builds load the stdin forwarding
   shim precompiled per platform from `priv/shims`.
+- A `stream` stdout or stderr reports itself to the guest as a terminal
+  (`fd_fdstat_get` shadowed like `fd_read`), so C libraries line-buffer it:
+  scripts need no flush and CPython no `-u`.
 - `examples/transform`: user-defined event transforms, one QuickJS worker
   per script over streams, with reload, timeouts and memory limits.
 - References across the boundary: `funcref`, `externref` and GC values as

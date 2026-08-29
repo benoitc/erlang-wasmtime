@@ -33,8 +33,7 @@ an M-series Mac: 43,000 events per second through one worker, 23 us per
 event, most of it JSON in QuickJS.
 
 The runner (`runner.js`) is the fixed half: it reads lines, calls the
-user's `transform`, and flushes each reply (stdout is not a terminal, so
-the C library buffers it after the first line). `sample_user.js` is a
+user's `transform` and writes one line back. `sample_user.js` is a
 tenant's script.
 
 

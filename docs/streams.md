@@ -41,11 +41,11 @@ ok = wasmtime:close(Inst),
   decide where messages start and end, so agree on a framing (one line per
   message is the usual one).
 - `stdout`, `stderr => stream`: every write the guest makes is one
-  message, delivered at once. What counts as a write is the guest's
-  buffering: a C library treats a non-terminal stdout as fully buffered
-  (the first line often slips through, later ones wait), so a script must
-  flush after each reply: `std.out.flush()` in QuickJS, `-u` or
-  `flush=True` in CPython.
+  message, delivered at once. A streamed stdout reports itself to the
+  guest as a terminal, so a C library line-buffers it and a program that
+  prints a line hands over a line: no `flush()` in QuickJS, no `-u` in
+  CPython. A program that writes without a newline keeps that in its
+  buffer until it writes one or exits.
 - `close/1` ends the input: the guest drains what is queued, then its reads
   return end of file, which is how a read loop ends.
 - `call_async/3` starts the program without waiting; `await/2,3` collects
@@ -120,7 +120,10 @@ dropped and the guest does not notice, the same as `none`.
 - The inbox is per instance and shared by stdin and `erlang.recv`; a module
   using both would compete with itself, so use one.
 - `stdin => stream` puts an `fd_read` in front of Wasmtime's own for fd 0
-  and forwards every other fd through a small module (`scripts/stdin-shim.wat`).
+  and forwards every other fd through a small module (`scripts/stdin-shim.wat`);
+  a `stream` stdout or stderr puts an `fd_fdstat_get` in front of WASI's
+  that answers "character device", which is what makes the guest's C
+  library line-buffer it.
   A build with a compiler compiles it on first use; a runtime-only build
   loads the precompiled copy for its platform from `priv/shims`, produced
   by `scripts/precompile-shims.sh` for every platform with a runtime

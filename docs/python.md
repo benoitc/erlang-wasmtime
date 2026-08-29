@@ -93,8 +93,8 @@ An endless loop is stopped by the `timeout`:
 ## Talk to a running script
 
 A script can stay up and serve requests over stdin and stdout made into
-streams (see [streams](streams.md)). Run the interpreter with `-u`: without
-it stdout is block buffered and nothing leaves until the script ends.
+streams (see [streams](streams.md)). A streamed stdout looks like a
+terminal to the interpreter, so `print` flushes at each newline.
 
 ```python
 # /srv/scripts/worker.py
@@ -106,7 +106,7 @@ for line in sys.stdin:
 
 ```erlang
 {ok, Inst} = wasmtime:instantiate(Py, #{
-    wasi => #{args => [~"python", ~"-u", ~"/app/worker.py"],
+    wasi => #{args => [~"python", ~"/app/worker.py"],
               dirs => [{~"/", "/opt/python-wasi", read}, {~"/app", "/srv/scripts", read}],
               stdin => stream, stdout => stream, stderr => capture},
     stream => self()}),
@@ -118,10 +118,8 @@ ok = wasmtime:close(Inst),
 {ok, []} = wasmtime:await(Inst, Req, 30000).
 ```
 
-Each write is one message. With `-u`, `print(x)` writes `x` and the newline
-separately, so it arrives as two messages; `sys.stdout.write(s + "\n")` is
-one. Without `-u`, `print(..., flush=True)` after each reply also works.
-`close/1` ends the input, the `for` loop finishes and `await` returns.
+Each line is one message. `close/1` ends the input, the `for` loop
+finishes and `await` returns.
 
 ## A small wrapper
 

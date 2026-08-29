@@ -137,6 +137,9 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
       ce->which = fd - 1;
       ptrdiff_t (*cb)(void *, const unsigned char *, size_t) =
           enif_is_identical(s, atom_capture) ? capture_write : stream_write;
+      /* A streamed stdout looks like a terminal so the guest's C library
+       * line-buffers it and every line leaves on its own. */
+      if (cb == stream_write) inst->inbox.tty_mask |= 1 << fd;
       if (fd == 1)
         wasi_config_set_stdout_custom(cfg, cb, ce, enif_free);
       else
@@ -184,7 +187,7 @@ done:
     wasmtime_error_delete(werr);
     return mk_error_s(out, "wasi", "config", "wasi could not be linked");
   }
-  if (inst->inbox.stdin) return define_stdin_stream(inst, out);
+  if (inst->inbox.stdin || inst->inbox.tty_mask) return shadow_wasi(inst, out);
   return 0;
 #endif
 }
@@ -399,7 +402,8 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
   if ((err = bind_imports(inst, env, o.imports, out))) return err;
   if ((err = instantiate_module(inst, out))) return err;
   cache_memory(inst);
-  if (inst->inbox.stdin && (err = link_stdin_shim(inst, env, o.shim, out))) return err;
+  if ((inst->inbox.stdin || inst->inbox.tty_mask) && (err = link_wasi_shim(inst, env, o.shim, out)))
+    return err;
   inst->wasm.instantiated = 1;
   return atom_ok;
 }

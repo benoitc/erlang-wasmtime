@@ -106,6 +106,9 @@ static wasm_trap_t *erlang_recv_cb(void *envp, wasmtime_caller_t *caller, wasmti
 }
 
 #if NIF_HAVE_WASI
+static wasm_trap_t *forward(instance_t *inst, wasmtime_caller_t *caller, wasmtime_func_t *fn,
+                            wasmtime_val_raw_t *vals, size_t nvals);
+
 /* wasi_snapshot_preview1.fd_read(fd, iovs, iovs_len, nread) -> errno, in
  * front of Wasmtime's own: fd 0 reads the inbox as a byte stream, any other
  * fd is forwarded. Wasmtime has no custom stdin hook; this is the one place
@@ -115,21 +118,7 @@ static wasm_trap_t *erlang_recv_cb(void *envp, wasmtime_caller_t *caller, wasmti
 wasm_trap_t *fd_read_cb(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
                         size_t nvals) {
   instance_t *inst = envp;
-  if (vals[0].i32 != 0) {
-    if (!inst->inbox.has_shim)
-      return wasmtime_trap_new("fd_read before the instance is linked", 38);
-    wasm_trap_t *trap = NULL;
-    wasmtime_error_t *e = wasmtime_func_call_unchecked(wasmtime_caller_context(caller),
-                                                       &inst->inbox.shim_fd_read, vals, 4, &trap);
-    if (e) {
-      wasm_name_t msg;
-      wasmtime_error_message(e, &msg);
-      trap = wasmtime_trap_new(msg.data, msg.size);
-      wasm_byte_vec_delete(&msg);
-      wasmtime_error_delete(e);
-    }
-    return trap;
-  }
+  if (vals[0].i32 != 0) return forward(inst, caller, &inst->inbox.shim_fd_read, vals, 4);
   unsigned char *base;
   size_t size;
   uint32_t iovs = (uint32_t)vals[1].i32, niovs = (uint32_t)vals[2].i32,
@@ -185,47 +174,118 @@ wasm_trap_t *fd_read_cb(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_
 }
 #endif
 
-/* Put fd_read in front of Wasmtime's own. Called after the WASI definitions
- * are in the linker. */
-ERL_NIF_TERM define_stdin_stream(instance_t *inst, ErlNifEnv *out) {
+/* Calls Wasmtime's own function through the shim. */
+static wasm_trap_t *forward(instance_t *inst, wasmtime_caller_t *caller, wasmtime_func_t *fn,
+                            wasmtime_val_raw_t *vals, size_t nvals) {
+  if (!inst->inbox.has_shim)
+    return wasmtime_trap_new("WASI call before the instance is linked", 39);
+  wasm_trap_t *trap = NULL;
+  wasmtime_error_t *e =
+      wasmtime_func_call_unchecked(wasmtime_caller_context(caller), fn, vals, nvals, &trap);
+  if (e) {
+    wasm_name_t msg;
+    wasmtime_error_message(e, &msg);
+    trap = wasmtime_trap_new(msg.data, msg.size);
+    wasm_byte_vec_delete(&msg);
+    wasmtime_error_delete(e);
+  }
+  return trap;
+}
+
 #if NIF_HAVE_WASI
-  wasmtime_extern_t real;
-  if (!wasmtime_linker_get(inst->wasm.linker, inst->wasm.ctx, "wasi_snapshot_preview1", 22,
-                           "fd_read", 7, &real) ||
-      real.kind != WASMTIME_EXTERN_FUNC)
-    return mk_error_s(out, "wasi", "config", "wasi fd_read is not in the linker");
-  inst->inbox.real_fd_read = real.of.func;
-  wasm_valtype_t *ps[4] = {wasm_valtype_new(WASM_I32), wasm_valtype_new(WASM_I32),
-                           wasm_valtype_new(WASM_I32), wasm_valtype_new(WASM_I32)};
+/* wasi_snapshot_preview1.fd_fdstat_get(fd, buf) -> errno, in front of
+ * Wasmtime's own: a `stream` stdout or stderr is reported as a character
+ * device without seek and tell rights, which is what wasi-libc's isatty
+ * checks. The guest's C library then line-buffers it, so a line written
+ * by the guest leaves at once instead of waiting in a buffer. */
+#define WASI_FILETYPE_CHARACTER_DEVICE 2
+#define WASI_RIGHT_FD_SEEK (1ull << 2)
+#define WASI_RIGHT_FD_TELL (1ull << 5)
+static wasm_trap_t *fd_fdstat_cb(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
+                                 size_t nvals) {
+  instance_t *inst = envp;
+  int32_t fd = vals[0].i32;
+  uint32_t buf = (uint32_t)vals[1].i32;
+  wasm_trap_t *trap = forward(inst, caller, &inst->inbox.shim_fdstat, vals, 2);
+  if (trap || vals[0].i32 != 0 || fd < 0 || fd > 2 || !((inst->inbox.tty_mask >> fd) & 1))
+    return trap;
+  unsigned char *base;
+  size_t size;
+  if (!guest_mem(caller, &base, &size) || !in_bounds(size, buf, 24)) return NULL;
+  /* fdstat: fs_filetype u8 at 0, fs_flags u16 at 2, rights u64 at 8 and 16 */
+  base[buf] = WASI_FILETYPE_CHARACTER_DEVICE;
+  for (int off = 8; off <= 16; off += 8) {
+    uint64_t rights;
+    memcpy(&rights, base + buf + off, 8);
+    rights &= ~(WASI_RIGHT_FD_SEEK | WASI_RIGHT_FD_TELL);
+    memcpy(base + buf + off, &rights, 8);
+  }
+  return NULL;
+}
+
+/* A (i32 x n) -> i32 function type. */
+static wasm_functype_t *i32_functype(size_t nparams) {
+  wasm_valtype_t *ps[4];
+  for (size_t i = 0; i < nparams; i++) ps[i] = wasm_valtype_new(WASM_I32);
   wasm_valtype_t *rs[1] = {wasm_valtype_new(WASM_I32)};
   wasm_valtype_vec_t pv, rv;
-  wasm_valtype_vec_new(&pv, 4, (wasm_valtype_t *const *)ps);
+  wasm_valtype_vec_new(&pv, nparams, (wasm_valtype_t *const *)ps);
   wasm_valtype_vec_new(&rv, 1, (wasm_valtype_t *const *)rs);
-  wasm_functype_t *ft = wasm_functype_new(&pv, &rv);
+  return wasm_functype_new(&pv, &rv);
+}
+
+/* Puts `cb` in front of Wasmtime's `name`. */
+static ERL_NIF_TERM shadow_one(instance_t *inst, ErlNifEnv *out, const char *name, size_t nparams,
+                               wasmtime_func_unchecked_callback_t cb) {
+  wasm_functype_t *ft = i32_functype(nparams);
   wasmtime_linker_allow_shadowing(inst->wasm.linker, true);
   wasmtime_error_t *e = wasmtime_linker_define_func_unchecked(
-      inst->wasm.linker, "wasi_snapshot_preview1", 22, "fd_read", 7, ft, fd_read_cb, inst, NULL);
+      inst->wasm.linker, "wasi_snapshot_preview1", 22, name, strlen(name), ft, cb, inst, NULL);
   wasmtime_linker_allow_shadowing(inst->wasm.linker, false);
   wasm_functype_delete(ft);
-  if (e) return error_to_term(out, e, "wasi");
-  return 0;
+  return e ? error_to_term(out, e, "wasi") : 0;
+}
+#endif
+
+/* Put the runtime's fd_read (stdin => stream) and fd_fdstat_get (a
+ * `stream` stdout or stderr) in front of Wasmtime's own. Called after the
+ * WASI definitions are in the linker; both originals are kept for the
+ * shim whichever is shadowed. */
+ERL_NIF_TERM shadow_wasi(instance_t *inst, ErlNifEnv *out) {
+#if NIF_HAVE_WASI
+  wasmtime_extern_t ext;
+  const char *names[2] = {"fd_read", "fd_fdstat_get"};
+  wasmtime_func_t *reals[2] = {&inst->inbox.real_fd_read, &inst->inbox.real_fdstat};
+  for (int i = 0; i < 2; i++) {
+    if (!wasmtime_linker_get(inst->wasm.linker, inst->wasm.ctx, "wasi_snapshot_preview1", 22,
+                             names[i], strlen(names[i]), &ext) ||
+        ext.kind != WASMTIME_EXTERN_FUNC)
+      return mk_error_s(out, "wasi", "config", "the WASI function to shadow is not in the linker");
+    *reals[i] = ext.of.func;
+  }
+  ERL_NIF_TERM err = 0;
+  if (inst->inbox.stdin) err = shadow_one(inst, out, "fd_read", 4, fd_read_cb);
+  if (!err && inst->inbox.tty_mask) err = shadow_one(inst, out, "fd_fdstat_get", 2, fd_fdstat_cb);
+  return err;
 #else
   return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
 #endif
 }
 
 /* Called once the guest is instantiated and its memory is known. */
-ERL_NIF_TERM link_stdin_shim(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM shim_bytes,
-                             ErlNifEnv *out) {
-  const char *why = "stdin shim";
+ERL_NIF_TERM link_wasi_shim(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM shim_bytes,
+                            ErlNifEnv *out) {
+  const char *why = "WASI shim";
   wasmtime_module_t *shim = engine_shim(inst->wasm.mod->engine, env, shim_bytes, &why);
   if (!shim) return mk_error_s(out, "wasi", "unavailable", why);
   if (!inst->wasm.has_memory)
-    return mk_error_s(out, "wasi", "config", "stdin => stream needs an exported memory");
-  wasmtime_extern_t real = {.kind = WASMTIME_EXTERN_FUNC, .of.func = inst->inbox.real_fd_read};
+    return mk_error_s(out, "wasi", "config", "streamed stdio needs an exported memory");
+  wasmtime_extern_t rd = {.kind = WASMTIME_EXTERN_FUNC, .of.func = inst->inbox.real_fd_read};
+  wasmtime_extern_t st = {.kind = WASMTIME_EXTERN_FUNC, .of.func = inst->inbox.real_fdstat};
   wasmtime_extern_t mem = {.kind = WASMTIME_EXTERN_MEMORY, .of.memory = inst->wasm.memory};
   wasmtime_linker_t *l = wasmtime_linker_new(inst->wasm.mod->engine->engine);
-  wasmtime_error_t *e = wasmtime_linker_define(l, inst->wasm.ctx, "wasi", 4, "fd_read", 7, &real);
+  wasmtime_error_t *e = wasmtime_linker_define(l, inst->wasm.ctx, "wasi", 4, "fd_read", 7, &rd);
+  if (!e) e = wasmtime_linker_define(l, inst->wasm.ctx, "wasi", 4, "fd_fdstat_get", 13, &st);
   if (!e) e = wasmtime_linker_define(l, inst->wasm.ctx, "guest", 5, "memory", 6, &mem);
   wasmtime_instance_t si;
   wasm_trap_t *trap = NULL;
@@ -235,13 +295,17 @@ ERL_NIF_TERM link_stdin_shim(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM shim
   if (e) {
     wasmtime_error_delete(e);
     return mk_error_s(out, "wasi", "config",
-                      "stdin => stream could not link to this memory (shared or 64-bit?)");
+                      "streamed stdio could not link to this memory (shared or 64-bit?)");
   }
   wasmtime_extern_t fwd;
   if (!wasmtime_instance_export_get(inst->wasm.ctx, &si, "fd_read", 7, &fwd) ||
       fwd.kind != WASMTIME_EXTERN_FUNC)
-    return mk_error_s(out, "wasi", "config", "stdin shim has no fd_read");
+    return mk_error_s(out, "wasi", "config", "the WASI shim has no fd_read");
   inst->inbox.shim_fd_read = fwd.of.func;
+  if (!wasmtime_instance_export_get(inst->wasm.ctx, &si, "fd_fdstat_get", 13, &fwd) ||
+      fwd.kind != WASMTIME_EXTERN_FUNC)
+    return mk_error_s(out, "wasi", "config", "the WASI shim has no fd_fdstat_get");
+  inst->inbox.shim_fdstat = fwd.of.func;
   inst->inbox.has_shim = 1;
   return 0;
 }

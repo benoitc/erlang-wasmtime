@@ -21,7 +21,8 @@
     wasi_stdin_stream/1,
     wasi_stdin_stream_blocked/1,
     wasi_stdin_stream_other_fds/1,
-    wasi_stdout_stream/1
+    wasi_stdout_stream/1,
+    wasi_stream_is_tty/1
 ]).
 
 all() ->
@@ -47,7 +48,8 @@ groups() ->
             wasi_stdin_stream,
             wasi_stdin_stream_blocked,
             wasi_stdin_stream_other_fds,
-            wasi_stdout_stream
+            wasi_stdout_stream,
+            wasi_stream_is_tty
         ]}
     ].
 
@@ -295,4 +297,31 @@ wasi_stdout_stream(_) ->
     end,
     %% nothing was captured
     {ok, {<<>>, <<>>, {0, 0}}} = wasmtime:read_output(Inst),
+    ok.
+
+wasi_stream_is_tty(_) ->
+    %% a streamed stdout or stderr reports itself a character device without
+    %% seek and tell rights, so the guest's C library line-buffers it
+    Wat =
+        ~"""
+    (module
+      (import "wasi_snapshot_preview1" "fd_fdstat_get" (func $stat (param i32 i32) (result i32)))
+      (memory (export "memory") 1)
+      ;; filetype byte, then whether seek or tell rights are set
+      (func (export "filetype") (param i32) (result i32 i32)
+        (drop (call $stat (local.get 0) (i32.const 64)))
+        (i32.load8_u (i32.const 64))
+        (i32.and (i32.wrap_i64 (i64.load (i32.const 72))) (i32.const 36))))
+    """,
+    Streamed = instance(Wat, #{wasi => #{stdout => stream, stderr => capture}}),
+    {ok, [2, 0]} = wasmtime:call(Streamed, ~"filetype", [1]),
+    {ok, [ErrType, _]} = wasmtime:call(Streamed, ~"filetype", [2]),
+    ?assertNotEqual(2, ErrType),
+    {ok, [InType, _]} = wasmtime:call(Streamed, ~"filetype", [0]),
+    ?assertNotEqual(2, InType),
+    Plain = instance(Wat, #{wasi => #{stdout => capture}}),
+    {ok, [OutType, _]} = wasmtime:call(Plain, ~"filetype", [1]),
+    ?assertNotEqual(2, OutType),
+    Both = instance(Wat, #{wasi => #{stdout => stream, stderr => stream}}),
+    {ok, [2, 0]} = wasmtime:call(Both, ~"filetype", [2]),
     ok.

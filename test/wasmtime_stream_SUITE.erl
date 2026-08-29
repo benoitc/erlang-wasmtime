@@ -169,7 +169,7 @@ shim_files_load(_) ->
     {ok, Plain} = file:read_file(Path("plain")),
     {ok, Fuel} = file:read_file(Path("fuel")),
     {ok, M1} = wasmtime:deserialize(Plain),
-    [{~"memory", memory}, {~"fd_read", func}] = wasmtime:exports(M1),
+    [{~"memory", memory}, {~"fd_read", func}, {~"fd_fdstat_get", func}] = wasmtime:exports(M1),
     {ok, _} = wasmtime:deserialize(Plain, #{
         proposals => #{simd => false, threads => false, gc => false}
     }),

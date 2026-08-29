@@ -16,5 +16,4 @@ while ((line = std.in.getline()) !== null) {
     out = { error: String(e && e.message ? e.message : e) };
   }
   std.out.puts(JSON.stringify(out) + "\n");
-  std.out.flush(); // stdout is not a tty: without this only the first line leaves
 }

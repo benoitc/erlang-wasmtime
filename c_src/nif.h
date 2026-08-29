@@ -200,10 +200,11 @@ typedef struct instance {
     struct chunk *head, *tail;
     size_t bytes, limit;
     int closed;
-    ErlNifPid stream_pid;         /* receives {wasmtime_stream, Ref, Kind, Bytes} */
-    int stdin;                    /* stdin => stream: fd_read is shadowed */
-    wasmtime_func_t real_fd_read; /* Wasmtime's own, taken before it is shadowed */
-    wasmtime_func_t shim_fd_read; /* the shim in front of it, for fds other than 0 */
+    ErlNifPid stream_pid; /* receives {wasmtime_stream, Ref, Kind, Bytes} */
+    int stdin;            /* stdin => stream: fd_read is shadowed */
+    int tty_mask;         /* bit fd: a `stream` stdout/stderr reports itself a terminal */
+    wasmtime_func_t real_fd_read, real_fdstat; /* Wasmtime's own, taken before shadowing */
+    wasmtime_func_t shim_fd_read, shim_fdstat; /* the shim in front of them */
     int has_shim;
   } inbox;
 
@@ -332,9 +333,9 @@ wasm_trap_t *host_callback_typed(void *envp, wasmtime_caller_t *caller, const wa
 void inbox_drop_head(instance_t *inst);
 wasm_trap_t *fd_read_cb(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
                         size_t nvals);
-ERL_NIF_TERM define_stdin_stream(instance_t *inst, ErlNifEnv *out);
-ERL_NIF_TERM link_stdin_shim(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM shim_bytes,
-                             ErlNifEnv *out);
+ERL_NIF_TERM shadow_wasi(instance_t *inst, ErlNifEnv *out);
+ERL_NIF_TERM link_wasi_shim(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM shim_bytes,
+                            ErlNifEnv *out);
 ERL_NIF_TERM define_erlang_imports(instance_t *inst, ErlNifEnv *out,
                                    const wasm_importtype_vec_t *imports);
 ptrdiff_t capture_write(void *envp, const unsigned char *data, size_t len);

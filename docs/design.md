@@ -211,6 +211,11 @@ build has no compiler and loads `priv/shims/<platform>-<plain|fuel>.cwasm`.
 
 Output is push: the custom stdout/stderr callback (`stream_write`) and
 `erlang.send` deliver one message per write; the mailbox is the buffer.
+What a write is depends on the guest's C library: it fully buffers a
+stdout it believes is a file, so a `stream` stdout or stderr also shadows
+`fd_fdstat_get` and reports a character device without seek and tell
+rights (wasi-libc's `isatty` test); musl then line-buffers and every line
+is one message. The shim forwards both `fd_read` and `fd_fdstat_get`.
 
 ## Build pipeline
 

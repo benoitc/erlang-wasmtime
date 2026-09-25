@@ -315,6 +315,7 @@ ERL_NIF_TERM term_or_unsupported(ErlNifEnv *env, const char *cls, ERL_NIF_TERM t
 engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err);
 ERL_NIF_TERM key_term(ErlNifEnv *env, const engine_t *e);
 ERL_NIF_TERM plain_key(ErlNifEnv *env, int fuel);
+int pool_fits(unsigned instances);
 wasmtime_module_t *engine_shim(engine_t *e, ErlNifEnv *env, ERL_NIF_TERM shim, const char **why);
 wasmtime_error_t *epoch_callback(wasmtime_context_t *ctx, void *data, uint64_t *delta,
                                  wasmtime_update_deadline_kind_t *kind);

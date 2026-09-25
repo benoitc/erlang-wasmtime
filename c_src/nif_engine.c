@@ -3,11 +3,7 @@
  * MAX_ENGINES; the epoch ticker; the stdin shim module compiled or loaded
  * per engine. make_config is mirrored by scripts/precompile-shims.sh.
  */
-/* MAP_ANON, which _POSIX_C_SOURCE in nif.h hides on macOS */
-#define _DARWIN_C_SOURCE
 #include "nif.h"
-
-#include <sys/mman.h>
 
 /* Mirrors pooling_key/3 in wasmtime.erl; docs/design.md, "Numbers". */
 #define POOL_MAX_INSTANCES 10000
@@ -56,25 +52,6 @@ static int parse_allocator(ErlNifEnv *env, ERL_NIF_TERM a, engine_t *k) {
     return 0;
   return k->pool_max_memory >= WASM_PAGE && k->pool_max_memory <= POOL_MAX_MEMORY &&
          k->pool_max_memory % WASM_PAGE == 0 && k->pool_keep_resident <= k->pool_max_memory;
-}
-
-/* Whether the address space a pool reserves when its engine is created can
- * be reserved at all: under `ulimit -v` or strict overcommit it may not,
- * and Wasmtime aborts the process then. Each slot is the 4 GB memory
- * reservation, its 32 MB guard and about 1 MB of instance state; the
- * probe maps that much without access and unmaps it. */
-static int pool_fits(const engine_t *k) {
-  uint64_t per_slot = (4ull << 30) + (32ull << 20) + (1ull << 20);
-  uint64_t bytes = per_slot * k->pool_instances + (4ull << 30);
-  if (bytes > SIZE_MAX) return 0;
-  int flags = MAP_PRIVATE | MAP_ANON;
-#ifdef MAP_NORESERVE
-  flags |= MAP_NORESERVE;
-#endif
-  void *p = mmap(NULL, (size_t)bytes, PROT_NONE, flags, -1, 0);
-  if (p == MAP_FAILED) return 0;
-  munmap(p, (size_t)bytes);
-  return 1;
 }
 
 /* Key :: {Fuel :: boolean(), none | speed | speed_and_size, [{Proposal, boolean()}], Allocator} */
@@ -239,7 +216,7 @@ engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err) {
     return 0;
   }
 #endif
-  if (want.pooling && !pool_fits(&want)) {
+  if (want.pooling && !pool_fits(want.pool_instances)) {
     pthread_mutex_unlock(&engines_mu);
     *err = mk_error_s(env, "compile", "pool_too_large",
                       "this host cannot reserve the address space for that many pooled instances "
@@ -251,8 +228,9 @@ engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err) {
   if (!cfg) {
     pthread_mutex_unlock(&engines_mu);
     char msg[96];
+    if (!missing) missing = "setting";
     snprintf(msg, sizeof msg, "this build of erlang_wasmtime has no %s%s", missing,
-             want.pooling && strcmp(missing, "pooling allocator") == 0 ? "" : " proposal");
+             strcmp(missing, "pooling allocator") == 0 ? "" : " proposal");
     *err = mk_error_s(env, "compile", "unavailable", msg);
     return 0;
   }

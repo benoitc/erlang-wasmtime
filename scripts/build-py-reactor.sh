@@ -62,7 +62,7 @@ mkdir -p "$PYLIB"
 (cd "$B" && make install DESTDIR="$WORK/install" >/dev/null 2>&1) || true
 cp -R "$WORK/install/usr/local/lib/python$XY" "$PYLIB/"
 (cd "$PYLIB/python$XY" && rm -rf test idlelib tkinter turtledemo pydoc_data \
-    ensurepip site-packages "config-$XY-wasm32-wasi" || true)
+    ensurepip site-packages "config-$XY-wasm32-wasi")
 find "$PYLIB" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "$PYLIB" -name tests -type d -prune -exec rm -rf {} + 2>/dev/null || true
 

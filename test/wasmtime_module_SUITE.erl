@@ -323,7 +323,10 @@ bad_pooling_options(_) ->
 %% to 64 GB of address space asks for 100 slots of about 4 GB each. Linux
 %% only; macOS has no `ulimit -v`.
 pool_address_space(_) ->
+    Asan = string:find(os:getenv("LD_PRELOAD", ""), "asan") =/= nomatch,
     case os:type() of
+        {unix, linux} when Asan ->
+            {skip, "the ASan runtime cannot start under ulimit -v"};
         {unix, linux} ->
             Ebin = filename:dirname(code:which(wasmtime)),
             Eval =
@@ -332,7 +335,7 @@ pool_address_space(_) ->
             Out = os:cmd(
                 "ulimit -v 67108864 && erl -noshell -pa " ++ Ebin ++ " -eval '" ++ Eval ++ "' 2>&1"
             ),
-            ?assertMatch({_, _}, string:find(Out, "pool_too_large"), Out);
+            ?assertNotEqual(nomatch, string:find(Out, "pool_too_large"), Out);
         _ ->
             {skip, "needs ulimit -v"}
     end.

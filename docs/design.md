@@ -189,7 +189,7 @@ KeepResident}`. Wasmtime builds the pool inside `Engine::new` and the C
 API unwraps the result, so a pool it cannot build aborts the process. Three
 guards stand in front of it: `pooling_key/3` in `wasmtime.erl` checks the
 bounds, `parse_allocator` in `nif_engine.c` checks them again (the NIF can
-be called directly), and `pool_fits` reserves the address space the pool
+be called directly), and `pool_fits` (`nif_mmap.c`) reserves the address space the pool
 will ask for (about 4 GB per slot) and releases it, so a host under
 `ulimit -v` gets `pool_too_large`. Change the bounds in both files.
 

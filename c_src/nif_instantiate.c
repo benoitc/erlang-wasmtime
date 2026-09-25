@@ -14,19 +14,20 @@ static char *bin_to_cstr(ErlNifEnv *env, ERL_NIF_TERM t) {
   return s;
 }
 
-/* Wasi :: none | #{args, env, dirs, stdin, stdout, stderr, output_limit}
+/* Wasi :: none | #{args, env, dirs, stdin, stdout, stderr, output_limit, clocks}
  * (wasi_options/1 in wasmtime.erl fills every key)
  * args  :: inherit | [binary()]     env :: inherit | [{binary(), binary()}]
  * stdin :: none | inherit | stream | {file, Path} | {binary, Bytes}
  * stdout, stderr :: none | inherit | stream | {file, Path} | capture
- * dirs  :: [{GuestPath, HostPath, read | write}] */
+ * dirs  :: [{GuestPath, HostPath, read | write}]
+ * clocks :: all | monotonic */
 static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *out,
                                    ERL_NIF_TERM wasi) {
-  ERL_NIF_TERM t[7];
-  const ERL_NIF_TERM keys[7] = {atom_args,   atom_env,    atom_dirs,        atom_stdin,
-                                atom_stdout, atom_stderr, atom_output_limit};
+  ERL_NIF_TERM t[8];
+  const ERL_NIF_TERM keys[8] = {atom_args,   atom_env,    atom_dirs,         atom_stdin,
+                                atom_stdout, atom_stderr, atom_output_limit, atom_clocks};
   if (enif_is_identical(wasi, atom_none)) return 0;
-  for (int i = 0; i < 7; i++)
+  for (int i = 0; i < 8; i++)
     if (!enif_get_map_value(env, wasi, keys[i], &t[i]))
       return mk_error_s(out, "wasi", "config", "wasi option is malformed");
 #if !NIF_HAVE_WASI
@@ -35,6 +36,7 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
 
   wasi_config_t *cfg = wasi_config_new();
   const char *err = NULL;
+  ERL_NIF_TERM err_t;
   unsigned n;
   ERL_NIF_TERM l, h;
   const ERL_NIF_TERM *tt;
@@ -46,6 +48,11 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
     goto done;
   }
   inst->capture.limit = limit;
+  int monotonic_only = enif_is_identical(t[7], atom_monotonic);
+  if (!monotonic_only && !enif_is_identical(t[7], atom_all)) {
+    err = "wasi clocks must be all or monotonic";
+    goto done;
+  }
   /* argv */
   if (enif_is_identical(t[0], atom_inherit)) {
     wasi_config_inherit_argv(cfg);
@@ -187,6 +194,7 @@ done:
     wasmtime_error_delete(werr);
     return mk_error_s(out, "wasi", "config", "wasi could not be linked");
   }
+  if (monotonic_only && (err_t = restrict_clocks(inst, out))) return err_t;
   if (inst->inbox.stdin || inst->inbox.tty_mask) return shadow_wasi(inst, out);
   return 0;
 #endif

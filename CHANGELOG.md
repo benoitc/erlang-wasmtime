@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+A fresh, pre-initialized CPython per request in about 1.6 ms.
+
+- `preinit/3`: run a module's init exports once and get a module that
+  starts in their state (Wizer's pre-initialization, in Erlang). Init calls
+  as a list or a fun; `_initialize` removed when called; `remove_exports`.
+  Snapshots are laid out so Wasmtime maps them copy-on-write.
+- `allocator => pooling` compile option with `instances`, `max_memory` and
+  `keep_resident`. Out-of-range settings are `badarg` and a pool the host
+  cannot reserve is `pool_too_large`, where Wasmtime would abort.
+- `deserialize_file/1,2`: load a `.cwasm` by mapping it; its memory image is
+  then shared copy-on-write on macOS too.
+- `destroy/1`: stop an instance and free its store before returning, so a
+  pool slot is free at once.
+- `wasi => #{clocks => monotonic}`: wall and CPU clocks answer `ENOTSUP`.
+- `wat2wasm/1`.
+- `timeout` and `interrupt/1` stop the guest at once instead of at the next
+  10 ms epoch tick.
+- A host call spins briefly for the reply before sleeping: 2.5 us round trip
+  when idle, from 6 us.
+- `compile_options()` and `module_options/1` carry `allocator` (and
+  `pooling`); the engine key the NIF reads has a fourth element.
+- `bench/reactor_bench.erl` and `scripts/bench-reactor.sh`: the acceptance
+  benchmark with hornbeam's CPython reactor; `docs/preinit.md`,
+  `docs/throughput.md`.
+
 ## 0.1.1 (2026-08-29)
 
 - Wasmtime archives come from `wasmtime-runtime-<version>-r<revision>`

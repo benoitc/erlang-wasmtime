@@ -13,6 +13,8 @@
     wasi_write_dir/1,
     wasi_read_dir_refuses_write/1,
     wasi_no_wasi_no_imports/1,
+    wasi_clocks_all/1,
+    wasi_clocks_monotonic/1,
     wasi_stdin_binary/1,
     wasi_capture_output/1,
     wasi_capture_limit/1,
@@ -37,7 +39,9 @@ groups() ->
             wasi_stderr_file,
             wasi_write_dir,
             wasi_read_dir_refuses_write,
-            wasi_no_wasi_no_imports
+            wasi_no_wasi_no_imports,
+            wasi_clocks_all,
+            wasi_clocks_monotonic
         ]},
         {wasi_stdio, [], [
             wasi_stdin_binary,
@@ -324,4 +328,55 @@ wasi_stream_is_tty(_) ->
     ?assertNotEqual(2, OutType),
     Both = instance(Wat, #{wasi => #{stdout => stream, stderr => stream}}),
     {ok, [2, 0]} = wasmtime:call(Both, ~"filetype", [2]),
+    ok.
+
+%% time(Id) -> {Errno, Nanoseconds}; res(Id) -> {Errno, Nanoseconds}
+clock_wat() ->
+    ~"""
+    (module
+      (import "wasi_snapshot_preview1" "clock_time_get"
+        (func $get (param i32 i64 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "clock_res_get"
+        (func $res (param i32 i32) (result i32)))
+      (memory (export "memory") 1)
+      (func (export "time") (param i32) (result i32 i64)
+        (call $get (local.get 0) (i64.const 1) (i32.const 8))
+        (i64.load (i32.const 8)))
+      (func (export "res") (param i32) (result i32 i64)
+        (call $res (local.get 0) (i32.const 16))
+        (i64.load (i32.const 16)))
+      (func (export "time_at") (param i32) (result i32)
+        (call $get (i32.const 1) (i64.const 1) (local.get 0))))
+    """.
+
+wasi_clocks_all(_) ->
+    Inst = instance(clock_wat(), #{wasi => #{}}),
+    {ok, [0, Wall]} = wasmtime:call(Inst, ~"time", [0]),
+    Now = os:system_time(nanosecond),
+    ?assert(abs(Now - Wall) < 60_000_000_000),
+    {ok, [0, _]} = wasmtime:call(Inst, ~"time", [1]),
+    ok.
+
+wasi_clocks_monotonic(_) ->
+    Inst = instance(clock_wat(), #{wasi => #{clocks => monotonic}}),
+    ENOTSUP = 58,
+    EFAULT = 21,
+    %% wall time and CPU time are refused, the value slot is left alone
+    [{ok, [ENOTSUP, 0]} = wasmtime:call(Inst, ~"time", [Id]) || Id <- [0, 2, 3, 99]],
+    [{ok, [ENOTSUP, 0]} = wasmtime:call(Inst, ~"res", [Id]) || Id <- [0, 2, 3]],
+    {ok, [0, T1]} = wasmtime:call(Inst, ~"time", [1]),
+    {ok, [0, T2]} = wasmtime:call(Inst, ~"time", [1]),
+    ?assert(T2 >= T1),
+    {ok, [0, Res]} = wasmtime:call(Inst, ~"res", [1]),
+    ?assert(Res > 0),
+    %% a pointer outside memory is EFAULT, not a trap
+    {ok, [EFAULT]} = wasmtime:call(Inst, ~"time_at", [65536 - 4]),
+    {ok, [0]} = wasmtime:call(Inst, ~"time_at", [65536 - 8]),
+    %% readings are the host's monotonic clock: a second instance continues it
+    Inst2 = instance(clock_wat(), #{wasi => #{clocks => monotonic}}),
+    {ok, [0, T3]} = wasmtime:call(Inst2, ~"time", [1]),
+    ?assert(T3 >= T2),
+    ?assertError(
+        function_clause, wasmtime:instantiate(compile(clock_wat()), #{wasi => #{clocks => none}})
+    ),
     ok.

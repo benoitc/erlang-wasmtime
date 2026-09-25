@@ -85,7 +85,34 @@ void *worker_main(void *arg) {
     req_done(inst, req);
   }
   inst->queue.tail = NULL;
+  /* destroy/1 frees the store now: a pooled instance gives its slot back
+   * here. Otherwise the store lives until the last term referring to the
+   * instance goes, because a ref may outlive its handle. Every
+   * scheduler-side access checks `instantiated` under mu, so none reaches
+   * a freed store; refs only unroot, which needs none (docs/design.md). */
+  req_t *destroy = inst->queue.destroy;
+  inst->queue.destroy = NULL;
+  inst->queue.exited = 1;
+  wasmtime_store_t *store = NULL;
+  wasmtime_linker_t *linker = NULL;
+  if (destroy) {
+    store = inst->wasm.store;
+    linker = inst->wasm.linker;
+    inst->wasm.instantiated = 0;
+    inst->wasm.has_memory = 0;
+    inst->wasm.store = NULL;
+    inst->wasm.linker = NULL;
+    inst->wasm.ctx = NULL;
+  }
   pthread_mutex_unlock(&inst->mu);
+  if (linker) wasmtime_linker_delete(linker);
+  if (store) wasmtime_store_delete(store);
+  if (destroy) {
+    ErlNifEnv *out = enif_alloc_env();
+    send_result(inst, destroy, out, atom_ok);
+    enif_free_env(out);
+    req_free(destroy);
+  }
   /* The thread's own reference; nothing below may touch `inst`. */
   enif_release_resource(inst);
   return NULL;
@@ -105,6 +132,7 @@ void instance_dtor(ErlNifEnv *env, void *obj) {
     inst->queue.head = r->next;
     req_free(r);
   }
+  if (inst->queue.destroy) req_free(inst->queue.destroy);
   if (inst->wasm.linker) wasmtime_linker_delete(inst->wasm.linker);
   if (inst->wasm.store) wasmtime_store_delete(inst->wasm.store);
   for (size_t i = 0; i < inst->wasm.nhostfns; i++) {
@@ -129,6 +157,39 @@ void stop_current(instance_t *inst) {
   inst->host.abort = 1;
   __atomic_store_n(&inst->interrupt, 1, __ATOMIC_RELEASE);
   pthread_cond_broadcast(&inst->cv);
+  /* Reach the epoch callback now rather than at the next tick: the
+   * increment is one atomic add, and the engine's other running guests
+   * only extend their deadline. wasm.mod is set before the worker starts
+   * and engines are never freed. */
+  wasmtime_engine_increment_epoch(inst->wasm.mod->engine->engine);
+}
+
+/* destroy(Handle, Id) -> ok | enqueued. Stops the instance: the running
+ * request is interrupted (its caller gets the error), queued ones answer
+ * `stopped`, and the worker frees the store then sends
+ * {wasmtime_result, Ref, Id, ok} to this process. `ok` when there is no
+ * worker left to wait for. */
+ERL_NIF_TERM nif_destroy(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  (void)argc;
+  instance_t *inst;
+  ErlNifUInt64 id;
+  if (!get_handle(env, argv[0], &inst) || !enif_get_uint64(env, argv[1], &id))
+    return enif_make_badarg(env);
+  pthread_mutex_lock(&inst->mu);
+  if (inst->queue.exited || inst->queue.destroy) {
+    pthread_mutex_unlock(&inst->mu);
+    return atom_ok;
+  }
+  req_t *r = enif_alloc(sizeof *r);
+  memset(r, 0, sizeof *r);
+  r->id = id;
+  enif_self(env, &r->caller);
+  inst->queue.destroy = r;
+  inst->queue.stopping = 1;
+  if (inst->queue.current) stop_current(inst);
+  pthread_cond_broadcast(&inst->cv);
+  pthread_mutex_unlock(&inst->mu);
+  return atom_enqueued;
 }
 
 /* Erlang dropped its last reference: stop the thread, never wait for it. */
@@ -239,6 +300,10 @@ ERL_NIF_TERM with_ref(ErlNifEnv *env, ERL_NIF_TERM term, ref_t **out) {
   if (r->inst->queue.state == ST_RUNNING) {
     pthread_mutex_unlock(&r->inst->mu);
     return mk_error_s(env, "ref", "busy", "guest is running");
+  }
+  if (!r->inst->wasm.instantiated) {
+    pthread_mutex_unlock(&r->inst->mu);
+    return mk_error_s(env, "ref", "stopped", "instance is stopped");
   }
   *out = r;
   return 0;

@@ -18,8 +18,9 @@
  *     `stream` stdout/stderr or `erlang.send` arrive as
  *         {wasmtime_stream, Ref, stdout | stderr | channel, Bytes}
  *   - Interruption uses Wasmtime epochs. One ticker thread bumps the engine
- *     epoch every 10 ms; each store's deadline callback checks the instance's
- *     interrupt flag and either extends the deadline or fails the call.
+ *     epoch every 10 ms, and stop_current bumps it at once; each store's
+ *     deadline callback checks the instance's interrupt flag and either
+ *     extends the deadline or fails the call.
  *
  * Ownership. Two resource types:
  *   - handle_t is what Erlang holds. Its destructor only tells the instance
@@ -104,7 +105,8 @@ extern ERL_NIF_TERM atom_ok, atom_error, atom_true, atom_false, atom_compiler, a
     atom_null, atom_i31, atom_externref, atom_funcref, atom_struct, atom_array, atom_anyref,
     atom_instance, atom_imports, atom_wasi, atom_memory_limit, atom_max_tables,
     atom_max_table_elements, atom_max_instances, atom_host_timeout, atom_host, atom_inbox_limit,
-    atom_shim, atom_args, atom_env, atom_dirs, atom_stdin, atom_output_limit;
+    atom_shim, atom_args, atom_env, atom_dirs, atom_stdin, atom_output_limit, atom_clocks,
+    atom_monotonic, atom_all;
 
 /* -------------------------------------------------------------- types -- */
 /* wasm_valtype_kind aborts the process on v128 and on non-nullable references
@@ -175,7 +177,9 @@ typedef struct instance {
     req_t *head, *tail;
     req_t *current;
     enum state state;
-    int stopping; /* no request starts again; the worker exits when drained */
+    int stopping;   /* no request starts again; the worker exits when drained */
+    int exited;     /* the worker is gone and has freed the store */
+    req_t *destroy; /* destroy/1's caller, answered once the store is freed */
   } queue;
 
   /* The host call in flight (queue.state == ST_IN_HOST) and how the running
@@ -269,7 +273,13 @@ typedef struct engine_entry {
   int fuel;
   int opt_level;               /* 0 none, 1 speed, 2 speed_and_size */
   uint32_t set_mask, val_mask; /* proposal overrides: which, and to what */
-  wasmtime_module_t *shim;     /* the stdin stream forwarder, compiled on first use */
+  /* Allocator: on demand, or a pool of `pool_instances` slots of
+   * `pool_max_memory` bytes each. Checked by pooling_key/1 in wasmtime.erl:
+   * Wasmtime aborts the process on a pool it cannot build. */
+  int pooling;
+  uint32_t pool_instances;
+  ErlNifUInt64 pool_max_memory, pool_keep_resident;
+  wasmtime_module_t *shim; /* the stdin stream forwarder, compiled on first use */
   struct engine_entry *next;
 } engine_t;
 
@@ -304,6 +314,7 @@ ERL_NIF_TERM conv_error(ErlNifEnv *env, const char *cls, const char *kind);
 ERL_NIF_TERM term_or_unsupported(ErlNifEnv *env, const char *cls, ERL_NIF_TERM t);
 engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err);
 ERL_NIF_TERM key_term(ErlNifEnv *env, const engine_t *e);
+ERL_NIF_TERM plain_key(ErlNifEnv *env, int fuel);
 wasmtime_module_t *engine_shim(engine_t *e, ErlNifEnv *env, ERL_NIF_TERM shim, const char **why);
 wasmtime_error_t *epoch_callback(wasmtime_context_t *ctx, void *data, uint64_t *delta,
                                  wasmtime_update_deadline_kind_t *kind);
@@ -314,6 +325,7 @@ void stop_current(instance_t *inst);
 void handle_dtor(ErlNifEnv *env, void *obj);
 void instance_down(ErlNifEnv *env, void *obj, ErlNifPid *pid, ErlNifMonitor *mon);
 int get_handle(ErlNifEnv *env, ERL_NIF_TERM t, instance_t **out);
+ERL_NIF_TERM nif_destroy(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]);
 ERL_NIF_TERM enqueue(ErlNifEnv *env, instance_t *inst, enum req_kind kind, ERL_NIF_TERM id,
                      ERL_NIF_TERM name, ERL_NIF_TERM args, ERL_NIF_TERM opts);
 ERL_NIF_TERM with_export(ErlNifEnv *env, ERL_NIF_TERM handle, ERL_NIF_TERM name,
@@ -334,6 +346,10 @@ void inbox_drop_head(instance_t *inst);
 wasm_trap_t *fd_read_cb(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
                         size_t nvals);
 ERL_NIF_TERM shadow_wasi(instance_t *inst, ErlNifEnv *out);
+ERL_NIF_TERM restrict_clocks(instance_t *inst, ErlNifEnv *out);
+ERL_NIF_TERM nif_preinit_memory(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]);
+ERL_NIF_TERM nif_preinit_global(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]);
+ERL_NIF_TERM nif_preinit_table(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]);
 ERL_NIF_TERM link_wasi_shim(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM shim_bytes,
                             ErlNifEnv *out);
 ERL_NIF_TERM define_erlang_imports(instance_t *inst, ErlNifEnv *out,

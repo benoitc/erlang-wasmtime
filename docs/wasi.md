@@ -74,11 +74,34 @@ line and environment; the default is none of either. The inherited command
 line is what the platform gives a dynamically loaded library: the VM's
 arguments on Linux (glibc) and macOS, an empty list on FreeBSD.
 
+## Keep the guest off the wall clock
+
+```erlang
+{ok, Inst} = wasmtime:instantiate(Mod, #{wasi => #{clocks => monotonic}}).
+```
+
+With `clocks => monotonic` the guest reads the host's monotonic clock and
+nothing else: wall time and process or thread CPU time answer `ENOTSUP`
+(Python's `time.time()` raises `OSError`). Use it when a guest must not
+learn the date or time of day, such as a workflow that has to replay the
+same way. Durations still work: `time.monotonic()` and `time.sleep()` do.
+
+The monotonic clock is the host's own, not one starting at
+instantiation, so readings a [pre-initialized](preinit.md) guest took
+during its init are still in the past. The default, `clocks => all`, is
+Wasmtime's WASI with every clock.
+
 ## Notes
 
 - Preview 1 only. Components and WASI preview 2 are not exposed.
 - No network. The preview 1 surface Wasmtime exposes has no sockets, and no
   option here enables them.
+- Randomness (`random_get`) is the host's cryptographic generator, seeded
+  per instance. A pre-initialized module starts with whatever its init drew;
+  see [preinit](preinit.md).
+- `clocks => monotonic` covers the clock calls. A guest can still see file
+  modification times through `fd_filestat_get` on the directories you grant,
+  and a `poll_oneoff` subscription on the wall clock waits as asked.
 - Stdio is per instance, not per call: `{file, Path}` is opened at
   instantiation and appended to by every call, and captured output
   accumulates until `read_output/1` takes it.

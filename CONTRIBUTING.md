@@ -37,6 +37,20 @@ rm -f _build/wasmtime_nif.stamp && rebar3 compile   # back to the full build
 
 Removing the stamp forces the NIF to rebuild against a different library.
 
+## Measure
+
+A change to instantiation, calls, host calls or the engine settings is
+measured with hornbeam's CPython reactor:
+
+```bash
+WASI_SDK=/path/to/wasi-sdk scripts/build-py-reactor.sh   # once
+scripts/bench-reactor.sh
+```
+
+Compare the report with [throughput](docs/throughput.md) and update that
+page when the numbers move. The `bench` workflow gives the Linux x86_64
+report.
+
 ## Add a NIF function
 
 The order the code enforces, with one file per step:

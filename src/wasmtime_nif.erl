@@ -3,6 +3,7 @@
 
 -export([
     compile/3,
+    wat2wasm/1,
     validate/2,
     module_options/1,
     module_imports/1,
@@ -36,11 +37,16 @@
     write_memory/4,
     memory_size/2,
     read_output/1,
+    destroy/2,
+    preinit_memory/2,
+    preinit_global/2,
+    preinit_table/2,
     features/0,
     version/0
 ]).
 -nifs([
     compile/3,
+    wat2wasm/1,
     validate/2,
     module_options/1,
     module_imports/1,
@@ -74,6 +80,10 @@
     write_memory/4,
     memory_size/2,
     read_output/1,
+    destroy/2,
+    preinit_memory/2,
+    preinit_global/2,
+    preinit_table/2,
     features/0,
     version/0
 ]).
@@ -90,6 +100,7 @@ init() ->
     erlang:load_nif(filename:join(Priv, "wasmtime_nif"), 0).
 
 compile(_Bin, _IsWat, _Key) -> erlang:nif_error(not_loaded).
+wat2wasm(_Text) -> erlang:nif_error(not_loaded).
 validate(_Bin, _Key) -> erlang:nif_error(not_loaded).
 module_options(_Mod) -> erlang:nif_error(not_loaded).
 module_imports(_Mod) -> erlang:nif_error(not_loaded).
@@ -123,5 +134,9 @@ read_memory(_Handle, _Name, _Ptr, _Len) -> erlang:nif_error(not_loaded).
 write_memory(_Handle, _Name, _Ptr, _Bin) -> erlang:nif_error(not_loaded).
 memory_size(_Handle, _Name) -> erlang:nif_error(not_loaded).
 read_output(_Handle) -> erlang:nif_error(not_loaded).
+destroy(_Handle, _Id) -> erlang:nif_error(not_loaded).
+preinit_memory(_Handle, _Name) -> erlang:nif_error(not_loaded).
+preinit_global(_Handle, _Name) -> erlang:nif_error(not_loaded).
+preinit_table(_Handle, _Name) -> erlang:nif_error(not_loaded).
 features() -> erlang:nif_error(not_loaded).
 version() -> erlang:nif_error(not_loaded).

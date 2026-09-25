@@ -39,6 +39,36 @@ ERL_NIF_TERM outcome(instance_t *inst, ErlNifEnv *out, wasmtime_error_t *e, wasm
   return atom_ok;
 }
 
+/* A reply usually comes within a few microseconds: the host process runs
+ * the fun and calls host_reply/3. Waiting that long on the condition
+ * variable costs a sleep and a wake-up, so look first, for at most
+ * HOST_SPIN_NS, with the mutex released. Called and returns with it held. */
+#define HOST_SPIN_NS 20000
+static inline void cpu_relax(void) {
+#if defined(__aarch64__)
+  __asm__ __volatile__("yield");
+#elif defined(__x86_64__)
+  __asm__ __volatile__("pause");
+#endif
+}
+
+static void spin_for_reply(instance_t *inst) {
+  struct timespec t0, t;
+  pthread_mutex_unlock(&inst->mu);
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  for (unsigned i = 1;; i++) {
+    if (__atomic_load_n(&inst->host.has_reply, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&inst->host.abort, __ATOMIC_ACQUIRE))
+      break;
+    cpu_relax();
+    if (i % 64 == 0) {
+      clock_gettime(CLOCK_MONOTONIC, &t);
+      if ((t.tv_sec - t0.tv_sec) * 1000000000L + (t.tv_nsec - t0.tv_nsec) > HOST_SPIN_NS) break;
+    }
+  }
+  pthread_mutex_lock(&inst->mu);
+}
+
 /* Runs on the instance thread, inside wasmtime_func_call. The mutex is not
  * held while the guest runs, so take it here. */
 enum host_status { HOST_OK, HOST_INTERRUPTED, HOST_FAILED };
@@ -78,6 +108,7 @@ static enum host_status host_exchange(instance_t *inst, hostfn_t *fn, ErlNifEnv 
   if (!sent) {
     *fail = "host process is gone";
   } else {
+    spin_for_reply(inst);
     struct timespec deadline;
     add_ms(&deadline, inst->host.timeout_ms);
     while (!inst->host.has_reply && !inst->host.abort) {

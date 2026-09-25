@@ -20,18 +20,22 @@ on an instance at a time; concurrent callers are queued.
 
 -export([
     compile/1, compile/2,
+    wat2wasm/1,
     validate/1, validate/2,
     module_options/1,
     imports/1,
     exports/1,
     serialize/1,
     deserialize/1, deserialize/2,
+    deserialize_file/1, deserialize_file/2,
+    preinit/3,
     instantiate/1, instantiate/2,
     call/3, call/4,
     call_ref/3, call_ref/4,
     call_async/3,
     await/2, await/3,
     interrupt/1,
+    destroy/1,
     read_output/1,
     global_get/2,
     global_set/3,
@@ -72,8 +76,11 @@ on an instance at a time; concurrent callers are queued.
     options/0,
     compile_options/0,
     proposal/0,
-    features/0
+    features/0,
+    preinit_call/0,
+    preinit_options/0
 ]).
+-export([handle/1]).
 
 -define(DEFAULT_MEMORY_LIMIT, 256 * 1024 * 1024).
 -define(DEFAULT_HOST_TIMEOUT, 30000).
@@ -122,7 +129,8 @@ innermost first.
 """.
 -type error() ::
     {error, #{
-        class := compile | link | call | trap | host | wasi | memory | global | table | exit,
+        class :=
+            compile | link | call | trap | host | wasi | memory | global | table | exit | preinit,
         kind := atom(),
         message := binary(),
         status => integer(),
@@ -155,16 +163,33 @@ Options for `compile/2`, `validate/2` and `deserialize/2`.
   use it: `#{simd => false, threads => false}` for a plugin format that
   must not need them.
 
+- `allocator`: how instances get their memories and tables. `on_demand`
+  (the default) maps them per instance. `pooling` reserves `instances`
+  slots up front and reuses them, which with a pre-initialized module
+  makes instantiation a remap of its image; see [preinit](preinit.md).
+- `pooling`: the pool, when `allocator => pooling`. `instances` live at
+  once (default 1000; one more fails to instantiate), `max_memory` per
+  instance (default 256 MB, a multiple of 64 KB up to 4 GB; a guest that
+  grows past it fails like one past `memory_limit`), and `keep_resident`,
+  bytes of a freed slot kept mapped and zeroed rather than released
+  (default 0).
+
 Of these, only `fuel` is part of a precompiled module's compatibility
 check: give it again to `deserialize/2` (or rely on `deserialize/1`, which
-tries the fuel engine too). The optimization level and disabled proposals
-need nothing at load time. Each distinct option set is one Wasmtime engine,
-created on first use and kept; at most 32 exist per VM.
+tries the fuel engine too). The optimization level, the allocator and
+disabled proposals need nothing at load time. Each distinct option set is
+one Wasmtime engine, created on first use and kept; at most 32 exist per VM.
 """.
 -type compile_options() :: #{
     fuel => boolean(),
     opt_level => none | speed | speed_and_size,
-    proposals => #{proposal() => boolean()}
+    proposals => #{proposal() => boolean()},
+    allocator => on_demand | pooling,
+    pooling => #{
+        instances => pos_integer(),
+        max_memory => pos_integer(),
+        keep_resident => non_neg_integer()
+    }
 }.
 
 -doc "A WebAssembly proposal that `compile_options()` can turn on or off.".
@@ -201,6 +226,10 @@ WASI configuration. Nothing is granted by default.
   stderr, Bytes}` at once.
 - `output_limit`: bytes kept per captured stream (default 16 MB); the guest
   never sees a short write, `read_output/1` reports what was dropped.
+- `clocks`: `all` (the default) or `monotonic`. With `monotonic` the guest
+  reads the host's monotonic clock and every other clock (wall time,
+  process and thread CPU time) answers `ENOTSUP`, so it cannot learn the
+  date or time of day.
 """.
 -type wasi_options() :: #{
     args => inherit | [iodata()],
@@ -209,7 +238,8 @@ WASI configuration. Nothing is granted by default.
     stdin => none | inherit | stream | {file, iodata()} | {binary, iodata()},
     stdout => none | inherit | stream | {file, iodata()} | capture,
     stderr => none | inherit | stream | {file, iodata()} | capture,
-    output_limit => pos_integer()
+    output_limit => pos_integer(),
+    clocks => all | monotonic
 }.
 
 -type options() :: #{
@@ -247,6 +277,15 @@ compile(Bin, Opts) when is_binary(Bin) ->
     with_key(Opts, fun(Key) -> wasmtime_nif:compile(Bin, false, Key) end).
 
 -doc """
+Translate the text format into the binary form, without compiling.
+
+Use it when you need the bytes rather than a module: `preinit/3` and
+`validate/1` take a binary.
+""".
+-spec wat2wasm(iodata()) -> {ok, binary()} | error().
+wat2wasm(Text) -> wasmtime_nif:wat2wasm(iolist_to_binary(Text)).
+
+-doc """
 Decode and validate a binary module without compiling it.
 
 Cheaper than `compile/1` when the question is only whether the bytes are a
@@ -270,20 +309,57 @@ with_key(Opts, Fun) ->
         {error, _} = Error -> Error
     end.
 
-%% The engine key the NIF reads: {Fuel, OptLevel, [{Proposal, Bool}]} with
-%% the overrides sorted, so equal maps mean the same engine. Malformed
-%% options raise; a set Wasmtime would refuse when the engine is created
-%% (which it does by aborting the process) is returned as an error here.
+%% The engine key the NIF reads: {Fuel, OptLevel, [{Proposal, Bool}],
+%% Allocator} with the overrides sorted, so equal maps mean the same engine.
+%% Malformed options raise; a set Wasmtime would refuse when the engine is
+%% created (which it does by aborting the process) is returned as an error
+%% here.
 compile_key(Opts) when is_map(Opts) ->
     Fuel = maps:get(fuel, Opts, false),
     OptLevel = maps:get(opt_level, Opts, speed),
     Proposals = maps:get(proposals, Opts, #{}),
     true = is_boolean(Fuel),
     true = lists:member(OptLevel, [none, speed, speed_and_size]),
-    case proposal_overrides(Proposals) of
-        {ok, Overrides} -> {ok, {Fuel, OptLevel, Overrides}};
-        {error, _} = Error -> Error
+    maybe
+        {ok, Overrides} ?= proposal_overrides(Proposals),
+        {ok, Allocator} ?= allocator_key(Opts),
+        {ok, {Fuel, OptLevel, Overrides, Allocator}}
     end.
+
+%% Wasmtime builds the pool when the engine is created and aborts the
+%% process if it cannot, so every bound it checks is checked here first.
+%% A slot may not exceed the memory reservation (4 GB by default); the
+%% instance cap keeps the reserved address space, about 4 GB per slot,
+%% within what a 64-bit host maps. docs/design.md, "Numbers".
+-define(POOL_MAX_INSTANCES, 10_000).
+-define(POOL_MAX_MEMORY, 4 bsl 30).
+-define(WASM_PAGE, 16#10000).
+
+allocator_key(Opts) ->
+    case maps:get(allocator, Opts, on_demand) of
+        on_demand ->
+            {ok, on_demand};
+        pooling ->
+            Pool = maps:get(pooling, Opts, #{}),
+            true = is_map(Pool),
+            N = maps:get(instances, Pool, 1000),
+            Max = maps:get(max_memory, Pool, ?DEFAULT_MEMORY_LIMIT),
+            Keep = maps:get(keep_resident, Pool, 0),
+            pooling_key(N, Max, Keep)
+    end.
+
+pooling_key(N, _, _) when not is_integer(N); N < 1; N > ?POOL_MAX_INSTANCES ->
+    pool_error(~"pooling instances must be 1 to 10000");
+pooling_key(_, Max, _) when
+    not is_integer(Max); Max < ?WASM_PAGE; Max > ?POOL_MAX_MEMORY; Max rem ?WASM_PAGE =/= 0
+->
+    pool_error(~"pooling max_memory must be a multiple of 64 KB up to 4 GB");
+pooling_key(_, Max, Keep) when not is_integer(Keep); Keep < 0; Keep > Max ->
+    pool_error(~"pooling keep_resident must be 0 to max_memory");
+pooling_key(N, Max, Keep) ->
+    {ok, {pooling, N, Max, Keep}}.
+
+pool_error(Msg) -> {error, #{class => compile, kind => badarg, message => Msg}}.
 
 %% Sorted, checked, with the implications Wasmtime insists on: relaxed SIMD
 %% sits on SIMD, so turning SIMD off turns relaxed SIMD off too, and asking
@@ -310,8 +386,17 @@ proposal_overrides(Proposals) when is_map(Proposals) ->
             {ok, Overrides}
     end.
 
-key_to_options({Fuel, OptLevel, Overrides}) ->
-    #{fuel => Fuel, opt_level => OptLevel, proposals => maps:from_list(Overrides)}.
+key_to_options({Fuel, OptLevel, Overrides, Allocator}) ->
+    Base = #{fuel => Fuel, opt_level => OptLevel, proposals => maps:from_list(Overrides)},
+    case Allocator of
+        on_demand ->
+            Base#{allocator => on_demand};
+        {pooling, N, Max, Keep} ->
+            Base#{
+                allocator => pooling,
+                pooling => #{instances => N, max_memory => Max, keep_resident => Keep}
+            }
+    end.
 
 is_proposal(P) ->
     lists:member(P, [
@@ -362,6 +447,68 @@ belongs to that engine, which `module_options/1` reports.
 -spec deserialize(binary(), compile_options()) -> {ok, module_ref()} | error().
 deserialize(Bin, Opts) when is_binary(Bin) ->
     with_key(Opts, fun(Key) -> wasmtime_nif:deserialize(Bin, Key) end).
+
+-doc """
+Load a module produced by `serialize/1` from a file, which Wasmtime maps
+rather than reads.
+
+Use this for a large module instantiated often: its memory image then
+points into the mapping, so each instance maps the image copy-on-write
+instead of copying it. On macOS this is the only way to get that; on Linux
+`deserialize/1` gets it too, through an anonymous file. See
+[preinit](preinit.md). The file must not change while the module is loaded.
+The same trust rule as `deserialize/1` applies.
+""".
+-spec deserialize_file(file:filename_all()) -> {ok, module_ref()} | error().
+deserialize_file(Path) -> wasmtime_nif:deserialize({file, bin(Path)}, undefined).
+
+-doc "`deserialize_file/1` onto the engine for these `t:compile_options/0`.".
+-spec deserialize_file(file:filename_all(), compile_options()) -> {ok, module_ref()} | error().
+deserialize_file(Path, Opts) ->
+    with_key(Opts, fun(Key) -> wasmtime_nif:deserialize({file, bin(Path)}, Key) end).
+
+-doc "An init export to call during `preinit/3`: its name, or its name and arguments.".
+-type preinit_call() :: iodata() | {iodata(), [value()]}.
+
+-doc """
+Options for `preinit/3`: every `t:options/0` key, given to the instance the
+init calls run in, and:
+
+- `compile`: the `t:compile_options/0` that instance is compiled with.
+- `remove_exports`: exports the result must not have, such as the init
+  function itself. `_initialize` is removed when it was one of the calls.
+""".
+-type preinit_options() :: #{
+    compile => compile_options(),
+    remove_exports => [iodata()],
+    atom() => term()
+}.
+
+-doc """
+Run a module's init exports once and return a new module that starts in the
+state they left: Wizer's pre-initialization.
+
+`Wasm` is the module's binary form. It is instantiated with `Opts` (WASI
+preopens, env, host functions), then `Init` runs: a list of exports to call
+in order, or a fun given the instance that returns `ok` to take the
+snapshot. The result is a module binary whose memories and mutable globals
+hold that state; compile it (with `allocator => pooling` to instantiate it
+cheaply), `serialize/1` it and cache the `.cwasm`.
+
+What the snapshot does not carry: open files and anything else the host
+holds for the instance, so give each instance of the result the same
+`dirs`, in the same order, as the init instance had. Tables must be left as
+the module's element segments set them, and the module may not import
+memories, tables or globals or declare GC types. See
+[preinit](preinit.md).
+""".
+-spec preinit(binary(), preinit_options(), [preinit_call()] | fun((instance()) -> term())) ->
+    {ok, binary()} | error().
+preinit(Wasm, Opts, Init) -> wasmtime_preinit:run(Wasm, Opts, Init).
+
+-doc false.
+-spec handle(instance()) -> reference().
+handle(#instance{handle = H}) -> H.
 
 -doc "List what the module imports, as `{Module, Name, Kind}`.".
 -spec imports(module_ref()) -> [{binary(), binary(), func | global | table | memory | tag}].
@@ -521,8 +668,12 @@ wasi_options(Wasi) when is_map(Wasi) ->
         stdin => stdio(maps:get(stdin, Wasi, none)),
         stdout => stdio(maps:get(stdout, Wasi, none)),
         stderr => stdio(maps:get(stderr, Wasi, none)),
-        output_limit => maps:get(output_limit, Wasi, ?DEFAULT_OUTPUT_LIMIT)
+        output_limit => maps:get(output_limit, Wasi, ?DEFAULT_OUTPUT_LIMIT),
+        clocks => clocks(maps:get(clocks, Wasi, all))
     }.
+
+clocks(all) -> all;
+clocks(monotonic) -> monotonic.
 
 stdio(none) -> none;
 stdio(inherit) -> inherit;
@@ -582,12 +733,38 @@ do_call(#instance{handle = H} = Inst, Name, Args, Opts) ->
 -doc """
 Interrupt the call running on the instance, from any process.
 
-The call fails with `{error, #{class := trap, kind := interrupt}}` within one
-epoch tick (10 ms), or at once if it is waiting inside a host function.
-Returns `not_running` when the instance is idle.
+The call fails with `{error, #{class := trap, kind := interrupt}}` at the
+guest's next loop back-edge or function entry, or at once if it is waiting
+inside a host function. Returns `not_running` when the instance is idle.
 """.
 -spec interrupt(instance()) -> ok | not_running.
 interrupt(#instance{handle = H}) -> wasmtime_nif:interrupt(H).
+
+-doc """
+Stop the instance and free its store now, rather than when the last term
+referring to it is garbage collected.
+
+A running call ends as with `interrupt/1` and its caller gets that error;
+queued calls answer `kind => stopped`, and so does every call made after.
+Returns once the store is freed, so a pooled instance has given its slot
+back. Calling it again, or on an instance that failed to instantiate,
+returns `ok`.
+""".
+-spec destroy(instance()) -> ok.
+destroy(#instance{handle = H, ref = Ref}) ->
+    Id = erlang:unique_integer([positive, monotonic]),
+    case wasmtime_nif:destroy(H, Id) of
+        ok ->
+            ok;
+        enqueued ->
+            %% The worker always answers: a guest is stopped at its next
+            %% epoch check, a host call or stream wait ends on the abort
+            %% flag. Only a blocking read of an inherited stdin holds it.
+            receive
+                {wasmtime_result, Ref, Id, ok} -> ok
+            after infinity -> ok
+            end
+    end.
 
 -doc """
 Serve one host call message in a `host` process.

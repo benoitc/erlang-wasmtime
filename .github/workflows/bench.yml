@@ -1,0 +1,67 @@
+name: bench
+
+# The pre-initialized CPython benchmark (bench/reactor_bench.erl) on Linux
+# x86_64: the numbers docs/throughput.md reports for Linux. The reactor
+# build takes about twenty minutes and is cached by its sources.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "bench/**"
+      - "c_src/**"
+      - "src/**"
+      - "scripts/bench-reactor.sh"
+      - "scripts/build-py-reactor.sh"
+      - ".github/workflows/bench.yml"
+
+jobs:
+  reactor:
+    name: Pre-initialized CPython on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      WASI_SDK_VERSION: "34"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          rebar3-version: "3.24.0"
+      - name: Cache the Wasmtime C API
+        uses: actions/cache@v4
+        with:
+          path: _build/wasmtime
+          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version') }}
+      - name: Cache the reactor
+        id: reactor
+        uses: actions/cache@v4
+        with:
+          path: _build/py-reactor/dist
+          key: py-reactor-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bench/py_reactor/*.c', 'scripts/build-py-reactor.sh') }}
+      - name: Install the WASI SDK and the Wasmtime CLI
+        if: steps.reactor.outputs.cache-hit != 'true'
+        run: |
+          V="$WASI_SDK_VERSION"
+          curl -fsSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-$V/wasi-sdk-$V.0-x86_64-linux.tar.gz" | tar xz -C "$RUNNER_TEMP"
+          echo "WASI_SDK=$RUNNER_TEMP/wasi-sdk-$V.0-x86_64-linux" >> "$GITHUB_ENV"
+          W="$(cat scripts/wasmtime.version)"
+          curl -fsSL "https://github.com/bytecodealliance/wasmtime/releases/download/$W/wasmtime-$W-x86_64-linux.tar.xz" | tar xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/wasmtime-$W-x86_64-linux" >> "$GITHUB_PATH"
+      - name: Build the reactor
+        if: steps.reactor.outputs.cache-hit != 'true'
+        run: scripts/build-py-reactor.sh
+      - name: Run the benchmark
+        run: |
+          uname -a
+          nproc
+          scripts/bench-reactor.sh | tee bench.md
+          cat bench.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.os }}
+          path: bench.md

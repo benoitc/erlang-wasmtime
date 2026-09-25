@@ -3,7 +3,16 @@
  * MAX_ENGINES; the epoch ticker; the stdin shim module compiled or loaded
  * per engine. make_config is mirrored by scripts/precompile-shims.sh.
  */
+/* MAP_ANON, which _POSIX_C_SOURCE in nif.h hides on macOS */
+#define _DARWIN_C_SOURCE
 #include "nif.h"
+
+#include <sys/mman.h>
+
+/* Mirrors pooling_key/3 in wasmtime.erl; docs/design.md, "Numbers". */
+#define POOL_MAX_INSTANCES 10000
+#define POOL_MAX_MEMORY (4ull << 30)
+#define WASM_PAGE 65536
 
 static const char *const proposal_names[NPROPOSALS] = {"simd",
                                                        "relaxed_simd",
@@ -27,13 +36,55 @@ static int nengines;
 
 static pthread_mutex_t engines_mu = PTHREAD_MUTEX_INITIALIZER;
 
-/* Key :: {Fuel :: boolean(), none | speed | speed_and_size, [{Proposal, boolean()}]} */
+/* Allocator :: on_demand | {pooling, Instances, MaxMemory, KeepResident} */
+static int parse_allocator(ErlNifEnv *env, ERL_NIF_TERM a, engine_t *k) {
+  const ERL_NIF_TERM *t;
+  int arity;
+  char buf[16];
+  ErlNifUInt64 n;
+  if (enif_get_atom(env, a, buf, sizeof buf, ERL_NIF_LATIN1)) return strcmp(buf, "on_demand") == 0;
+  if (!enif_get_tuple(env, a, &arity, &t) || arity != 4 ||
+      !enif_get_atom(env, t[0], buf, sizeof buf, ERL_NIF_LATIN1) || strcmp(buf, "pooling") != 0)
+    return 0;
+  k->pooling = 1;
+  /* The bounds pooling_key/3 in wasmtime.erl checks, again: Wasmtime
+   * aborts the process on a pool it cannot build. */
+  if (!enif_get_uint64(env, t[1], &n) || n == 0 || n > POOL_MAX_INSTANCES) return 0;
+  k->pool_instances = (uint32_t)n;
+  if (!enif_get_uint64(env, t[2], &k->pool_max_memory) ||
+      !enif_get_uint64(env, t[3], &k->pool_keep_resident))
+    return 0;
+  return k->pool_max_memory >= WASM_PAGE && k->pool_max_memory <= POOL_MAX_MEMORY &&
+         k->pool_max_memory % WASM_PAGE == 0 && k->pool_keep_resident <= k->pool_max_memory;
+}
+
+/* Whether the address space a pool reserves when its engine is created can
+ * be reserved at all: under `ulimit -v` or strict overcommit it may not,
+ * and Wasmtime aborts the process then. Each slot is the 4 GB memory
+ * reservation, its 32 MB guard and about 1 MB of instance state; the
+ * probe maps that much without access and unmaps it. */
+static int pool_fits(const engine_t *k) {
+  uint64_t per_slot = (4ull << 30) + (32ull << 20) + (1ull << 20);
+  uint64_t bytes = per_slot * k->pool_instances + (4ull << 30);
+  if (bytes > SIZE_MAX) return 0;
+  int flags = MAP_PRIVATE | MAP_ANON;
+#ifdef MAP_NORESERVE
+  flags |= MAP_NORESERVE;
+#endif
+  void *p = mmap(NULL, (size_t)bytes, PROT_NONE, flags, -1, 0);
+  if (p == MAP_FAILED) return 0;
+  munmap(p, (size_t)bytes);
+  return 1;
+}
+
+/* Key :: {Fuel :: boolean(), none | speed | speed_and_size, [{Proposal, boolean()}], Allocator} */
 static int parse_key(ErlNifEnv *env, ERL_NIF_TERM key, engine_t *k) {
   const ERL_NIF_TERM *t;
   int arity;
   char buf[32];
-  if (!enif_get_tuple(env, key, &arity, &t) || arity != 3) return 0;
+  if (!enif_get_tuple(env, key, &arity, &t) || arity != 4) return 0;
   memset(k, 0, sizeof *k);
+  if (!parse_allocator(env, t[3], k)) return 0;
   if (enif_is_identical(t[0], atom_true))
     k->fuel = 1;
   else if (!enif_is_identical(t[0], atom_false))
@@ -68,7 +119,9 @@ static int parse_key(ErlNifEnv *env, ERL_NIF_TERM key, engine_t *k) {
 
 static int same_key(const engine_t *a, const engine_t *b) {
   return a->fuel == b->fuel && a->opt_level == b->opt_level && a->set_mask == b->set_mask &&
-         a->val_mask == b->val_mask;
+         a->val_mask == b->val_mask && a->pooling == b->pooling &&
+         a->pool_instances == b->pool_instances && a->pool_max_memory == b->pool_max_memory &&
+         a->pool_keep_resident == b->pool_keep_resident;
 }
 
 /* The proposal setters exist per build feature; a toggle the headers do not
@@ -120,6 +173,33 @@ static wasm_config_t *make_config(const engine_t *want, const char **missing) {
                                                    ? WASMTIME_OPT_LEVEL_SPEED
                                                    : WASMTIME_OPT_LEVEL_SPEED_AND_SIZE);
 #endif
+  /* Copy-on-write images are Wasmtime's default; stated because the
+   * pre-initialized modules of docs/preinit.md rely on them. */
+  wasmtime_config_memory_init_cow_set(cfg, true);
+#ifdef WASMTIME_FEATURE_POOLING_ALLOCATOR
+  if (want->pooling) {
+    /* The allocator is not recorded in a precompiled module: the same
+     * .cwasm loads on either. The bounds were checked in Erlang. */
+    wasmtime_pooling_allocation_config_t *pc = wasmtime_pooling_allocation_config_new();
+    wasmtime_pooling_allocation_config_total_core_instances_set(pc, want->pool_instances);
+    wasmtime_pooling_allocation_config_total_memories_set(pc, want->pool_instances);
+    wasmtime_pooling_allocation_config_total_tables_set(pc, want->pool_instances);
+#ifdef WASMTIME_FEATURE_GC
+    wasmtime_pooling_allocation_config_total_gc_heaps_set(pc, want->pool_instances);
+#endif
+    wasmtime_pooling_allocation_config_max_memory_size_set(pc, (size_t)want->pool_max_memory);
+    wasmtime_pooling_allocation_config_linear_memory_keep_resident_set(
+        pc, (size_t)want->pool_keep_resident);
+    wasmtime_pooling_allocation_strategy_set(cfg, pc);
+    wasmtime_pooling_allocation_config_delete(pc);
+  }
+#else
+  if (want->pooling) {
+    wasm_config_delete(cfg);
+    *missing = "pooling allocator";
+    return NULL;
+  }
+#endif
   for (int i = 0; i < NPROPOSALS; i++) {
     if (!(want->set_mask & (1u << i))) continue;
     const char *m = apply_proposal(cfg, i, (want->val_mask >> i) & 1);
@@ -159,12 +239,20 @@ engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err) {
     return 0;
   }
 #endif
+  if (want.pooling && !pool_fits(&want)) {
+    pthread_mutex_unlock(&engines_mu);
+    *err = mk_error_s(env, "compile", "pool_too_large",
+                      "this host cannot reserve the address space for that many pooled instances "
+                      "(about 4 GB each): lower pooling instances");
+    return 0;
+  }
   const char *missing = NULL;
   wasm_config_t *cfg = make_config(&want, &missing);
   if (!cfg) {
     pthread_mutex_unlock(&engines_mu);
     char msg[96];
-    snprintf(msg, sizeof msg, "this build of erlang_wasmtime cannot set the %s proposal", missing);
+    snprintf(msg, sizeof msg, "this build of erlang_wasmtime has no %s%s", missing,
+             want.pooling && strcmp(missing, "pooling allocator") == 0 ? "" : " proposal");
     *err = mk_error_s(env, "compile", "unavailable", msg);
     return 0;
   }
@@ -178,7 +266,7 @@ engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err) {
   return e;
 }
 
-/* The key back as {Fuel, OptLevel, [{Proposal, Bool}]}. */
+/* The key back as {Fuel, OptLevel, [{Proposal, Bool}], Allocator}. */
 ERL_NIF_TERM key_term(ErlNifEnv *env, const engine_t *e) {
   static const char *const levels[3] = {"none", "speed", "speed_and_size"};
   ERL_NIF_TERM list = enif_make_list(env, 0);
@@ -189,8 +277,13 @@ ERL_NIF_TERM key_term(ErlNifEnv *env, const engine_t *e) {
                                                 (e->val_mask >> i) & 1 ? atom_true : atom_false),
                                list);
   }
-  return enif_make_tuple3(env, e->fuel ? atom_true : atom_false, mk_atom(env, levels[e->opt_level]),
-                          list);
+  ERL_NIF_TERM alloc = e->pooling ? enif_make_tuple4(env, mk_atom(env, "pooling"),
+                                                     enif_make_uint64(env, e->pool_instances),
+                                                     enif_make_uint64(env, e->pool_max_memory),
+                                                     enif_make_uint64(env, e->pool_keep_resident))
+                                  : mk_atom(env, "on_demand");
+  return enif_make_tuple4(env, e->fuel ? atom_true : atom_false, mk_atom(env, levels[e->opt_level]),
+                          list, alloc);
 }
 
 static pthread_t ticker;

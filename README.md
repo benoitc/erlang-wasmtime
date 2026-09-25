@@ -28,9 +28,14 @@ all come back as `{error, #{class => ..., kind => ..., message => ...}}`.
   memory cap unless you grant more. Each instance has its own store, memory and
   OS thread.
 - Interruption: `timeout` on a call, or `wasmtime:interrupt/1` from any process,
-  stops a running guest within 10 ms.
+  stops a running guest at once.
+- Pre-initialization: `preinit/3` captures a guest after its init exports ran;
+  with the pooling allocator each request gets a fresh CPython with its
+  interpreter started in about 0.2 ms, 1.6 ms for a whole request. See
+  [throughput](docs/throughput.md).
 - WASI preview 1 with explicit capabilities: `args`, `env`, preopened `dirs`,
-  and stdio redirected to files or inherited.
+  stdio redirected to files or inherited, and clocks restricted to the
+  monotonic one.
 - Linear memory access from Erlang while the guest is idle or inside a host call.
 - References as terms: `funcref`, `externref` (wrapping any Erlang term) and
   GC structs and arrays cross calls, host functions, globals and tables.
@@ -45,7 +50,7 @@ all come back as `{error, #{class => ..., kind => ..., message => ...}}`.
 ## Install
 
 ```erlang
-{deps, [{erlang_wasmtime, "0.1.1"}]}.
+{deps, [{erlang_wasmtime, "0.2.0"}]}.
 ```
 
 The first `rebar3 compile` downloads the pinned Wasmtime C API release for your
@@ -66,6 +71,8 @@ Requires OTP 27 or later.
 - [Streams](docs/streams.md): talk to a guest while it runs
 - [References](docs/references.md): funcref, externref and GC values as terms
 - [Precompiled modules](docs/precompiled.md): compile once, load in milliseconds
+- [Pre-initialization](docs/preinit.md): start the guest once, give every request a fresh copy
+- [Throughput](docs/throughput.md): what a pre-initialized CPython costs per request
 - [Building and shipping](docs/building.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Design](docs/design.md): how the NIF is put together, for contributors; see also [CONTRIBUTING.md](CONTRIBUTING.md)

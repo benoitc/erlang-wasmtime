@@ -12,11 +12,15 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Instantiate with host functions | yes, function imports only |
 | Call exports | yes, `i32`, `i64`, `f32`, `f64`, `v128` values |
 | Traps | reported with `class => trap` and a `kind` per Wasmtime trap code |
-| Interruption | `timeout` option and `interrupt/1`, epoch based, 10 ms granularity |
+| Interruption | `timeout` option and `interrupt/1`, epoch based: the epoch is bumped as they fire, so the guest stops at its next loop back-edge or call |
 | Memory cap | `memory_limit`, default 256 MB, enforced by the store limiter |
 | Table, element and instance caps | `max_tables`, `max_table_elements`, `max_instances` |
 | Memory access from Erlang | `read_memory/3,4`, `write_memory/3,4`, `memory_size/1,2`: the export named `memory` (or the first exported memory) by default, any exported memory by name |
-| Precompiled modules | `serialize/1` and `deserialize/1`, Wasmtime's `.cwasm` form; see [precompiled](precompiled.md) |
+| Precompiled modules | `serialize/1` and `deserialize/1`, Wasmtime's `.cwasm` form; `deserialize_file/1,2` maps the file; see [precompiled](precompiled.md) |
+| Pre-initialization | `preinit/3`: run init exports once, get a module starting in their state (memories, mutable globals); init calls as a list or a fun; `remove_exports`; see [preinit](preinit.md) |
+| Pooling allocator | `allocator => pooling` with `instances`, `max_memory`, `keep_resident`; copy-on-write memory images |
+| Explicit teardown | `destroy/1`: stops the instance and frees its store (and pool slot) before returning |
+| Text to binary | `wat2wasm/1` |
 | Host functions in a dedicated process | `host => Pid` at instantiate, `handle_host_call/2` in that process |
 | Non-blocking calls | `call_async/3` and `await/2,3` |
 | Fuel metering | `compile(Bin, #{fuel => true})`, `call/4` with `fuel`, `fuel_remaining/1`; `kind => out_of_fuel` |
@@ -29,7 +33,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Streams | `send/2`, `close/1`, `inbox_limit`; `stdin`/`stdout`/`stderr => stream` (a streamed stdout looks like a terminal to the guest, so lines leave as written); the `erlang.send` and `erlang.recv` imports; `{wasmtime_stream, Ref, Kind, Bytes}` to the `stream` process; see [streams](streams.md) |
 | Runtime-only builds | `WASMTIME_RUNTIME_ONLY=1`: no compiler, 4 MB; `features/0` reports the linked library's capabilities; see [building](building.md) |
 | Source build fallback | a platform without a prebuilt archive compiles the C API itself |
-| WASI preview 1 | args, env, preopened dirs with read or write, stdio to file or inherited |
+| WASI preview 1 | args, env, preopened dirs with read or write, stdio to file or inherited; `clocks => monotonic` refuses wall and CPU clocks with `ENOTSUP` |
 | Caller death | the abandoned call is interrupted, queued calls proceed |
 | Host function timeout | `host_timeout`, default 30 s |
 
@@ -72,6 +76,17 @@ feature is missing the runtime says so with an error; it does not approximate.
 | An `imports` entry for `erlang.send` or `erlang.recv` | `kind => reserved_import` |
 | `erlang.send` or `erlang.recv` imported with another type | `kind => unsupported_type` |
 | `stdin => stream` on a runtime-only build of a platform without a shim in `priv/shims` | `kind => unavailable` |
+| Pooling options out of range | `kind => badarg` |
+| A pool whose address space the host cannot reserve | `kind => pool_too_large` |
+| A module whose memory does not fit a pool slot | `class => compile` |
+| One instance more than the pool holds | `class => link` |
+| `allocator => pooling` on a build without the pooling allocator | `kind => unavailable` |
+| `preinit/3` on a module importing a memory, table or global | `class => preinit, kind => unsupported_import` |
+| `preinit/3` on GC types or a mutable reference global | `class => preinit, kind => unsupported_type` |
+| `preinit/3` on a shared memory, a component, or a reserved export name | `class => preinit, kind => unsupported` |
+| `preinit/3` when an init call changed a table | `class => preinit, kind => table_changed` |
+| `preinit/3` on bytes that are not a module | `class => preinit, kind => malformed` |
+| A call, or a ref of the instance, after `destroy/1` | `kind => stopped` |
 
 ## Deferred
 
@@ -79,14 +94,26 @@ feature is missing the runtime says so with an error; it does not approximate.
   can be read and written field by field; creating one needs a type handle
   the C API only gives for an existing value. Exception references
   (`exnref`) are not exposed.
-- **Thread pool.** Measured on an M-series Mac: 13,900 instantiate, call and
-  drop cycles per second from one process, 34,500 per second from eight, with
-  one OS thread per instance. That covers "thousands of short-lived instances
-  per second", so a pool is not planned unless a workload shows the thread
-  cost first. Each thread reserves a 4 MB stack.
-- **Fault isolation from Wasmtime itself.** A bug in Wasmtime would take the VM
-  down, like any NIF. A `mode => port` running the instance in a separate OS
-  process is the answer if that matters; same API, not built.
+- **Thread pool, or guests on the caller's dirty scheduler.** One OS thread
+  per instance: a pooled instantiate, call and destroy cycle runs 21,900
+  times a second from one process and 67,000 from fourteen on an M4 Pro, so
+  thread start-up is not what limits a request. What the second thread costs
+  is a host call's hand-off: 2.5 us when idle, about 45 us when 14 guests
+  and 14 schedulers share 14 cores. Running the guest on the calling
+  process's dirty scheduler through Wasmtime's async API would remove the
+  hand-off; it changes the execution model (streams, waits, interruption)
+  and is not planned until a workload needs it.
+- **Fault isolation from Wasmtime itself.** A panic in Wasmtime aborts the
+  process (the C API is built with `panic = abort`), and so does running out
+  of host memory inside it; [design](design.md), "What can still stop the
+  node", lists every case. A `mode => port` running instances in a separate
+  OS process would contain that, at the price of a pipe crossing on every
+  call and host call and of losing the whole port's instances on a crash
+  instead of the node. Not built: the inputs that reach Wasmtime are checked
+  first instead.
+- **Instruction scan in `preinit/3`.** Wizer refuses modules whose code
+  holds `data.drop` or `elem.drop`; `preinit/3` compares tables instead and
+  does not read code. See [preinit](preinit.md), "Notes".
 - **WASI preview 2 and components.** Not exposed.
 - **Spawning guest threads.** The threads proposal validates and shared
   memories can be declared, but nothing lets a guest start a thread: there is

@@ -44,6 +44,8 @@ WASMTIME_SOURCE_BUILD=1 rebar3 compile           # Build the C API from source
 escript scripts/precompile-fixtures.escript test/wasmtime_runtime_only_SUITE_data _build/cwasm
 WASMTIME_RUNTIME_ONLY=1 WASMTIME_CWASM_DIR=$PWD/_build/cwasm rebar3 ct   # runtime-only suite
 WASMTIME_NIF_SANITIZE=address rebar3 compile     # ASan build of the NIF
+WASI_SDK=/path scripts/build-py-reactor.sh       # CPython reactor for the bench, once
+scripts/bench-reactor.sh                         # pre-initialized CPython benchmark
 ```
 
 ## Architecture

@@ -26,6 +26,18 @@ ok = file:write_file("python.cwasm", Pre).
 The module behaves exactly like one from `compile/1`: same exports, same
 options, same instances.
 
+For a module instantiated often, load it from its file instead:
+
+```erlang
+{ok, Mod} = wasmtime:deserialize_file("python.cwasm").
+```
+
+Wasmtime maps the file rather than reading it, and each instance maps the
+module's initial memory from that mapping copy-on-write instead of copying
+it. On macOS this is the only way to get that; on Linux `deserialize/1`
+gets it through an anonymous file. The file must not change while the
+module is loaded. See [pre-initialization](preinit.md).
+
 ## Keep a cache
 
 ```erlang
@@ -62,6 +74,7 @@ compares that with the engine:
 | `fuel` | yes, exactly | load with `deserialize(Bin, #{fuel => true})` (`deserialize/1` tries it too) |
 | `opt_level` | no | loads on any engine, including runtime-only builds; the code keeps the level it was compiled at |
 | `proposals` | as a subset | a module compiled with proposals disabled loads on the defaults |
+| `allocator`, `pooling` | no | load onto a pooled engine with `deserialize_file(Path, #{allocator => pooling})` |
 
 `module_options/1` on the compile side tells you what to pass on the load
 side.

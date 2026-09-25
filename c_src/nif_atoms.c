@@ -15,7 +15,8 @@ ERL_NIF_TERM atom_ok, atom_error, atom_true, atom_false, atom_compiler, atom_wat
     atom_null, atom_i31, atom_externref, atom_funcref, atom_struct, atom_array, atom_anyref,
     atom_instance, atom_imports, atom_wasi, atom_memory_limit, atom_max_tables,
     atom_max_table_elements, atom_max_instances, atom_host_timeout, atom_host, atom_inbox_limit,
-    atom_shim, atom_args, atom_env, atom_dirs, atom_stdin, atom_output_limit;
+    atom_shim, atom_args, atom_env, atom_dirs, atom_stdin, atom_output_limit, atom_clocks,
+    atom_monotonic, atom_all;
 
 ERL_NIF_TERM mk_atom(ErlNifEnv *env, const char *s) {
   ERL_NIF_TERM a;

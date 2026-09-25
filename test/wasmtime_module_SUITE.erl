@@ -22,6 +22,11 @@
     proposals_precompiled_loads_on_defaults/1,
     module_options_roundtrip/1,
     bad_compile_options/1,
+    pooling_roundtrip/1,
+    pooling_limits/1,
+    bad_pooling_options/1,
+    pool_address_space/1,
+    deserialize_file/1,
     engine_cap/1,
     validate_module/1
 ]).
@@ -51,6 +56,11 @@ groups() ->
             proposals_precompiled_loads_on_defaults,
             module_options_roundtrip,
             bad_compile_options,
+            pooling_roundtrip,
+            pooling_limits,
+            bad_pooling_options,
+            pool_address_space,
+            deserialize_file,
             engine_cap
         ]},
         {validate, [parallel], [
@@ -236,7 +246,8 @@ module_options_roundtrip(_) ->
     Opts = #{
         fuel => true,
         opt_level => speed_and_size,
-        proposals => #{threads => false, memory64 => true}
+        proposals => #{threads => false, memory64 => true},
+        allocator => on_demand
     },
     {ok, Mod} = wasmtime:compile({wat, add_wat()}, Opts),
     Opts = wasmtime:module_options(Mod),
@@ -259,7 +270,93 @@ bad_compile_options(_) ->
     ?assertError({badmatch, false}, wasmtime:compile({wat, add_wat()}, #{fuel => 1})),
     ok.
 
+pooling_roundtrip(_) ->
+    Pool = wasmtime_test:pooling(),
+    {ok, Mod} = wasmtime:compile({wat, add_wat()}, Pool),
+    #{allocator := pooling, pooling := #{instances := 64, max_memory := Max, keep_resident := 0}} =
+        wasmtime:module_options(Mod),
+    64 bsl 20 = Max,
+    {ok, Inst} = wasmtime:instantiate(Mod),
+    {ok, [3]} = wasmtime:call(Inst, ~"add", [1, 2]),
+    %% the allocator is not part of a precompiled module: either engine loads it
+    {ok, Bin} = wasmtime:serialize(Mod),
+    {ok, Plain} = wasmtime:deserialize(Bin),
+    #{allocator := on_demand} = wasmtime:module_options(Plain),
+    {ok, Pooled} = wasmtime:deserialize(Bin, Pool),
+    #{allocator := pooling} = wasmtime:module_options(Pooled),
+    ok.
+
+pooling_limits(_) ->
+    %% a memory bigger than a slot is refused when compiled for the pool
+    {error, #{class := compile}} =
+        wasmtime:compile({wat, ~"(module (memory 2000))"}, wasmtime_test:pooling()),
+    %% a guest growing past the slot fails its grow, like past memory_limit
+    {ok, Mod} = wasmtime:compile(
+        {wat,
+            ~"(module (memory 1) (func (export \"grow\") (param i32) (result i32) local.get 0 memory.grow))"},
+        wasmtime_test:pooling()
+    ),
+    {ok, Inst} = wasmtime:instantiate(Mod, #{memory_limit => unlimited}),
+    {ok, [-1]} = wasmtime:call(Inst, ~"grow", [2000]),
+    {ok, [1]} = wasmtime:call(Inst, ~"grow", [1]),
+    %% the pool has 64 slots: the 65th live instance is refused
+    Live = [I || {ok, I} <- [wasmtime:instantiate(Mod) || _ <- lists:seq(1, 64)]],
+    {error, #{class := link}} = wasmtime:instantiate(Mod),
+    ?assert(length(Live) >= 62),
+    ok.
+
+bad_pooling_options(_) ->
+    Bad = fun(P) ->
+        {error, #{kind := badarg}} =
+            wasmtime:compile({wat, add_wat()}, #{allocator => pooling, pooling => P})
+    end,
+    Bad(#{instances => 0}),
+    Bad(#{instances => 10_001}),
+    Bad(#{max_memory => 1000}),
+    Bad(#{max_memory => 8 bsl 30}),
+    Bad(#{keep_resident => -1}),
+    Bad(#{max_memory => 1 bsl 20, keep_resident => 2 bsl 20}),
+    ?assertError({case_clause, _}, wasmtime:compile({wat, add_wat()}, #{allocator => arena})),
+    ok.
+
+%% A pool the host cannot reserve is an error, not an abort: a node limited
+%% to 64 GB of address space asks for 100 slots of about 4 GB each. Linux
+%% only; macOS has no `ulimit -v`.
+pool_address_space(_) ->
+    Asan = string:find(os:getenv("LD_PRELOAD", ""), "asan") =/= nomatch,
+    case os:type() of
+        {unix, linux} when Asan ->
+            {skip, "the ASan runtime cannot start under ulimit -v"};
+        {unix, linux} ->
+            Ebin = filename:dirname(code:which(wasmtime)),
+            Eval =
+                "io:format(\"~p\", [wasmtime:compile(<<0,\"asm\",1,0,0,0>>, "
+                "#{allocator => pooling, pooling => #{instances => 100}})]), halt().",
+            Out = os:cmd(
+                "ulimit -v 67108864 && erl -noshell -pa " ++ Ebin ++ " -eval '" ++ Eval ++ "' 2>&1"
+            ),
+            ?assertNotEqual(nomatch, string:find(Out, "pool_too_large"), Out);
+        _ ->
+            {skip, "needs ulimit -v"}
+    end.
+
+deserialize_file(Config) ->
+    {ok, Mod} = wasmtime:compile({wat, add_wat()}),
+    {ok, Bin} = wasmtime:serialize(Mod),
+    Path = filename:join(proplists:get_value(priv_dir, Config), "add.cwasm"),
+    ok = file:write_file(Path, Bin),
+    {ok, M1} = wasmtime:deserialize_file(Path),
+    {ok, M2} = wasmtime:deserialize_file(Path, wasmtime_test:pooling()),
+    [
+        {ok, [3]} = wasmtime:call(I, ~"add", [1, 2])
+     || M <- [M1, M2], {ok, I} <- [wasmtime:instantiate(M)]
+    ],
+    {error, #{class := compile}} = wasmtime:deserialize_file(Path ++ ".missing"),
+    ok.
+
 engine_cap(_) ->
+    %% the configurations later suites use exist before the cap is reached
+    {ok, _} = wasmtime:compile({wat, add_wat()}, wasmtime_test:pooling()),
     %% distinct proposal sets each get an engine; the cap is 32 per VM
     Results = [
         wasmtime:compile({wat, add_wat()}, #{

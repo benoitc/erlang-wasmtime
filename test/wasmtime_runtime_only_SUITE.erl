@@ -13,6 +13,7 @@
     wasi_by_features/1,
     deserialize_and_call/1,
     deserialize_garbage/1,
+    pooling_from_file/1,
     host_functions/1,
     memory_access/1,
     interrupt/1,
@@ -28,6 +29,7 @@ all() ->
         wasi_by_features,
         deserialize_and_call,
         deserialize_garbage,
+        pooling_from_file,
         host_functions,
         memory_access,
         interrupt,
@@ -94,6 +96,23 @@ deserialize_and_call(Config) ->
     {ok, Inst} = wasmtime:instantiate(Mod),
     {ok, [3]} = wasmtime:call(Inst, ~"add", [1, 2]),
     {error, #{class := trap, kind := unreachable}} = wasmtime:call(Inst, ~"boom", []),
+    ok.
+
+%% A pre-initialized module is deployed this way: precompiled, mapped from
+%% its file, instantiated from a pool and destroyed per request.
+pooling_from_file(Config) ->
+    Path = filename:join(?config(cwasm, Config), "basic.cwasm"),
+    Pool = #{allocator => pooling, pooling => #{instances => 16}},
+    {ok, Mod} = wasmtime:deserialize_file(Path, Pool),
+    #{allocator := pooling} = wasmtime:module_options(Mod),
+    [
+        begin
+            {ok, Inst} = wasmtime:instantiate(Mod),
+            {ok, [$h]} = wasmtime:call(Inst, ~"load", [0]),
+            ok = wasmtime:destroy(Inst)
+        end
+     || _ <- lists:seq(1, 50)
+    ],
     ok.
 
 deserialize_garbage(_) ->

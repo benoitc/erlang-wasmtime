@@ -4,6 +4,24 @@
  */
 #include "nif.h"
 
+/* wat2wasm(Text) -> {ok, Binary}. Dirty: a large text module takes a while. */
+static ERL_NIF_TERM nif_wat2wasm(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  (void)argc;
+  ErlNifBinary bin;
+  if (!enif_inspect_binary(env, argv[0], &bin)) return enif_make_badarg(env);
+#if !NIF_HAVE_WAT
+  return mk_error_s(env, "compile", "unavailable",
+                    "this build of erlang_wasmtime cannot read the text format");
+#else
+  wasm_byte_vec_t wasm;
+  wasmtime_error_t *e = wasmtime_wat2wasm((const char *)bin.data, bin.size, &wasm);
+  if (e) return error_to_term(env, e, "compile");
+  ERL_NIF_TERM t = mk_binary(env, wasm.data, wasm.size);
+  wasm_byte_vec_delete(&wasm);
+  return enif_make_tuple2(env, atom_ok, t);
+#endif
+}
+
 static ERL_NIF_TERM nif_compile(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   ErlNifBinary bin;
   if (!enif_inspect_binary(env, argv[0], &bin)) return enif_make_badarg(env);
@@ -86,32 +104,66 @@ static ERL_NIF_TERM nif_serialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM a
 #endif
 }
 
-/* deserialize(Binary) -> {ok, Module}. Wasmtime checks its own version and
- * the CPU features the code was compiled for, not the code itself: only
- * bytes that came from serialize/1 may be passed here. */
-static ERL_NIF_TERM nif_deserialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+/* The bytes of a serialized module, or the path of a file holding them.
+ * From a file, Wasmtime maps it and its memory images point into the
+ * mapping: that is what copy-on-write instantiation uses on every platform
+ * (docs/preinit.md). */
+typedef struct {
   ErlNifBinary bin;
-  if (!enif_inspect_binary(env, argv[0], &bin)) return enif_make_badarg(env);
+  char path[4096];
+  int is_file;
+} source_t;
+
+static int get_source(ErlNifEnv *env, ERL_NIF_TERM t, source_t *src) {
+  const ERL_NIF_TERM *tt;
+  int ar;
+  ErlNifBinary p;
+  src->is_file = 0;
+  if (enif_inspect_binary(env, t, &src->bin)) return 1;
+  if (!enif_get_tuple(env, t, &ar, &tt) || ar != 2 || !enif_is_identical(tt[0], atom_file) ||
+      !enif_inspect_binary(env, tt[1], &p) || p.size == 0 || p.size >= sizeof src->path ||
+      memchr(p.data, 0, p.size))
+    return 0;
+  memcpy(src->path, p.data, p.size);
+  src->path[p.size] = 0;
+  src->is_file = 1;
+  return 1;
+}
+
+static wasmtime_error_t *load_module(engine_t *eng, const source_t *src, wasmtime_module_t **mod) {
+  return src->is_file ? wasmtime_module_deserialize_file(eng->engine, src->path, mod)
+                      : wasmtime_module_deserialize(eng->engine, src->bin.data, src->bin.size, mod);
+}
+
+/* The engine key of compile_options() with nothing set. */
+ERL_NIF_TERM plain_key(ErlNifEnv *env, int fuel) {
+  return enif_make_tuple4(env, fuel ? atom_true : atom_false, mk_atom(env, "speed"),
+                          enif_make_list(env, 0), mk_atom(env, "on_demand"));
+}
+
+/* deserialize(Binary | {file, Path}, Key | undefined) -> {ok, Module}.
+ * Wasmtime checks its own version and the CPU features the code was
+ * compiled for, not the code itself: only bytes that came from
+ * serialize/1 may be passed here. */
+static ERL_NIF_TERM nif_deserialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  source_t src;
+  if (!get_source(env, argv[0], &src)) return enif_make_badarg(env);
   wasmtime_module_t *mod = NULL;
   ERL_NIF_TERM err;
   engine_t *eng;
   wasmtime_error_t *e;
   if (enif_is_identical(argv[1], atom_undefined)) {
     /* deserialize/1: the default engine, then the fuel engine */
-    ERL_NIF_TERM plain =
-        enif_make_tuple3(env, atom_false, mk_atom(env, "speed"), enif_make_list(env, 0));
-    eng = engine_for(env, plain, &err);
+    eng = engine_for(env, plain_key(env, 0), &err);
     if (!eng) return err;
-    e = wasmtime_module_deserialize(eng->engine, bin.data, bin.size, &mod);
+    e = load_module(eng, &src, &mod);
     if (e) {
-      ERL_NIF_TERM fuel =
-          enif_make_tuple3(env, atom_true, mk_atom(env, "speed"), enif_make_list(env, 0));
-      engine_t *feng = engine_for(env, fuel, &err);
+      engine_t *feng = engine_for(env, plain_key(env, 1), &err);
       if (!feng) {
         wasmtime_error_delete(e);
         return err;
       }
-      wasmtime_error_t *e2 = wasmtime_module_deserialize(feng->engine, bin.data, bin.size, &mod);
+      wasmtime_error_t *e2 = load_module(feng, &src, &mod);
       if (e2) {
         wasmtime_error_delete(e2);
         return error_to_term(env, e, "compile");
@@ -122,7 +174,7 @@ static ERL_NIF_TERM nif_deserialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM
   } else {
     eng = engine_for(env, argv[1], &err);
     if (!eng) return err;
-    e = wasmtime_module_deserialize(eng->engine, bin.data, bin.size, &mod);
+    e = load_module(eng, &src, &mod);
     if (e) return error_to_term(env, e, "compile");
   }
   module_res_t *m = enif_alloc_resource(module_type, sizeof *m);
@@ -226,6 +278,7 @@ static ERL_NIF_TERM nif_instantiate(ErlNifEnv *env, int argc, const ERL_NIF_TERM
   if (rc != 0) {
     pthread_mutex_lock(&inst->mu);
     inst->queue.stopping = 1;
+    inst->queue.exited = 1;
     pthread_mutex_unlock(&inst->mu);
     enif_release_resource(inst); /* the thread's reference, never taken */
     return mk_error_s(env, "link", "thread", "could not start instance thread");
@@ -610,6 +663,9 @@ static void open_atoms(ErlNifEnv *env) {
   A(atom_dirs, "dirs");
   A(atom_stdin, "stdin");
   A(atom_output_limit, "output_limit");
+  A(atom_clocks, "clocks");
+  A(atom_monotonic, "monotonic");
+  A(atom_all, "all");
 #undef A
 }
 
@@ -628,9 +684,7 @@ static int open_resources(ErlNifEnv *env) {
 /* The default engine exists from the start; others come on first use. */
 static int start_default_engine(ErlNifEnv *env) {
   ERL_NIF_TERM err;
-  ERL_NIF_TERM plain =
-      enif_make_tuple3(env, atom_false, mk_atom(env, "speed"), enif_make_list(env, 0));
-  return engine_for(env, plain, &err) != NULL;
+  return engine_for(env, plain_key(env, 0), &err) != NULL;
 }
 
 static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
@@ -648,6 +702,7 @@ static void unload(ErlNifEnv *env, void *priv) {
 
 static ErlNifFunc funcs[] = {
     {"compile", 3, nif_compile, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"wat2wasm", 1, nif_wat2wasm, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"validate", 2, nif_validate, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"module_options", 1, nif_module_options, 0},
     {"module_imports", 1, nif_module_imports, 0},
@@ -681,6 +736,10 @@ static ErlNifFunc funcs[] = {
     {"write_memory", 4, nif_write_memory, 0},
     {"memory_size", 2, nif_memory_size, 0},
     {"read_output", 1, nif_read_output, 0},
+    {"destroy", 2, nif_destroy, 0},
+    {"preinit_memory", 2, nif_preinit_memory, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"preinit_global", 2, nif_preinit_global, 0},
+    {"preinit_table", 2, nif_preinit_table, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"features", 0, nif_features, 0},
     {"version", 0, nif_version, 0},
 };

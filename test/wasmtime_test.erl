@@ -4,7 +4,7 @@
 -module(wasmtime_test).
 -include_lib("stdlib/include/assert.hrl").
 
--export([needs/2]).
+-export([needs/2, pooling/0]).
 -export([
     compile/1,
     instance/1, instance/2,
@@ -36,6 +36,12 @@ needs(Caps, Config) ->
         [] -> Config;
         Missing -> {skip, lists:flatten(io_lib:format("needs a build with ~p", [Missing]))}
     end.
+
+%% The one pooling configuration the suites use. engine_cap in
+%% wasmtime_module_SUITE fills the VM's 32 engines, so every configuration
+%% a later suite needs is created before it does.
+pooling() ->
+    #{allocator => pooling, pooling => #{instances => 64, max_memory => 64 bsl 20}}.
 
 compile(Wat) ->
     {ok, Mod} = wasmtime:compile({wat, Wat}),

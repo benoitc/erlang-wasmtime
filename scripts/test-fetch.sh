@@ -84,7 +84,8 @@ run "missing download falls back to source" 0 "/source-runtime\$" "not available
 
 # The archive exists but its checksum is wrong: an error, never a fallback.
 echo "0000000000000000000000000000000000000000000000000000000000000000  $FULL.tar.xz" > "$FAKE/scripts/wasmtime.sha256"
-run "checksum mismatch is fatal" 1 "^\$" "checksum mismatch" WASMTIME_RUNTIME_ONLY=
+run "checksum mismatch is fatal" 1 "^\$" "checksum mismatch" WASMTIME_RUNTIME_ONLY= \
+    WASMTIME_RELEASE_URL="file://$TMP/served"
 [ ! -f "$TMP/built-variant" ] || fail "checksum mismatch must not build"
 
 echo "1..$n"

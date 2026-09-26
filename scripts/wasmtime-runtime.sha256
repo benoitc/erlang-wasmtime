@@ -2,10 +2,10 @@
 # and published under this repository's releases (tag wasmtime-runtime-<version>).
 # One line per platform: <sha256>  wasmtime-runtime-<version>-<arch>-<os>.tar.xz
 # A platform without a line here builds the library from source.
-186d3a28e9159372471e3739bd60ec36e5eeec2eec0833783bd7a9c29adc9d46  wasmtime-runtime-v48.0.1-aarch64-linux.tar.xz
-8ea48835d75adc21520a89340e4e27cd3a8e01b4a6f64a230c7b05992bb0a218  wasmtime-runtime-v48.0.1-aarch64-macos.tar.xz
-cd0fa4f258e899310999390e0b9b34628ab327e9bc2c3cfd1da69ae962f9b856  wasmtime-runtime-v48.0.1-aarch64-musl.tar.xz
-7491483e430d9313c0d13cb7cbb7570a3b70c7c6fdc7fb3bb5e60f8970316aca  wasmtime-runtime-v48.0.1-x86_64-freebsd.tar.xz
-8cae73aaf52efd1fe3b931348b452cdbf1022288813b8fe5c20ba5e428acacdf  wasmtime-runtime-v48.0.1-x86_64-linux.tar.xz
-f1afb65aebec621da3511d091d2e98cddf1301ab8d1cbe5a1849acc4af8a3532  wasmtime-runtime-v48.0.1-x86_64-macos.tar.xz
-3fddf0f41e826fc594e5ee993722300313730e15b1f3c62110924e51d3336b97  wasmtime-runtime-v48.0.1-x86_64-musl.tar.xz
+8a6cf7f8e09dc85d3861e1736b257e24dc00d3860a20a2222135bbc98f389d58  wasmtime-runtime-v48.0.1-aarch64-linux.tar.xz
+070a38c53b4322da9fa32dbe00f4ea5d2e52f3944422c9f77776bd8f2a460a79  wasmtime-runtime-v48.0.1-aarch64-macos.tar.xz
+34b15de4086d1312c6e4f786e136e32da36effa0777cd872a925b1f311952afe  wasmtime-runtime-v48.0.1-aarch64-musl.tar.xz
+2518e2c3ccbe3bf7817b3fccb32c919a3f6d2acaadb64e2a5166924ceb4b29be  wasmtime-runtime-v48.0.1-x86_64-freebsd.tar.xz
+2cbcd9d93be983d4294a6a675e955bd29a12f1171a6a8ba24a1f05fcd03aaad4  wasmtime-runtime-v48.0.1-x86_64-linux.tar.xz
+ec12b2419755385b8d77cc0eb8e6d527e3c549d503877b751188bc29563e6d80  wasmtime-runtime-v48.0.1-x86_64-macos.tar.xz
+b2f7a0a9669624dea066da69e63d16d79f2d9e28b23a757aa39abbef093462bd  wasmtime-runtime-v48.0.1-x86_64-musl.tar.xz

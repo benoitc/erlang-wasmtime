@@ -70,7 +70,7 @@ run "explicit dir is used as is" 0 "^$TMP/served/$FULL\$" "" WASMTIME_C_API_DIR=
 run "explicit dir without headers is refused" 1 "^\$" "no include/wasmtime.h" WASMTIME_C_API_DIR="$TMP/nowhere"
 run "bad WASMTIME_RUNTIME_ONLY is refused" 1 "^\$" "must be 1 or unset" WASMTIME_RUNTIME_ONLY=maybe
 # The full archive is upstream's on macOS and this project's elsewhere.
-run "full archive is downloaded and verified" 0 "/cache/$VERSION/$FULL\$" "downloading" WASMTIME_RUNTIME_ONLY= \
+run "full archive is downloaded and verified" 0 "/cache/$VERSION-r[0-9]+/$FULL\$" "downloading" WASMTIME_RUNTIME_ONLY= \
     WASMTIME_RELEASE_URL="file://$TMP/served"
 [ ! -f "$TMP/built-variant" ] || fail "download case must not build"
 run "runtime without a checksum line builds from source" 0 "/source-runtime\$" "building from source" WASMTIME_RUNTIME_ONLY=1

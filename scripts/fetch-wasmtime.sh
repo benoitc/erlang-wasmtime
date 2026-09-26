@@ -15,7 +15,7 @@
 #
 # The archives (12-16 MB) are not in the hex package: hex caps tarballs at
 # 8 MB, so they are fetched once at compile time and cached under
-# _build/wasmtime/<version>/. Same approach as wasmtime-py's
+# _build/wasmtime/<version>-r<revision>/. Same approach as wasmtime-py's
 # ci/download-wasmtime.py, moved from publish time to build time.
 #
 # Variants:
@@ -36,10 +36,12 @@
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(tr -d '[:space:]' < "$ROOT/scripts/wasmtime.version")"
-CACHE="${WASMTIME_CACHE_DIR:-$ROOT/_build/wasmtime}/$VERSION"
 # Build revision of this repo's archives (scripts/wasmtime-runtime.rev; 1 when absent).
 REV=1
 [ -f "$ROOT/scripts/wasmtime-runtime.rev" ] && REV="$(tr -d '[:space:]' < "$ROOT/scripts/wasmtime-runtime.rev")"
+# Keyed by revision too: a new revision carries a new recipe (patches), and
+# an archive of the old one must not be picked up from the cache.
+CACHE="${WASMTIME_CACHE_DIR:-$ROOT/_build/wasmtime}/$VERSION-r$REV"
 RELEASE_URL="${WASMTIME_RELEASE_URL:-https://github.com/benoitc/erlang-wasmtime/releases/download/wasmtime-runtime-$VERSION-r$REV}"
 UPSTREAM_URL="${WASMTIME_UPSTREAM_URL:-https://github.com/bytecodealliance/wasmtime/releases/download/$VERSION}"
 BUILD_SCRIPT="${WASMTIME_BUILD_SCRIPT:-$ROOT/scripts/build-wasmtime.sh}"

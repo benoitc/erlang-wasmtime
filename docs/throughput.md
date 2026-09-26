@@ -24,7 +24,9 @@ runner.
 
 Apple M4 Pro (10 performance and 4 efficiency cores), macOS 27, OTP 29,
 Wasmtime 48.0.1, one caller, 1000 requests. Measured on a working machine
-(load average about 20), so tails are wider than on an idle one.
+(load average about 20), so tails are wider than on an idle one. These runs
+predate the shared linker, which later took instantiation from 0.17 ms to
+0.07 ms on the same machine; the other phases did not change.
 
 | Phase | p50 | p90 | p99 |
 |---|---|---|---|

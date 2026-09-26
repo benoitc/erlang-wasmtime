@@ -58,6 +58,7 @@ jobs:
       - name: Diagnose destroy (temporary)
         run: |
           sudo apt-get install -y strace >/dev/null
+          rebar3 compile >/dev/null
           uname -r
           grep -i pagemap /proc/self/status || true
           mkdir -p _build/diag

@@ -67,17 +67,17 @@ returns; without it the slot is held until the handle is garbage collected.
 
 ## What it costs
 
-hornbeam's CPython 3.14 reactor, Apple M4 Pro, macOS, one caller
+hornbeam's CPython 3.14 reactor, one caller, p50
 (`scripts/bench-reactor.sh`, full tables in [throughput](throughput.md)):
 
-| Step | Time |
-|---|---|
-| `preinit/3` (`_initialize`, `init`, one `handle`) | 580 ms, once |
-| compile the 50 MB result | 390 ms, once |
-| `deserialize_file/2` | 1.6 ms, at start |
-| instantiate | 0.14 ms |
-| `handle`: json work and one `hornbeam.call` | 1.20 ms |
-| destroy | 0.07 ms |
+| Step | Apple M4 Pro, macOS | AMD EPYC 7763 vCPU, Linux |
+|---|---|---|
+| `preinit/3` (`_initialize`, `init`, one `handle`) | 580 ms, once | 2.8 s, once |
+| compile the 50 MB result | 390 ms, once | 2.4 s, once |
+| `deserialize_file/2` | 1.6 ms, at start | 0.7 ms, at start |
+| instantiate | 0.07 ms | 0.10 ms |
+| `handle`: json work and one `hornbeam.call` | 1.20 ms | 1.88 ms |
+| destroy | 0.07 ms | 0.21 ms |
 
 A fresh instance with CPython started in it, without pre-initialization:
 124 ms.
@@ -87,8 +87,9 @@ A fresh instance with CPython started in it, without pre-initialization:
 The snapshot becomes the module's data segments. Wasmtime turns them into
 one memory image and maps it into each instance copy-on-write: pages the
 guest only reads stay shared, a page it writes is copied on first write.
-Resident memory per live instance is what it wrote, about 4 MB for a CPython
-request, not the 40 MB heap.
+Resident memory per live instance is what it wrote, 1 MB (Linux, 4 KB
+pages) to 4 MB (macOS, 16 KB pages) for a CPython request, not the 40 MB
+heap.
 
 Where the image comes from decides whether it is mapped or copied:
 
@@ -103,17 +104,27 @@ What a freed slot costs its next user differs too:
 
 | | Linux | macOS |
 |---|---|---|
-| slot reset | written pages restored from the image in place, up to `keep_resident` bytes; the rest released | slot remapped to zeros |
-| next instance | pages restored in place are already resident: no faults for them | image mapped again: the pages the guest touches fault in again |
+| slot reset | the pages the guest wrote are restored from the image in place, up to `keep_resident` bytes; pages it only read stay mapped | slot remapped to zeros |
+| next instance | nothing to fault in again: 40 faults per CPython request instead of 400 | image mapped again: the pages the guest touches fault in again |
 
-On Linux 6.7 and later Wasmtime finds the written pages with the
-`PAGEMAP_SCAN` ioctl, so `keep_resident` can cover the whole image (64 MB
-for CPython) and a reset costs only what the request wrote. On older kernels
-it restores all `keep_resident` bytes at every reset: keep it at 0 there,
-or a few MB. On macOS every request pays the page faults
-of what it touches, which is why `handle` takes 1.2 ms there against 0.6 ms
-on a fully copied heap. The total is still lower, and the faults grow the
-kernel's share of the time as concurrency rises.
+The Linux reset finds the written pages with the `PAGEMAP_SCAN` ioctl
+(Linux 6.7 and later). Wasmtime leaves that off and its C API cannot turn
+it on, and its scan gave up after 32 dirty regions; the archives this
+project builds for Linux carry both fixes (`scripts/wasmtime-patches`).
+Measured on the same runner, CPython request total at p50:
+
+| Slot reset | total |
+|---|---|
+| `keep_resident => 0`: everything released, every page faults again | 3.64 ms |
+| 64 MB, Wasmtime's own archive: all 64 MB restored at each reset | 3.90 ms |
+| 64 MB, this project's archive: only written pages restored | 2.19 ms |
+
+So on Linux set `keep_resident` to the size of the image (64 MB for
+CPython). With a Wasmtime from elsewhere (`WASMTIME_C_API_DIR`), or on a
+kernel older than 6.7, the reset copies all `keep_resident` bytes: use 0
+there. On macOS every request pays the page faults of what it touches,
+which is why `handle` takes 1.2 ms there against 0.6 ms on a fully copied
+heap; the total is still lower.
 
 `preinit/3` lays the snapshot out so the image is built at all: Wasmtime
 only maps an image whose data covers at least half the span it initializes

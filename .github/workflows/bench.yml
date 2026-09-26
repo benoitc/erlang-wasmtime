@@ -55,22 +55,6 @@ jobs:
       - name: Build the reactor
         if: steps.reactor.outputs.cache-hit != 'true'
         run: scripts/build-py-reactor.sh
-      - name: Diagnose destroy (temporary)
-        run: |
-          sudo apt-get install -y strace >/dev/null
-          rebar3 compile >/dev/null
-          uname -r
-          grep -i pagemap /proc/self/status || true
-          mkdir -p _build/diag
-          erlc -o _build/diag bench/diag/destroy_diag.erl
-          R="$PWD/_build/py-reactor/dist"
-          E="erl -noshell -pa _build/default/lib/erlang_wasmtime/ebin -pa _build/diag"
-          $E -eval "destroy_diag:main([\"$R\", \"/tmp/d1\", \"all\"]), halt()."
-          echo "--- syscalls, pooled CPython only"
-          strace -f -c -o /tmp/strace.txt $E -eval "destroy_diag:main([\"$R\", \"/tmp/d2\", \"pool\"]), halt()." || true
-          head -30 /tmp/strace.txt
-          echo "--- faults"
-          /usr/bin/time -v $E -eval "destroy_diag:main([\"$R\", \"/tmp/d3\", \"pool\"]), halt()." 2>&1 | grep -E "us \(p50|faults|Elapsed"
       - name: Run the benchmark
         run: |
           uname -a

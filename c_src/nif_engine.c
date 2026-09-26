@@ -337,6 +337,27 @@ wasmtime_module_t *engine_shim(engine_t *e, ErlNifEnv *env, ERL_NIF_TERM shim, c
   return e->shim;
 }
 
+/* A linker holding only Wasmtime's WASI, once per engine. The instances'
+ * own linkers shadow some WASI functions; this one is where the originals
+ * are found (take_real_wasi). */
+wasmtime_linker_t *engine_wasi_linker(engine_t *e) {
+  pthread_mutex_lock(&engines_mu);
+  if (!e->wasi) {
+    wasmtime_linker_t *l = wasmtime_linker_new(e->engine);
+#if NIF_HAVE_WASI
+    wasmtime_error_t *err = wasmtime_linker_define_wasi(l);
+    if (err) {
+      wasmtime_error_delete(err);
+      wasmtime_linker_delete(l);
+      l = NULL;
+    }
+#endif
+    e->wasi = l;
+  }
+  pthread_mutex_unlock(&engines_mu);
+  return e->wasi;
+}
+
 static void *ticker_main(void *arg) {
   struct timespec ts = {0, EPOCH_TICK_NS};
   while (!__atomic_load_n(&ticker_stop, __ATOMIC_ACQUIRE)) {
@@ -367,6 +388,7 @@ void engines_free_all(void) {
     engine_t *e = engines_head;
     engines_head = e->next;
     if (e->shim) wasmtime_module_delete(e->shim);
+    if (e->wasi) wasmtime_linker_delete(e->wasi);
     wasm_engine_delete(e->engine);
     enif_free(e);
   }

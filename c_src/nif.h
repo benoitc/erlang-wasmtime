@@ -128,9 +128,15 @@ typedef struct {
   int refs, v128, exn;
 } shape_t;
 struct engine_entry;
+struct linker_entry;
 typedef struct {
   wasmtime_module_t *mod;
   struct engine_entry *engine; /* the engine it was compiled or loaded with */
+  /* Linkers built for this module, one per distinct import and WASI shape
+   * (nif_instantiate.c), freed with the module. */
+  pthread_mutex_t mu;
+  struct linker_entry *linkers;
+  int nlinkers;
 } module_res_t;
 enum req_kind { REQ_INSTANTIATE, REQ_CALL };
 typedef struct req {
@@ -149,11 +155,20 @@ typedef struct {
   wasm_functype_t *type;
   int typed; /* references in the signature: the checked callback serves it */
 } hostfn_t;
-struct instance;
-typedef struct {
-  struct instance *inst;
-  size_t idx;
-} hostfn_env_t;
+/* A linker and its InstancePre for one module and one shape of imports and
+ * WASI (key). Nothing in it refers to a store or an instance: callbacks
+ * find their instance through the store's data (caller_inst) and a host
+ * function's env is its index in `hostfns`. Shared by every instance with
+ * that shape, read-only once built. */
+typedef struct linker_entry {
+  ErlNifEnv *key_env;
+  ERL_NIF_TERM key;
+  wasmtime_linker_t *linker;
+  wasmtime_instance_pre_t *pre;
+  hostfn_t *hostfns;
+  size_t nhostfns;
+  struct linker_entry *next;
+} linker_entry_t;
 enum state { ST_IDLE, ST_RUNNING, ST_IN_HOST };
 typedef struct chunk {
   unsigned char *data;
@@ -229,21 +244,24 @@ typedef struct instance {
 
   /* The Wasmtime objects. Worker thread while running, mu holder otherwise. */
   struct {
-    wasmtime_store_t *store;
+    wasmtime_store_t *store; /* its data is this instance: caller_inst */
     wasmtime_context_t *ctx;
-    wasmtime_linker_t *linker;
     wasmtime_instance_t instance;
     int instantiated;
     module_res_t *mod;
     int has_memory;
     wasmtime_memory_t memory;
-    hostfn_t *hostfns;
-    size_t nhostfns;
+    linker_entry_t *entry; /* the module's, or this instance's own */
+    int owns_entry;        /* the module's cache was full */
   } wasm;
 } instance_t;
 typedef struct {
   instance_t *inst;
 } handle_t;
+/* The instance a callback runs for: every store's data is its instance. */
+static inline instance_t *caller_inst(wasmtime_caller_t *caller) {
+  return (instance_t *)wasmtime_context_get_data(wasmtime_caller_context(caller));
+}
 /* A reference the guest handed out, as an Erlang term. externref and anyref
  * are owned GC roots (wasmtime_*_unroot takes no context and only drops a
  * liveness Arc, so the destructor may run on any thread, even after the
@@ -280,6 +298,7 @@ typedef struct engine_entry {
   uint32_t pool_instances;
   ErlNifUInt64 pool_max_memory, pool_keep_resident;
   wasmtime_module_t *shim; /* the stdin stream forwarder, compiled on first use */
+  wasmtime_linker_t *wasi; /* WASI alone: where Wasmtime's own fd_read is found */
   struct engine_entry *next;
 } engine_t;
 
@@ -346,14 +365,18 @@ wasm_trap_t *host_callback_typed(void *envp, wasmtime_caller_t *caller, const wa
 void inbox_drop_head(instance_t *inst);
 wasm_trap_t *fd_read_cb(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
                         size_t nvals);
-ERL_NIF_TERM shadow_wasi(instance_t *inst, ErlNifEnv *out);
-ERL_NIF_TERM restrict_clocks(instance_t *inst, ErlNifEnv *out);
+ERL_NIF_TERM shadow_wasi(wasmtime_linker_t *linker, int stdin_stream, int tty_mask, ErlNifEnv *out);
+ERL_NIF_TERM restrict_clocks(wasmtime_linker_t *linker, ErlNifEnv *out);
+ERL_NIF_TERM take_real_wasi(instance_t *inst, ErlNifEnv *out);
+wasmtime_linker_t *engine_wasi_linker(engine_t *e);
+module_res_t *module_res_new(wasmtime_module_t *mod, engine_t *eng);
+void linker_entry_free(linker_entry_t *e);
 ERL_NIF_TERM nif_preinit_memory(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]);
 ERL_NIF_TERM nif_preinit_global(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]);
 ERL_NIF_TERM nif_preinit_table(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]);
 ERL_NIF_TERM link_wasi_shim(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM shim_bytes,
                             ErlNifEnv *out);
-ERL_NIF_TERM define_erlang_imports(instance_t *inst, ErlNifEnv *out,
+ERL_NIF_TERM define_erlang_imports(wasmtime_linker_t *linker, ErlNifEnv *out,
                                    const wasm_importtype_vec_t *imports);
 ptrdiff_t capture_write(void *envp, const unsigned char *data, size_t len);
 ptrdiff_t stream_write(void *envp, const unsigned char *data, size_t len);

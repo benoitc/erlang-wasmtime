@@ -4,6 +4,15 @@
  */
 #include "nif.h"
 
+module_res_t *module_res_new(wasmtime_module_t *mod, engine_t *eng) {
+  module_res_t *m = enif_alloc_resource(module_type, sizeof *m);
+  memset(m, 0, sizeof *m);
+  m->mod = mod;
+  m->engine = eng;
+  pthread_mutex_init(&m->mu, NULL);
+  return m;
+}
+
 /* wat2wasm(Text) -> {ok, Binary}. Dirty: a large text module takes a while. */
 static ERL_NIF_TERM nif_wat2wasm(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   (void)argc;
@@ -55,9 +64,7 @@ static ERL_NIF_TERM nif_compile(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
   wasmtime_error_t *e = wasmtime_module_new(eng->engine, data, size, &mod);
   if (is_wat) wasm_byte_vec_delete(&wasm);
   if (e) return error_to_term(env, e, "compile");
-  module_res_t *m = enif_alloc_resource(module_type, sizeof *m);
-  m->mod = mod;
-  m->engine = eng;
+  module_res_t *m = module_res_new(mod, eng);
   ERL_NIF_TERM t = enif_make_resource(env, m);
   enif_release_resource(m);
   return enif_make_tuple2(env, atom_ok, t);
@@ -177,9 +184,7 @@ static ERL_NIF_TERM nif_deserialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM
     e = load_module(eng, &src, &mod);
     if (e) return error_to_term(env, e, "compile");
   }
-  module_res_t *m = enif_alloc_resource(module_type, sizeof *m);
-  m->mod = mod;
-  m->engine = eng;
+  module_res_t *m = module_res_new(mod, eng);
   ERL_NIF_TERM t = enif_make_resource(env, m);
   enif_release_resource(m);
   return enif_make_tuple2(env, atom_ok, t);

@@ -64,7 +64,8 @@ static void stream_send(instance_t *inst, ERL_NIF_TERM kind, const unsigned char
 /* erlang.send(ptr: i32, len: i32): one message to the stream process */
 static wasm_trap_t *erlang_send_cb(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
                                    size_t nvals) {
-  instance_t *inst = envp;
+  (void)envp;
+  instance_t *inst = caller_inst(caller);
   unsigned char *base;
   size_t size;
   uint32_t ptr = (uint32_t)vals[0].i32, len = (uint32_t)vals[1].i32;
@@ -79,7 +80,8 @@ static wasm_trap_t *erlang_send_cb(void *envp, wasmtime_caller_t *caller, wasmti
  * drained; -2 - Needed when cap is too small (the message stays queued). */
 static wasm_trap_t *erlang_recv_cb(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
                                    size_t nvals) {
-  instance_t *inst = envp;
+  (void)envp;
+  instance_t *inst = caller_inst(caller);
   unsigned char *base;
   size_t size;
   uint32_t ptr = (uint32_t)vals[0].i32, cap = (uint32_t)vals[1].i32;
@@ -117,7 +119,8 @@ static wasm_trap_t *forward(instance_t *inst, wasmtime_caller_t *caller, wasmtim
 
 wasm_trap_t *fd_read_cb(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
                         size_t nvals) {
-  instance_t *inst = envp;
+  (void)envp;
+  instance_t *inst = caller_inst(caller);
   if (vals[0].i32 != 0) return forward(inst, caller, &inst->inbox.shim_fd_read, vals, 4);
   unsigned char *base;
   size_t size;
@@ -203,7 +206,8 @@ static wasm_trap_t *forward(instance_t *inst, wasmtime_caller_t *caller, wasmtim
 #define WASI_RIGHT_FD_TELL (1ull << 5)
 static wasm_trap_t *fd_fdstat_cb(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
                                  size_t nvals) {
-  instance_t *inst = envp;
+  (void)envp;
+  instance_t *inst = caller_inst(caller);
   int32_t fd = vals[0].i32;
   uint32_t buf = (uint32_t)vals[1].i32;
   wasm_trap_t *trap = forward(inst, caller, &inst->inbox.shim_fdstat, vals, 2);
@@ -235,39 +239,54 @@ static wasm_functype_t *i32_functype(size_t nparams) {
 }
 
 /* Puts `cb` in front of Wasmtime's `name`. */
-static ERL_NIF_TERM shadow_one(instance_t *inst, ErlNifEnv *out, const char *name, size_t nparams,
-                               wasmtime_func_unchecked_callback_t cb) {
+static ERL_NIF_TERM shadow_one(wasmtime_linker_t *linker, ErlNifEnv *out, const char *name,
+                               size_t nparams, wasmtime_func_unchecked_callback_t cb) {
   wasm_functype_t *ft = i32_functype(nparams);
-  wasmtime_linker_allow_shadowing(inst->wasm.linker, true);
+  wasmtime_linker_allow_shadowing(linker, true);
   wasmtime_error_t *e = wasmtime_linker_define_func_unchecked(
-      inst->wasm.linker, "wasi_snapshot_preview1", 22, name, strlen(name), ft, cb, inst, NULL);
-  wasmtime_linker_allow_shadowing(inst->wasm.linker, false);
+      linker, "wasi_snapshot_preview1", 22, name, strlen(name), ft, cb, NULL, NULL);
+  wasmtime_linker_allow_shadowing(linker, false);
   wasm_functype_delete(ft);
   return e ? error_to_term(out, e, "wasi") : 0;
 }
 #endif
 
 /* Put the runtime's fd_read (stdin => stream) and fd_fdstat_get (a
- * `stream` stdout or stderr) in front of Wasmtime's own. Called after the
- * WASI definitions are in the linker; both originals are kept for the
- * shim whichever is shadowed. */
-ERL_NIF_TERM shadow_wasi(instance_t *inst, ErlNifEnv *out) {
+ * `stream` stdout or stderr) in front of Wasmtime's own, in a linker that
+ * already has the WASI definitions. */
+ERL_NIF_TERM shadow_wasi(wasmtime_linker_t *linker, int stdin_stream, int tty_mask,
+                         ErlNifEnv *out) {
 #if NIF_HAVE_WASI
+  ERL_NIF_TERM err = 0;
+  if (stdin_stream) err = shadow_one(linker, out, "fd_read", 4, fd_read_cb);
+  if (!err && tty_mask) err = shadow_one(linker, out, "fd_fdstat_get", 2, fd_fdstat_cb);
+  return err;
+#else
+  (void)linker, (void)stdin_stream, (void)tty_mask;
+  return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
+#endif
+}
+
+/* Wasmtime's own fd_read and fd_fdstat_get in this store, for the shim to
+ * forward to whichever is shadowed: taken from the engine's WASI-only
+ * linker, since the instance's linker has them shadowed. */
+ERL_NIF_TERM take_real_wasi(instance_t *inst, ErlNifEnv *out) {
+#if NIF_HAVE_WASI
+  wasmtime_linker_t *wl = engine_wasi_linker(inst->wasm.mod->engine);
   wasmtime_extern_t ext;
   const char *names[2] = {"fd_read", "fd_fdstat_get"};
   wasmtime_func_t *reals[2] = {&inst->inbox.real_fd_read, &inst->inbox.real_fdstat};
   for (int i = 0; i < 2; i++) {
-    if (!wasmtime_linker_get(inst->wasm.linker, inst->wasm.ctx, "wasi_snapshot_preview1", 22,
-                             names[i], strlen(names[i]), &ext) ||
+    if (!wl ||
+        !wasmtime_linker_get(wl, inst->wasm.ctx, "wasi_snapshot_preview1", 22, names[i],
+                             strlen(names[i]), &ext) ||
         ext.kind != WASMTIME_EXTERN_FUNC)
-      return mk_error_s(out, "wasi", "config", "the WASI function to shadow is not in the linker");
+      return mk_error_s(out, "wasi", "config", "the WASI function to forward to is missing");
     *reals[i] = ext.of.func;
   }
-  ERL_NIF_TERM err = 0;
-  if (inst->inbox.stdin) err = shadow_one(inst, out, "fd_read", 4, fd_read_cb);
-  if (!err && inst->inbox.tty_mask) err = shadow_one(inst, out, "fd_fdstat_get", 2, fd_fdstat_cb);
-  return err;
+  return 0;
 #else
+  (void)inst;
   return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
 #endif
 }
@@ -322,7 +341,7 @@ static int functype_is(const wasm_functype_t *ft, size_t np, size_t nr) {
   return 1;
 }
 
-ERL_NIF_TERM define_erlang_imports(instance_t *inst, ErlNifEnv *out,
+ERL_NIF_TERM define_erlang_imports(wasmtime_linker_t *linker, ErlNifEnv *out,
                                    const wasm_importtype_vec_t *imports) {
   for (size_t i = 0; i < imports->size; i++) {
     const wasm_name_t *m = wasm_importtype_module(imports->data[i]);
@@ -339,8 +358,8 @@ ERL_NIF_TERM define_erlang_imports(instance_t *inst, ErlNifEnv *out,
                         is_send ? "erlang.send must be a function (i32 i32)"
                                 : "erlang.recv must be a function (i32 i32) -> i32");
     wasmtime_error_t *e = wasmtime_linker_define_func_unchecked(
-        inst->wasm.linker, "erlang", 6, is_send ? "send" : "recv", 4, ft,
-        is_send ? erlang_send_cb : erlang_recv_cb, inst, NULL);
+        linker, "erlang", 6, is_send ? "send" : "recv", 4, ft,
+        is_send ? erlang_send_cb : erlang_recv_cb, NULL, NULL);
     if (e) return error_to_term(out, e, "link");
   }
   return 0;

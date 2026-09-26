@@ -47,10 +47,18 @@ pool(Keep) ->
 
 run(Name, M, Opts) ->
     [cycle(M, Opts) || _ <- lists:seq(1, 50)],
+    F0 = minflt(),
     Ts = [cycle(M, Opts) || _ <- lists:seq(1, 400)],
+    Faults = (minflt() - F0) div 400,
     P = fun(L) -> lists:nth(200, lists:sort(L)) end,
-    io:format("~-26s instantiate ~5w  handle ~5w  destroy ~5w us (p50)~n",
-        [Name, P([A || {A, _, _} <- Ts]), P([B || {_, B, _} <- Ts]), P([C || {_, _, C} <- Ts])]).
+    io:format("~-26s instantiate ~5w  handle ~5w  destroy ~5w us (p50), ~w faults/request~n",
+        [Name, P([A || {A, _, _} <- Ts]), P([B || {_, B, _} <- Ts]), P([C || {_, _, C} <- Ts]), Faults]).
+
+%% Minor faults of the whole process, field 10 of /proc/self/stat.
+minflt() ->
+    {ok, Stat} = file:read_file("/proc/self/stat"),
+    [_, Rest] = binary:split(Stat, ~") "),
+    list_to_integer(binary_to_list(lists:nth(8, binary:split(Rest, ~" ", [global])))).
 
 cycle(M, Opts) ->
     T0 = erlang:monotonic_time(microsecond),

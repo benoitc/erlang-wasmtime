@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Wasmtime archives revision 4: every archive carries Wasmtime's `LICENSE`
+  and `PATCHES.md` with the patches applied; the runtime-only library adds
+  the component model (4.2 MB on macOS arm64, from 2.5 MB).
 - `clocks => monotonic`: a refused clock answers `ENOTCAPABLE` (76) instead
   of `ENOTSUP` (58), the errno erlang_wasm uses.
 

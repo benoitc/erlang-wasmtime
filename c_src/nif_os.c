@@ -3,6 +3,10 @@
  * hides MAP_ANON and mkdtemp on macOS and FreeBSD, and this file needs
  * nothing else from it.
  */
+/* glibc under -std=c11 declares mkdtemp, O_CLOEXEC and MAP_ANON only with
+ * this; macOS and FreeBSD declare them by default. */
+#define _DEFAULT_SOURCE
+
 #include <fcntl.h>
 #include <stddef.h>
 #include <stdint.h>

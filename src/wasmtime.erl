@@ -228,7 +228,7 @@ WASI configuration. Nothing is granted by default.
   never sees a short write, `read_output/1` reports what was dropped.
 - `clocks`: `all` (the default) or `monotonic`. With `monotonic` the guest
   reads the host's monotonic clock and every other clock (wall time,
-  process and thread CPU time) answers `ENOTSUP`, so it cannot learn the
+  process and thread CPU time) answers `ENOTCAPABLE`, so it cannot learn the
   date or time of day.
 """.
 -type wasi_options() :: #{

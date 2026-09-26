@@ -359,11 +359,11 @@ wasi_clocks_all(_) ->
 
 wasi_clocks_monotonic(_) ->
     Inst = instance(clock_wat(), #{wasi => #{clocks => monotonic}}),
-    ENOTSUP = 58,
+    ENOTCAPABLE = 76,
     EFAULT = 21,
     %% wall time and CPU time are refused, the value slot is left alone
-    [{ok, [ENOTSUP, 0]} = wasmtime:call(Inst, ~"time", [Id]) || Id <- [0, 2, 3, 99]],
-    [{ok, [ENOTSUP, 0]} = wasmtime:call(Inst, ~"res", [Id]) || Id <- [0, 2, 3]],
+    [{ok, [ENOTCAPABLE, 0]} = wasmtime:call(Inst, ~"time", [Id]) || Id <- [0, 2, 3, 99]],
+    [{ok, [ENOTCAPABLE, 0]} = wasmtime:call(Inst, ~"res", [Id]) || Id <- [0, 2, 3]],
     {ok, [0, T1]} = wasmtime:call(Inst, ~"time", [1]),
     {ok, [0, T2]} = wasmtime:call(Inst, ~"time", [1]),
     ?assert(T2 >= T1),

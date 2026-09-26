@@ -2,7 +2,8 @@
  * nif_clock.c: `clocks => monotonic`. WASI's clock_time_get and
  * clock_res_get are put in front of Wasmtime's own: the monotonic clock is
  * the host's, every other clock (wall time, process and thread CPU time)
- * answers ENOTSUP. Wasmtime's C API has no setting for this.
+ * answers ENOTCAPABLE, as erlang_wasm's does. Wasmtime's C API has no
+ * setting for this.
  */
 #include "nif.h"
 
@@ -10,7 +11,7 @@
 /* WASI preview 1 clock ids and errno values. */
 #define WASI_CLOCK_MONOTONIC 1
 #define WASI_ERRNO_FAULT 21
-#define WASI_ERRNO_NOTSUP 58
+#define WASI_ERRNO_NOTCAPABLE 76
 
 /* Writes `v` little-endian at `ptr` of the caller's memory; 0 when it does
  * not fit or the caller exports no memory. */
@@ -45,7 +46,7 @@ static wasm_trap_t *time_get_cb(void *envp, wasmtime_caller_t *caller, wasmtime_
   (void)nvals;
   int32_t id = vals[0].i32;
   uint32_t out = (uint32_t)vals[2].i32;
-  vals[0].i32 = id != WASI_CLOCK_MONOTONIC            ? WASI_ERRNO_NOTSUP
+  vals[0].i32 = id != WASI_CLOCK_MONOTONIC            ? WASI_ERRNO_NOTCAPABLE
                 : put_u64(caller, out, read_clock(0)) ? 0
                                                       : WASI_ERRNO_FAULT;
   return NULL;
@@ -58,7 +59,7 @@ static wasm_trap_t *res_get_cb(void *envp, wasmtime_caller_t *caller, wasmtime_v
   (void)nvals;
   int32_t id = vals[0].i32;
   uint32_t out = (uint32_t)vals[1].i32;
-  vals[0].i32 = id != WASI_CLOCK_MONOTONIC            ? WASI_ERRNO_NOTSUP
+  vals[0].i32 = id != WASI_CLOCK_MONOTONIC            ? WASI_ERRNO_NOTCAPABLE
                 : put_u64(caller, out, read_clock(1)) ? 0
                                                       : WASI_ERRNO_FAULT;
   return NULL;

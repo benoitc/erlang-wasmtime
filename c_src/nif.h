@@ -130,7 +130,10 @@ typedef struct {
 struct engine_entry;
 struct linker_entry;
 typedef struct {
-  wasmtime_module_t *mod;
+  wasmtime_module_t *mod; /* NULL for a component */
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  wasmtime_component_t *comp; /* NULL for a core module */
+#endif
   struct engine_entry *engine; /* the engine it was compiled or loaded with */
   /* Linkers built for this module, one per distinct import and WASI shape
    * (nif_instantiate.c), freed with the module. */
@@ -163,8 +166,11 @@ typedef struct {
 typedef struct linker_entry {
   ErlNifEnv *key_env;
   ERL_NIF_TERM key;
-  wasmtime_linker_t *linker;
+  wasmtime_linker_t *linker; /* core modules */
   wasmtime_instance_pre_t *pre;
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  wasmtime_component_linker_t *clinker; /* components: no InstancePre in the C API */
+#endif
   hostfn_t *hostfns;
   size_t nhostfns;
   struct linker_entry *next;
@@ -243,6 +249,7 @@ typedef struct instance {
    * without it. */
   volatile int interrupt;
   int interrupted_fired; /* worker only: the interrupt flag ended the request */
+  int clock_refused;     /* worker only: the guest read a clock `clocks` refuses */
 
   /* The Wasmtime objects. Worker thread while running, mu holder otherwise. */
   struct {
@@ -255,6 +262,15 @@ typedef struct instance {
     wasmtime_memory_t memory;
     linker_entry_t *entry; /* the module's, or this instance's own */
     int owns_entry;        /* the module's cache was full */
+    int component;         /* a component instance: cinst, not instance */
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+    wasmtime_component_instance_t cinst;
+    /* Resources the guest handed out, as integer handles: handle N is
+     * res[N - 1]. A slot is NULL once dropped. Owned: deleted with the
+     * store. */
+    wasmtime_component_resource_any_t **res;
+    uint32_t nres, capres;
+#endif
   } wasm;
 } instance_t;
 typedef struct {
@@ -325,6 +341,8 @@ ERL_NIF_TERM error_to_term(ErlNifEnv *env, wasmtime_error_t *err, const char *cl
 void vtype_of(const wasm_valtype_t *vt, vtype_t *t);
 uint8_t kind_of(const wasm_valtype_t *vt);
 shape_t shape_of(const wasm_functype_t *ft);
+ERL_NIF_TERM double_to_term(ErlNifEnv *env, double d);
+int term_to_double(ErlNifEnv *env, ERL_NIF_TERM t, double *d);
 ERL_NIF_TERM raw_to_term(ErlNifEnv *env, uint8_t kind, const wasmtime_val_raw_t *v);
 int term_to_raw(ErlNifEnv *env, ERL_NIF_TERM t, uint8_t kind, wasmtime_val_raw_t *v);
 ERL_NIF_TERM val_to_term(ErlNifEnv *env, instance_t *inst, wasmtime_val_t *v);
@@ -337,6 +355,25 @@ engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err);
 ERL_NIF_TERM key_term(ErlNifEnv *env, const engine_t *e);
 ERL_NIF_TERM plain_key(ErlNifEnv *env, int fuel);
 int pool_fits(unsigned instances);
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+/* nif_cvalues.c */
+const char *term_to_cval(ErlNifEnv *env, instance_t *inst, ERL_NIF_TERM t,
+                         const wasmtime_component_valtype_t *ty, wasmtime_component_val_t *out);
+ERL_NIF_TERM cval_to_term(ErlNifEnv *env, instance_t *inst, const wasmtime_component_val_t *v,
+                          const wasmtime_component_valtype_t *ty);
+void resources_free(instance_t *inst);
+/* nif_component.c */
+ERL_NIF_TERM component_instantiate(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM imports, int wasi,
+                                   int monotonic, ErlNifEnv *out);
+ERL_NIF_TERM component_call(instance_t *inst, req_t *req, ErlNifEnv *out);
+ERL_NIF_TERM component_items(ErlNifEnv *env, module_res_t *m, int exports);
+wasmtime_error_t *component_host_callback(void *envp, wasmtime_context_t *ctx,
+                                          const wasmtime_component_func_type_t *ty,
+                                          wasmtime_component_val_t *args, size_t nargs,
+                                          wasmtime_component_val_t *results, size_t nresults);
+#endif
+int is_component_binary(const uint8_t *data, size_t size);
+void cvalues_init(ErlNifEnv *env);
 int private_fifo(char *path, size_t len, int *writer);
 void private_fifo_remove(char *path);
 wasmtime_module_t *engine_shim(engine_t *e, ErlNifEnv *env, ERL_NIF_TERM shim, const char **why);
@@ -362,6 +399,10 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out);
 ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out);
 ERL_NIF_TERM outcome(instance_t *inst, ErlNifEnv *out, wasmtime_error_t *e, wasm_trap_t *trap,
                      const char *cls);
+enum host_status { HOST_OK, HOST_INTERRUPTED, HOST_FAILED };
+enum host_status host_exchange(instance_t *inst, hostfn_t *fn, ErlNifEnv *menv, ERL_NIF_TERM args,
+                               ERL_NIF_TERM *results, const char **fail);
+wasm_trap_t *host_outcome(instance_t *inst, enum host_status st, const char *fail);
 wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
                            size_t nvals);
 wasm_trap_t *host_callback_typed(void *envp, wasmtime_caller_t *caller, const wasmtime_val_t *args,

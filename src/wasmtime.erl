@@ -23,6 +23,7 @@ on an instance at a time; concurrent callers are queued.
     wat2wasm/1,
     validate/1, validate/2,
     module_options/1,
+    module_kind/1,
     imports/1,
     exports/1,
     serialize/1,
@@ -36,6 +37,9 @@ on an instance at a time; concurrent callers are queued.
     await/2, await/3,
     interrupt/1,
     destroy/1,
+    drop_resource/2, drop_resource/3,
+    import_fun/2,
+    run/1, run/2,
     read_output/1,
     global_get/2,
     global_set/3,
@@ -92,7 +96,8 @@ on an instance at a time; concurrent callers are queued.
 -record(instance, {
     handle :: reference(),
     ref :: reference(),
-    imports :: #{{binary(), binary()} => host_fun()}
+    imports :: #{{binary(), binary()} => host_fun()},
+    kind = module :: module | component
 }).
 
 -opaque module_ref() :: reference().
@@ -148,9 +153,12 @@ innermost first.
 -doc """
 What the linked Wasmtime library can do. A runtime-only build has no
 `compiler` (`compile/1` and `serialize/1` answer `kind => unavailable`) and
-may have no `wat` or `wasi`. See building.md, "Runtime-only builds".
+may have no `wat` or `wasi`; `components` says whether it can load
+components. See building.md, "Runtime-only builds".
 """.
--type features() :: #{compiler := boolean(), wat := boolean(), wasi := boolean()}.
+-type features() :: #{
+    compiler := boolean(), wat := boolean(), wasi := boolean(), components := boolean()
+}.
 
 -doc """
 Options for `compile/2`, `validate/2` and `deserialize/2`.
@@ -210,8 +218,15 @@ one Wasmtime engine, created on first use and kept; at most 32 exist per VM.
     | gc
     | exceptions.
 
--doc "A host function. Returns the results the guest expects, or `{error, Reason}` which traps the guest.".
--type host_fun() :: fun((instance(), [value()]) -> {ok, [value()]} | {error, term()}).
+-doc """
+A host function. Returns the results the guest expects, or `{error, Reason}`
+which traps the guest. For a component import it may also take the argument
+list alone and return the value itself, erlang_wasm's typed form
+(`import_fun/2`); an exception then traps the guest.
+""".
+-type host_fun() ::
+    fun((instance(), [value() | term()]) -> {ok, [value() | term()]} | {error, term()})
+    | fun(([term()]) -> term()).
 
 -doc """
 WASI configuration. Nothing is granted by default.
@@ -298,6 +313,15 @@ validate(Bin) -> validate(Bin, #{}).
 -spec validate(binary(), compile_options()) -> ok | error().
 validate(Bin, Opts) when is_binary(Bin) ->
     with_key(Opts, fun(Key) -> wasmtime_nif:validate(Bin, Key) end).
+
+-doc """
+Whether a compiled module is a core module or a component.
+
+`compile/1,2` and `deserialize/1,2` take both and tell them apart by the
+binary; see [components](components.md).
+""".
+-spec module_kind(module_ref()) -> module | component.
+module_kind(Mod) -> wasmtime_nif:module_kind(Mod).
 
 -doc "The `t:compile_options/0` a module was compiled or deserialized with.".
 -spec module_options(module_ref()) -> compile_options().
@@ -506,6 +530,72 @@ memories, tables or globals or declare GC types. See
     {ok, binary()} | error().
 preinit(Wasm, Opts, Init) -> wasmtime_preinit:run(Wasm, Opts, Init).
 
+-doc """
+Drop a resource handle a component instance handed out, running the guest's
+destructor for a resource the guest defines.
+
+The handle is gone afterwards; using it again is `kind => badarg`.
+`destroy/1` drops every handle an instance still holds. See
+[components](components.md).
+""".
+-spec drop_resource(instance(), non_neg_integer()) -> ok | error().
+drop_resource(#instance{handle = H} = Inst, Handle) when is_integer(Handle) ->
+    Id = erlang:unique_integer([positive, monotonic]),
+    case wasmtime_nif:call(H, {drop, Handle}, [], Id, undefined) of
+        enqueued ->
+            case wait_result(Inst, Id, infinity) of
+                {ok, _} -> ok;
+                {error, _} = Error -> Error
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+-doc """
+erlang_wasm's `drop_resource/3`: the destructor's export name is not needed
+here, Wasmtime knows it from the handle.
+""".
+-spec drop_resource(instance(), iodata(), non_neg_integer()) -> ok | error().
+drop_resource(Inst, _DtorName, Handle) -> drop_resource(Inst, Handle).
+
+-doc """
+A host function in erlang_wasm's typed form, for a component import.
+
+`Fun` takes the list of arguments and returns the result as a term, or
+`undefined` for a function without result; an exception traps the guest.
+The signature is read from the component, so `Sig` is accepted for
+compatibility and not needed.
+""".
+-spec import_fun(term(), fun(([term()]) -> term())) -> fun(([term()]) -> term()).
+import_fun(_Sig, Fun) when is_function(Fun, 1) -> Fun.
+
+-doc #{equiv => run(Inst, #{})}.
+-spec run(instance()) -> ok | error().
+run(Inst) -> run(Inst, #{}).
+
+-doc """
+Run a WASI 0.2 command component: call its `wasi:cli/run` export.
+
+Returns `ok` when the program ends normally. `run` answering its error
+case, or `exit` with a non-zero status, is `{error, #{class := exit,
+status := Status}}`, as for a preview 1 program. `Opts` are `call/4`'s.
+""".
+-spec run(instance(), #{timeout => timeout(), fuel => non_neg_integer()}) -> ok | error().
+run(Inst, Opts) ->
+    case call(Inst, ~"wasi:cli/run#run", [], Opts) of
+        {ok, {ok, _}} ->
+            ok;
+        %% exit(0)
+        {ok, undefined} ->
+            ok;
+        {ok, {error, _}} ->
+            {error, #{
+                class => exit, kind => exit, status => 1, message => ~"run returned an error"
+            }};
+        {error, _} = Error ->
+            Error
+    end.
+
 -doc false.
 -spec handle(instance()) -> reference().
 handle(#instance{handle = H}) -> H.
@@ -555,7 +645,9 @@ instantiate(Mod, Opts) when is_map(Opts) ->
     Id = erlang:unique_integer([positive, monotonic]),
     case wasmtime_nif:instantiate(Mod, nif_options(Mod, Imports, Opts), Ref, Id) of
         {ok, Handle} ->
-            Inst = #instance{handle = Handle, ref = Ref, imports = Imports},
+            Inst = #instance{
+                handle = Handle, ref = Ref, imports = Imports, kind = module_kind(Mod)
+            },
             case wait_result(Inst, Id, infinity) of
                 ok -> {ok, Inst};
                 {error, _} = Error -> Error
@@ -690,11 +782,17 @@ bin(L) -> unicode:characters_to_binary(L).
 %% -------------------------------------------------------------------- calls
 
 -doc #{equiv => call(Inst, Name, Args, #{})}.
--spec call(instance(), iodata(), [value()]) -> {ok, [value()]} | error().
+-spec call(instance(), iodata(), [value() | term()]) -> {ok, [value()] | term()} | error().
 call(Inst, Name, Args) -> call(Inst, Name, Args, #{}).
 
 -doc """
 Call an exported function and wait for its results.
+
+A core module answers `{ok, Results}`, a list. A component answers
+`{ok, Value}`, one term (`undefined` without result), and names an export
+inside an interface `Interface#Function`; see [components](components.md).
+erlang_wasm's `call(Inst, Export, {Params, Result}, Args)` is accepted for
+components, the signature being read from the component.
 
 Host functions the guest calls run in this process, so it must be able to
 receive messages until the call returns. With `timeout` the guest is
@@ -707,8 +805,13 @@ been compiled with `fuel => true`.
 this process is inside one of its own host functions; `host_timeout` (an
 instantiate option) is what bounds the guest there.
 """.
--spec call(instance(), iodata(), [value()], #{timeout => timeout(), fuel => non_neg_integer()}) ->
-    {ok, [value()]} | error().
+-spec call
+    (instance(), iodata(), [value() | term()], #{timeout => timeout(), fuel => non_neg_integer()}) ->
+        {ok, [value()] | term()} | error();
+    (instance(), iodata(), {term(), term()}, [term()]) -> {ok, term()} | error().
+call(Inst, Name, {_Params, _Result}, Args) when is_list(Args) ->
+    %% erlang_wasm's form: the signature is read from the component instead
+    call(Inst, Name, Args, #{});
 call(Inst, Name, Args, Opts) when is_list(Args), is_map(Opts) ->
     do_call(Inst, iolist_to_binary(Name), Args, Opts).
 
@@ -855,9 +958,24 @@ settle(#instance{handle = H, ref = Ref} = Inst, Id) ->
     after 0 -> ok
     end.
 
-run_host(Imports, Key, Inst, Args) ->
-    try (maps:get(Key, Imports))(Inst, Args) of
-        {ok, Results} when is_list(Results) -> {ok, Results};
+%% A host fun answers {ok, [Results]} or {error, Reason}, for a core import
+%% and for a component import alike (zero or one result there), as in
+%% erlang_wasm. A component import may also be an arity-1 fun, erlang_wasm's
+%% typed form (import_fun/2): it returns the value bare and raises to trap.
+%% The NIF reads {ok, Results} for a core import and {ok, Value} for a
+%% component one.
+run_host(Imports, Key, #instance{kind = Kind} = Inst, Args) ->
+    Fun = maps:get(Key, Imports),
+    try
+        case {Kind, erlang:fun_info(Fun, arity)} of
+            {component, {arity, 1}} -> {typed, Fun(Args)};
+            _ -> Fun(Inst, Args)
+        end
+    of
+        {typed, Value} -> {ok, Value};
+        {ok, [Value]} when Kind =:= component -> {ok, Value};
+        {ok, []} when Kind =:= component -> {ok, undefined};
+        {ok, Results} when Kind =:= module, is_list(Results) -> {ok, Results};
         {error, Reason} -> {error, format_reason(Reason)};
         Other -> {error, format_reason({bad_return, Other})}
     catch

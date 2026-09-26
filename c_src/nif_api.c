@@ -61,10 +61,31 @@ static ERL_NIF_TERM nif_compile(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
     return err;
   }
   wasmtime_module_t *mod = NULL;
-  wasmtime_error_t *e = wasmtime_module_new(eng->engine, data, size, &mod);
+  wasmtime_error_t *e;
+  module_res_t *m;
+  if (is_component_binary(data, size)) {
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+    wasmtime_component_t *comp = NULL;
+    e = wasmtime_component_new(eng->engine, data, size, &comp);
+    if (is_wat) wasm_byte_vec_delete(&wasm);
+    if (e) return error_to_term(env, e, "compile");
+    m = module_res_new(NULL, eng);
+    m->comp = comp;
+    goto made;
+#else
+    if (is_wat) wasm_byte_vec_delete(&wasm);
+    return mk_error_s(env, "compile", "unavailable",
+                      "this build of erlang_wasmtime has no component model");
+#endif
+  }
+  e = wasmtime_module_new(eng->engine, data, size, &mod);
   if (is_wat) wasm_byte_vec_delete(&wasm);
   if (e) return error_to_term(env, e, "compile");
-  module_res_t *m = module_res_new(mod, eng);
+  m = module_res_new(mod, eng);
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+made:
+#endif
+    ;
   ERL_NIF_TERM t = enif_make_resource(env, m);
   enif_release_resource(m);
   return enif_make_tuple2(env, atom_ok, t);
@@ -88,7 +109,16 @@ static ERL_NIF_TERM nif_validate(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
   ERL_NIF_TERM err;
   engine_t *eng = engine_for(env, argv[1], &err);
   if (!eng) return err;
-  wasmtime_error_t *e = wasmtime_module_validate(eng->engine, bin.data, bin.size);
+  wasmtime_error_t *e;
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  if (is_component_binary(bin.data, bin.size)) {
+    /* no validate-only entry point for components: compile and drop */
+    wasmtime_component_t *comp = NULL;
+    e = wasmtime_component_new(eng->engine, bin.data, bin.size, &comp);
+    if (comp) wasmtime_component_delete(comp);
+  } else
+#endif
+    e = wasmtime_module_validate(eng->engine, bin.data, bin.size);
   if (e) return error_to_term(env, e, "compile");
   return atom_ok;
 #endif
@@ -103,7 +133,13 @@ static ERL_NIF_TERM nif_serialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM a
                     "this build of erlang_wasmtime cannot serialize modules");
 #else
   wasm_byte_vec_t out;
-  wasmtime_error_t *e = wasmtime_module_serialize(m->mod, &out);
+  wasmtime_error_t *e;
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  if (m->comp)
+    e = wasmtime_component_serialize(m->comp, &out);
+  else
+#endif
+    e = wasmtime_module_serialize(m->mod, &out);
   if (e) return error_to_term(env, e, "compile");
   ERL_NIF_TERM t = mk_binary(env, out.data, out.size);
   wasm_byte_vec_delete(&out);
@@ -137,9 +173,35 @@ static int get_source(ErlNifEnv *env, ERL_NIF_TERM t, source_t *src) {
   return 1;
 }
 
-static wasmtime_error_t *load_module(engine_t *eng, const source_t *src, wasmtime_module_t **mod) {
-  return src->is_file ? wasmtime_module_deserialize_file(eng->engine, src->path, mod)
-                      : wasmtime_module_deserialize(eng->engine, src->bin.data, src->bin.size, mod);
+/* A .cwasm does not say whether it holds a module or a component: try the
+ * module, then the component, and keep the module's error. */
+typedef struct {
+  wasmtime_module_t *mod;
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  wasmtime_component_t *comp;
+#endif
+} loaded_t;
+
+static wasmtime_error_t *load_module(engine_t *eng, const source_t *src, loaded_t *l) {
+  memset(l, 0, sizeof *l);
+  wasmtime_error_t *e =
+      src->is_file
+          ? wasmtime_module_deserialize_file(eng->engine, src->path, &l->mod)
+          : wasmtime_module_deserialize(eng->engine, src->bin.data, src->bin.size, &l->mod);
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  if (e) {
+    wasmtime_error_t *ce =
+        src->is_file
+            ? wasmtime_component_deserialize_file(eng->engine, src->path, &l->comp)
+            : wasmtime_component_deserialize(eng->engine, src->bin.data, src->bin.size, &l->comp);
+    if (!ce) {
+      wasmtime_error_delete(e);
+      return NULL;
+    }
+    wasmtime_error_delete(ce);
+  }
+#endif
+  return e;
 }
 
 /* The engine key of compile_options() with nothing set. */
@@ -155,7 +217,7 @@ ERL_NIF_TERM plain_key(ErlNifEnv *env, int fuel) {
 static ERL_NIF_TERM nif_deserialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   source_t src;
   if (!get_source(env, argv[0], &src)) return enif_make_badarg(env);
-  wasmtime_module_t *mod = NULL;
+  loaded_t mod;
   ERL_NIF_TERM err;
   engine_t *eng;
   wasmtime_error_t *e;
@@ -184,7 +246,10 @@ static ERL_NIF_TERM nif_deserialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM
     e = load_module(eng, &src, &mod);
     if (e) return error_to_term(env, e, "compile");
   }
-  module_res_t *m = module_res_new(mod, eng);
+  module_res_t *m = module_res_new(mod.mod, eng);
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  m->comp = mod.comp;
+#endif
   ERL_NIF_TERM t = enif_make_resource(env, m);
   enif_release_resource(m);
   return enif_make_tuple2(env, atom_ok, t);
@@ -200,9 +265,20 @@ static ERL_NIF_TERM extern_kind_atom(wasm_externkind_t k) {
   }
 }
 
+/* module_kind(Module) -> module | component */
+static ERL_NIF_TERM nif_module_kind(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  (void)argc;
+  module_res_t *m;
+  if (!enif_get_resource(env, argv[0], module_type, (void **)&m)) return enif_make_badarg(env);
+  return mk_atom(env, m->mod ? "module" : "component");
+}
+
 static ERL_NIF_TERM nif_module_imports(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   module_res_t *m;
   if (!enif_get_resource(env, argv[0], module_type, (void **)&m)) return enif_make_badarg(env);
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  if (m->comp) return component_items(env, m, 0);
+#endif
   wasm_importtype_vec_t v;
   wasmtime_module_imports(m->mod, &v);
   ERL_NIF_TERM list = enif_make_list(env, 0);
@@ -223,6 +299,9 @@ static ERL_NIF_TERM nif_module_imports(ErlNifEnv *env, int argc, const ERL_NIF_T
 static ERL_NIF_TERM nif_module_exports(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   module_res_t *m;
   if (!enif_get_resource(env, argv[0], module_type, (void **)&m)) return enif_make_badarg(env);
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  if (m->comp) return component_items(env, m, 1);
+#endif
   wasm_exporttype_vec_t v;
   wasmtime_module_exports(m->mod, &v);
   ERL_NIF_TERM list = enif_make_list(env, 0);
@@ -588,12 +667,17 @@ static ERL_NIF_TERM nif_read_output(ErlNifEnv *env, int argc, const ERL_NIF_TERM
 
 /* features() -> #{compiler => bool, wat => bool, wasi => bool} */
 static ERL_NIF_TERM nif_features(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
-  ERL_NIF_TERM keys[3] = {atom_compiler, atom_wat, atom_wasi};
-  ERL_NIF_TERM vals[3] = {NIF_HAVE_COMPILER ? atom_true : atom_false,
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  ERL_NIF_TERM components = atom_true;
+#else
+  ERL_NIF_TERM components = atom_false;
+#endif
+  ERL_NIF_TERM keys[4] = {atom_compiler, atom_wat, atom_wasi, mk_atom(env, "components")};
+  ERL_NIF_TERM vals[4] = {NIF_HAVE_COMPILER ? atom_true : atom_false,
                           NIF_HAVE_WAT ? atom_true : atom_false,
-                          NIF_HAVE_WASI ? atom_true : atom_false};
+                          NIF_HAVE_WASI ? atom_true : atom_false, components};
   ERL_NIF_TERM map;
-  enif_make_map_from_arrays(env, keys, vals, 3, &map);
+  enif_make_map_from_arrays(env, keys, vals, 4, &map);
   return map;
 }
 
@@ -695,6 +779,7 @@ static int start_default_engine(ErlNifEnv *env) {
 
 static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
   open_atoms(env);
+  cvalues_init(env);
   if (!open_resources(env)) return -1;
   if (!start_default_engine(env)) return -1;
   if (!ticker_start()) return -1;
@@ -711,6 +796,7 @@ static ErlNifFunc funcs[] = {
     {"wat2wasm", 1, nif_wat2wasm, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"validate", 2, nif_validate, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"module_options", 1, nif_module_options, 0},
+    {"module_kind", 1, nif_module_kind, 0},
     {"module_imports", 1, nif_module_imports, 0},
     {"module_exports", 1, nif_module_exports, 0},
     {"serialize", 1, nif_serialize, ERL_NIF_DIRTY_JOB_CPU_BOUND},

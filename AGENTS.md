@@ -46,6 +46,7 @@ WASMTIME_RUNTIME_ONLY=1 WASMTIME_CWASM_DIR=$PWD/_build/cwasm rebar3 ct   # runti
 WASMTIME_NIF_SANITIZE=address rebar3 compile     # ASan build of the NIF
 WASI_SDK=/path scripts/build-py-reactor.sh       # CPython reactor for the bench, once
 scripts/bench-reactor.sh                         # pre-initialized CPython benchmark
+scripts/build-component-fixtures.sh              # rebuild test components from source (wasm32-wasip2)
 ```
 
 ## Architecture

@@ -33,6 +33,8 @@ all come back as `{error, #{class => ..., kind => ..., message => ...}}`.
   with the pooling allocator each request gets a fresh CPython with its
   interpreter started in about 0.1 ms, 1.2 ms for a whole request on an M4. See
   [throughput](docs/throughput.md).
+- Components and WASI 0.2: typed WIT values as Erlang terms, with the same
+  mapping as erlang_wasm.
 - WASI preview 1 with explicit capabilities: `args`, `env`, preopened `dirs`,
   stdio redirected to files or inherited, and clocks restricted to the
   monotonic one.
@@ -71,6 +73,7 @@ Requires OTP 27 or later.
 - [Streams](docs/streams.md): talk to a guest while it runs
 - [References](docs/references.md): funcref, externref and GC values as terms
 - [Precompiled modules](docs/precompiled.md): compile once, load in milliseconds
+- [Components](docs/components.md): WIT values as terms, imports, resources, WASI 0.2
 - [Pre-initialization](docs/preinit.md): start the guest once, give every request a fresh copy
 - [Throughput](docs/throughput.md): what a pre-initialized CPython costs per request
 - [Building and shipping](docs/building.md)

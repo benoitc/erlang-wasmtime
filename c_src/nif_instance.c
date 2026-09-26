@@ -58,6 +58,7 @@ void *worker_main(void *arg) {
     inst->queue.state = ST_RUNNING;
     inst->host.abort = 0;
     inst->interrupted_fired = 0;
+    inst->clock_refused = 0;
     inst->host.failed = 0;
     __atomic_store_n(&inst->interrupt, 0, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&inst->mu);
@@ -103,6 +104,9 @@ void *worker_main(void *arg) {
     inst->wasm.store = NULL;
     inst->wasm.ctx = NULL;
   }
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  if (destroy) resources_free(inst);
+#endif
   pthread_mutex_unlock(&inst->mu);
   if (store) wasmtime_store_delete(store);
   if (destroy) {
@@ -125,6 +129,9 @@ void module_dtor(ErlNifEnv *env, void *obj) {
     linker_entry_free(le);
   }
   if (m->mod) wasmtime_module_delete(m->mod);
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  if (m->comp) wasmtime_component_delete(m->comp);
+#endif
   pthread_mutex_destroy(&m->mu);
 }
 
@@ -139,6 +146,9 @@ void instance_dtor(ErlNifEnv *env, void *obj) {
   }
   if (inst->queue.destroy) req_free(inst->queue.destroy);
   if (inst->inbox.pipe_w >= 0) close(inst->inbox.pipe_w); /* the pump never started */
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  resources_free(inst);
+#endif
   if (inst->wasm.store) wasmtime_store_delete(inst->wasm.store);
   if (inst->wasm.owns_entry) linker_entry_free(inst->wasm.entry);
   if (inst->host.reply_env) enif_free_env(inst->host.reply_env);
@@ -283,6 +293,10 @@ ERL_NIF_TERM with_export(ErlNifEnv *env, ERL_NIF_TERM handle, ERL_NIF_TERM name,
     pthread_mutex_unlock(&inst->mu);
     return mk_error_s(env, what, "busy", "guest is running");
   }
+  if (inst->wasm.component) {
+    pthread_mutex_unlock(&inst->mu);
+    return mk_error_s(env, what, "component", "a component instance has no core exports");
+  }
   if (!inst->wasm.instantiated ||
       !wasmtime_instance_export_get(inst->wasm.ctx, &inst->wasm.instance, (const char *)nm.data,
                                     nm.size, ext) ||
@@ -327,7 +341,7 @@ ERL_NIF_TERM with_memory(ErlNifEnv *env, ERL_NIF_TERM handle, ERL_NIF_TERM name,
     pthread_mutex_unlock(&inst->mu);
     return mk_error_s(env, "memory", "busy", "guest is running");
   }
-  if (!inst->wasm.instantiated) {
+  if (!inst->wasm.instantiated || inst->wasm.component) {
     pthread_mutex_unlock(&inst->mu);
     return mk_error_s(env, "memory", "no_memory", "instance exports no memory");
   }

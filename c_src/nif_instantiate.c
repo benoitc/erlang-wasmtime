@@ -368,10 +368,13 @@ void linker_entry_free(linker_entry_t *le) {
   if (!le) return;
   if (le->pre) wasmtime_instance_pre_delete(le->pre);
   if (le->linker) wasmtime_linker_delete(le->linker);
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  if (le->clinker) wasmtime_component_linker_delete(le->clinker);
+#endif
   for (size_t i = 0; i < le->nhostfns; i++) {
     enif_free(le->hostfns[i].module);
     enif_free(le->hostfns[i].name);
-    wasm_functype_delete(le->hostfns[i].type);
+    if (le->hostfns[i].type) wasm_functype_delete(le->hostfns[i].type);
   }
   enif_free(le->hostfns);
   if (le->key_env) enif_free_env(le->key_env);
@@ -486,6 +489,17 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
   configure_store(inst, &o);
   int monotonic = 0, wasi = !enif_is_identical(o.wasi, atom_none);
   if ((err = configure_wasi(inst, env, out, o.wasi, &monotonic))) return err;
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  if (inst->wasm.mod->comp) {
+    /* WASI 0.2 reads the same context; the preview 1 stdout terminal rule
+     * has no counterpart there (docs/design.md, "Streams") */
+    inst->wasm.component = 1;
+    if ((err = component_instantiate(inst, env, o.imports, wasi, monotonic, out))) return err;
+    stdin_pump_start(inst);
+    inst->wasm.instantiated = 1;
+    return atom_ok;
+  }
+#endif
   if ((err = link_entry(inst, env, o.imports, wasi, monotonic, out))) return err;
   if ((err = instantiate_module(inst, out))) return err;
   cache_memory(inst);

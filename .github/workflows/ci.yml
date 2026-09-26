@@ -22,7 +22,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: _build/wasmtime
-          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version') }}
+          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version', 'scripts/wasmtime-runtime.rev', 'scripts/wasmtime-patches/*') }}
       - name: Install clang-format and shellcheck
         run: sudo apt-get update && sudo apt-get install -y clang-format shellcheck
       - run: rebar3 fmt --check
@@ -79,7 +79,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: _build/wasmtime
-          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version') }}
+          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version', 'scripts/wasmtime-runtime.rev', 'scripts/wasmtime-patches/*') }}
 
       - name: Install Erlang (Linux)
         if: runner.os == 'Linux'
@@ -116,7 +116,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: _build/wasmtime
-          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version') }}
+          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version', 'scripts/wasmtime-runtime.rev', 'scripts/wasmtime-patches/*') }}
       - name: Build the NIF under ASan
         run: WASMTIME_NIF_SANITIZE=address rebar3 compile
       # The runtime must be in the emulator before the NIF loads. Leak
@@ -150,7 +150,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: _build/wasmtime
-          key: wasmtime-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version', 'scripts/build-wasmtime.sh') }}
+          key: wasmtime-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version', 'scripts/build-wasmtime.sh', 'scripts/wasmtime-runtime.rev', 'scripts/wasmtime-patches/*') }}
       - name: Install Erlang (Linux)
         if: runner.os == 'Linux'
         uses: erlef/setup-beam@v1
@@ -198,7 +198,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: _build/wasmtime
-          key: wasmtime-freebsd-14-${{ hashFiles('scripts/wasmtime.version', 'scripts/build-wasmtime.sh') }}
+          key: wasmtime-freebsd-14-${{ hashFiles('scripts/wasmtime.version', 'scripts/build-wasmtime.sh', 'scripts/wasmtime-runtime.rev', 'scripts/wasmtime-patches/*') }}
 
       - name: Build and test
         uses: vmactions/freebsd-vm@v1

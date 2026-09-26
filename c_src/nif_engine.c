@@ -5,8 +5,9 @@
  */
 #include "nif.h"
 
-/* Experiment (linux-destroy): only a C API patched with this setter has
- * it; the weak reference is null otherwise. */
+/* Added by scripts/wasmtime-patches, so present in this project's Linux
+ * and FreeBSD archives and in source builds, absent from upstream's macOS
+ * archives: the weak reference is null there. docs/preinit.md. */
 extern void
 wasmtime_pooling_allocation_config_pagemap_scan_set(wasmtime_pooling_allocation_config_t *, bool)
     __attribute__((weak));

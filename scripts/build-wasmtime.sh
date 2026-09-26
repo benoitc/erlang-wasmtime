@@ -80,6 +80,13 @@ if [ ! -f "$SRC/crates/c-api/CMakeLists.txt" ]; then
     git clone -q --depth 1 --branch "$VERSION" https://github.com/bytecodealliance/wasmtime "$SRC"
 fi
 
+# This project's changes to Wasmtime, applied once to the clone (a patch
+# that reverses cleanly is already there). See scripts/wasmtime-patches.
+for p in "$ROOT"/scripts/wasmtime-patches/*.patch; do
+    [ -f "$p" ] || continue
+    git -C "$SRC" apply --reverse --check "$p" 2>/dev/null && continue
+    git -C "$SRC" apply "$p" || { echo "wasmtime: $p does not apply to $VERSION" >&2; exit 1; }
+done
 echo "wasmtime: building the $VARIANT C API from source (this takes a few minutes)" >&2
 rm -rf "$BUILD" "$PREFIX"
 # shellcheck disable=SC2086 # FEATURES and TARGET_FLAGS are lists of -D flags on purpose

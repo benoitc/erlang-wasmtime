@@ -4,9 +4,11 @@
 # Prints a directory holding include/ and lib/ on stdout. Resolution order:
 #
 #   1. WASMTIME_C_API_DIR       use it as is
-#   2. a prebuilt archive       upstream's C API tarball for the full library;
-#                               this project's releases for the runtime-only
-#                               library and for FreeBSD; checksum-verified
+#   2. a prebuilt archive       upstream's C API tarball for the full library
+#                               on macOS; this project's releases for the
+#                               runtime-only library and for the full one on
+#                               Linux (glibc, musl) and FreeBSD, built with
+#                               scripts/wasmtime-patches; checksum-verified
 #   3. a source build           when the platform has no archive, or the
 #                               download does not exist, or
 #                               WASMTIME_SOURCE_BUILD=1
@@ -80,8 +82,13 @@ if [ "$VARIANT" = runtime ]; then
     SUMS="$ROOT/scripts/wasmtime-runtime.sha256"
 else
     NAME="wasmtime-$VERSION-$ARCH-$OS-c-api"
-    # Wasmtime publishes no FreeBSD archive; this project's releases do.
-    if [ "$OS" = freebsd ]; then URL="$RELEASE_URL/$NAME.tar.xz"; else URL="$UPSTREAM_URL/$NAME.tar.xz"; fi
+    # Wasmtime publishes no FreeBSD archive, and its Linux ones lack the
+    # patches in scripts/wasmtime-patches (pagemap_scan, docs/preinit.md):
+    # this project's releases carry both. macOS takes upstream's.
+    case "$OS" in
+        linux|musl|freebsd) URL="$RELEASE_URL/$NAME.tar.xz" ;;
+        *) URL="$UPSTREAM_URL/$NAME.tar.xz" ;;
+    esac
     SUMS="$ROOT/scripts/wasmtime.sha256"
 fi
 FILE="$NAME.tar.xz"

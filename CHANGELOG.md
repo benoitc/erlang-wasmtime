@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-09-26)
 
 A fresh, pre-initialized CPython per request in about 1.2 ms (M4), 2.2 ms
 (x86_64 cloud vCPU).

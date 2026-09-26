@@ -81,7 +81,7 @@ arguments on Linux (glibc) and macOS, an empty list on FreeBSD.
 ```
 
 With `clocks => monotonic` the guest reads the host's monotonic clock and
-nothing else: wall time and process or thread CPU time answer `ENOTSUP`
+nothing else: wall time and process or thread CPU time answer `ENOTCAPABLE`
 (Python's `time.time()` raises `OSError`). Use it when a guest must not
 learn the date or time of day, such as a workflow that has to replay the
 same way. Durations still work: `time.monotonic()` and `time.sleep()` do.

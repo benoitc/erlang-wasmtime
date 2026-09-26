@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `clocks => monotonic`: a refused clock answers `ENOTCAPABLE` (76) instead
+  of `ENOTSUP` (58), the errno erlang_wasm uses.
+
 ## 0.2.0 (2026-09-26)
 
 A fresh, pre-initialized CPython per request in about 1.2 ms (M4), 2.2 ms

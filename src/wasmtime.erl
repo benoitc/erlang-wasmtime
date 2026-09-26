@@ -592,11 +592,13 @@ nif_options(Mod, Imports, Opts) ->
         shim => stdin_shim(Mod, Wasi)
     }.
 
-%% `stdin => stream` forwards reads of other fds through a small module.
-%% A full build compiles it; a runtime-only build loads the precompiled
-%% copy for this platform and the module's fuel setting from priv/shims
-%% (scripts/precompile-shims.escript), or `undefined` when there is none.
-stdin_shim(Mod, #{stdin := stream}) ->
+%% A `stream` stdout or stderr reports itself a terminal through an
+%% fd_fdstat_get in front of WASI's, which forwards other fds through a small
+%% module. A full build compiles it; a runtime-only build loads the
+%% precompiled copy for this platform and the module's fuel setting from
+%% priv/shims (scripts/precompile-shims.escript), or `undefined` when there
+%% is none.
+stdin_shim(Mod, #{stdout := Out, stderr := Err}) when Out =:= stream; Err =:= stream ->
     case wasmtime:features() of
         #{compiler := true} ->
             undefined;

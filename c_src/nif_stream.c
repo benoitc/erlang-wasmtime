@@ -1,10 +1,14 @@
 /*
  * nif_stream.c: Streams: the per-instance inbox fed by send/2, read by the
- * guest through stdin (an fd_read in front of WASI's, forwarding other fds
- * through the shim) or the erlang.recv import; guest output pushed as
- * {wasmtime_stream, ...} messages.
+ * guest through stdin (a pipe Wasmtime reads, filled by a pump thread) or
+ * the erlang.recv import; guest output pushed as {wasmtime_stream, ...}
+ * messages.
  */
 #include "nif.h"
+
+#include <fcntl.h>
+#include <poll.h>
+#include <unistd.h>
 
 /* Called with the mutex held. */
 void inbox_drop_head(instance_t *inst) {
@@ -107,76 +111,6 @@ static wasm_trap_t *erlang_recv_cb(void *envp, wasmtime_caller_t *caller, wasmti
   return NULL;
 }
 
-#if NIF_HAVE_WASI
-static wasm_trap_t *forward(instance_t *inst, wasmtime_caller_t *caller, wasmtime_func_t *fn,
-                            wasmtime_val_raw_t *vals, size_t nvals);
-
-/* wasi_snapshot_preview1.fd_read(fd, iovs, iovs_len, nread) -> errno, in
- * front of Wasmtime's own: fd 0 reads the inbox as a byte stream, any other
- * fd is forwarded. Wasmtime has no custom stdin hook; this is the one place
- * the preview 1 surface is reimplemented. */
-#define WASI_EFAULT 21
-
-wasm_trap_t *fd_read_cb(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
-                        size_t nvals) {
-  (void)envp;
-  instance_t *inst = caller_inst(caller);
-  if (vals[0].i32 != 0) return forward(inst, caller, &inst->inbox.shim_fd_read, vals, 4);
-  unsigned char *base;
-  size_t size;
-  uint32_t iovs = (uint32_t)vals[1].i32, niovs = (uint32_t)vals[2].i32,
-           nread = (uint32_t)vals[3].i32;
-  if (!guest_mem(caller, &base, &size) || niovs > size / 8 || !in_bounds(size, iovs, niovs * 8) ||
-      !in_bounds(size, nread, 4)) {
-    vals[0].i32 = WASI_EFAULT;
-    return NULL;
-  }
-  /* Each iovec is {buf: u32, len: u32}, little endian. */
-  uint64_t want = 0;
-  for (uint32_t i = 0; i < niovs; i++) {
-    uint32_t buf, len;
-    memcpy(&buf, base + iovs + i * 8, 4);
-    memcpy(&len, base + iovs + i * 8 + 4, 4);
-    if (!in_bounds(size, buf, len)) {
-      vals[0].i32 = WASI_EFAULT;
-      return NULL;
-    }
-    want += len;
-  }
-  uint32_t got = 0;
-  if (want > 0) {
-    pthread_mutex_lock(&inst->mu);
-    enum inbox_status st = inbox_wait(inst);
-    if (st == INBOX_INTERRUPTED) {
-      pthread_mutex_unlock(&inst->mu);
-      return interrupted_trap(inst);
-    }
-    /* A short read: what is queued now, never a wait for more. */
-    for (uint32_t i = 0; i < niovs && inst->inbox.head; i++) {
-      uint32_t buf, len;
-      memcpy(&buf, base + iovs + i * 8, 4);
-      memcpy(&len, base + iovs + i * 8 + 4, 4);
-      while (len > 0 && inst->inbox.head) {
-        chunk_t *c = inst->inbox.head;
-        size_t n = c->len - c->off;
-        if (n > len) n = len;
-        memcpy(base + buf, c->data + c->off, n);
-        buf += (uint32_t)n;
-        len -= (uint32_t)n;
-        got += (uint32_t)n;
-        c->off += n;
-        inst->inbox.bytes -= n;
-        if (c->off == c->len) inbox_drop_head(inst);
-      }
-    }
-    pthread_mutex_unlock(&inst->mu);
-  }
-  memcpy(base + nread, &got, 4);
-  vals[0].i32 = 0;
-  return NULL;
-}
-#endif
-
 /* Calls Wasmtime's own function through the shim. */
 static wasm_trap_t *forward(instance_t *inst, wasmtime_caller_t *caller, wasmtime_func_t *fn,
                             wasmtime_val_raw_t *vals, size_t nvals) {
@@ -251,18 +185,13 @@ static ERL_NIF_TERM shadow_one(wasmtime_linker_t *linker, ErlNifEnv *out, const 
 }
 #endif
 
-/* Put the runtime's fd_read (stdin => stream) and fd_fdstat_get (a
- * `stream` stdout or stderr) in front of Wasmtime's own, in a linker that
- * already has the WASI definitions. */
-ERL_NIF_TERM shadow_wasi(wasmtime_linker_t *linker, int stdin_stream, int tty_mask,
-                         ErlNifEnv *out) {
+/* Put the runtime's fd_fdstat_get (a `stream` stdout or stderr) in front of
+ * Wasmtime's own, in a linker that already has the WASI definitions. */
+ERL_NIF_TERM shadow_wasi(wasmtime_linker_t *linker, int tty_mask, ErlNifEnv *out) {
 #if NIF_HAVE_WASI
-  ERL_NIF_TERM err = 0;
-  if (stdin_stream) err = shadow_one(linker, out, "fd_read", 4, fd_read_cb);
-  if (!err && tty_mask) err = shadow_one(linker, out, "fd_fdstat_get", 2, fd_fdstat_cb);
-  return err;
+  return tty_mask ? shadow_one(linker, out, "fd_fdstat_get", 2, fd_fdstat_cb) : 0;
 #else
-  (void)linker, (void)stdin_stream, (void)tty_mask;
+  (void)linker, (void)tty_mask;
   return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
 #endif
 }
@@ -443,4 +372,128 @@ ERL_NIF_TERM nif_close(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   pthread_cond_broadcast(&inst->cv);
   pthread_mutex_unlock(&inst->mu);
   return atom_ok;
+}
+
+/* ------------------------------------------------------------ stdin pipe --
+ * `stdin => stream`: Wasmtime's C API takes stdin only from bytes, a file or
+ * the process's own, and reads a file asynchronously. So the guest's stdin
+ * is the read end of a pipe, which preview 1 and WASI 0.2 read alike: a read
+ * waits for bytes, a 0.2 pollable waits properly, end of file is the pipe
+ * closing. The pump thread moves what send/2 queued into the write end; a
+ * pipe holds 16 to 64 KB and a scheduler must never block on it.
+ *
+ * A guest blocked in a stdin read is inside Wasmtime, where the epoch cannot
+ * reach it: stopping the instance closes the pipe to wake it (stdin_abort).
+ * An interrupted instance's stdin stays closed. docs/streams.md.
+ */
+
+#if NIF_HAVE_WASI
+/* Opens the pipe and hands its read end to `cfg`. NULL on success, else why
+ * not. The read end is given by path: /dev/fd/N reopens it where the
+ * platform has that (Linux, macOS); elsewhere a named pipe in a private
+ * directory, removed at once. */
+const char *stdin_pipe_open(instance_t *inst, wasi_config_t *cfg) {
+  int fds[2];
+  char path[64];
+  if (pipe(fds) == 0) {
+    snprintf(path, sizeof path, "/dev/fd/%d", fds[0]);
+    if (wasi_config_set_stdin_file(cfg, path)) {
+      close(fds[0]);
+      fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+      fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL) | O_NONBLOCK);
+      inst->inbox.pipe_w = fds[1];
+      return NULL;
+    }
+    close(fds[0]);
+    close(fds[1]);
+  }
+  char fifo[64];
+  int w;
+  if (!private_fifo(fifo, sizeof fifo, &w)) return "could not create the stdin pipe";
+  int opened = wasi_config_set_stdin_file(cfg, fifo);
+  private_fifo_remove(fifo);
+  if (!opened) {
+    close(w);
+    return "could not open the stdin pipe";
+  }
+  inst->inbox.pipe_w = w;
+  return NULL;
+}
+#endif
+
+/* Writes all of buf unless the pump is told to stop. 0 when the pipe is
+ * gone (the guest's store was freed) or the pump must stop. */
+static int pump_write(instance_t *inst, int fd, const unsigned char *buf, size_t n) {
+  size_t done = 0;
+  while (done < n) {
+    if (__atomic_load_n(&inst->inbox.pump_abort, __ATOMIC_ACQUIRE)) return 0;
+    ssize_t w = write(fd, buf + done, n - done);
+    if (w > 0) {
+      done += (size_t)w;
+    } else if (w < 0 && errno == EAGAIN) {
+      /* full: the guest is not reading; look again, and at pump_abort */
+      struct pollfd p = {.fd = fd, .events = POLLOUT};
+      poll(&p, 1, 20);
+    } else if (!(w < 0 && errno == EINTR)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static void *pump_main(void *arg) {
+  instance_t *inst = arg;
+  unsigned char *buf = enif_alloc(65536);
+  pthread_mutex_lock(&inst->mu);
+  int fd = inst->inbox.pipe_w;
+  for (;;) {
+    while (!inst->inbox.head && !inst->inbox.closed && !inst->inbox.pump_abort)
+      pthread_cond_wait(&inst->cv, &inst->mu);
+    if (inst->inbox.pump_abort || !inst->inbox.head) break; /* stopped, or closed and drained */
+    /* Copied out under the mutex: erlang.recv may take chunks meanwhile. */
+    chunk_t *c = inst->inbox.head;
+    size_t n = c->len - c->off;
+    if (n > 65536) n = 65536;
+    memcpy(buf, c->data + c->off, n);
+    c->off += n;
+    inst->inbox.bytes -= n;
+    if (c->off == c->len) inbox_drop_head(inst);
+    pthread_mutex_unlock(&inst->mu);
+    int ok = pump_write(inst, fd, buf, n);
+    pthread_mutex_lock(&inst->mu);
+    if (!ok) break;
+  }
+  inst->inbox.pipe_w = -1;
+  inst->inbox.closed = 1;
+  pthread_mutex_unlock(&inst->mu);
+  close(fd); /* end of file for the guest */
+  enif_free(buf);
+  enif_release_resource(inst); /* the pump's reference, taken at start */
+  return NULL;
+}
+
+/* After a successful instantiate. 0 when the thread could not start: the
+ * pipe is closed then, and the guest sees end of file. */
+int stdin_pump_start(instance_t *inst) {
+  if (inst->inbox.pipe_w < 0) return 1;
+  enif_keep_resource(inst);
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  pthread_attr_setstacksize(&attr, 256 * 1024);
+  pthread_t tid;
+  int rc = pthread_create(&tid, &attr, pump_main, inst);
+  pthread_attr_destroy(&attr);
+  if (rc == 0) return 1;
+  enif_release_resource(inst);
+  return 0;
+}
+
+/* Called with the mutex held when the instance is stopped: its stdin ends
+ * now, which also wakes a guest blocked reading it. */
+void stdin_abort(instance_t *inst) {
+  if (!inst->inbox.stdin) return;
+  inst->inbox.closed = 1;
+  __atomic_store_n(&inst->inbox.pump_abort, 1, __ATOMIC_RELEASE);
+  pthread_cond_broadcast(&inst->cv);
 }

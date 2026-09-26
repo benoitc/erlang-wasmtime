@@ -220,7 +220,9 @@ typedef struct instance {
     size_t bytes, limit;
     int closed;
     ErlNifPid stream_pid; /* receives {wasmtime_stream, Ref, Kind, Bytes} */
-    int stdin;            /* stdin => stream: fd_read is shadowed */
+    int stdin;            /* stdin => stream: Wasmtime reads a pipe the pump fills */
+    int pipe_w;           /* the pipe's write end, -1 when none; the pump owns it */
+    int pump_abort;       /* atomic: close the pipe now, drop what is queued */
     int tty_mask;         /* bit fd: a `stream` stdout/stderr reports itself a terminal */
     wasmtime_func_t real_fd_read, real_fdstat; /* Wasmtime's own, taken before shadowing */
     wasmtime_func_t shim_fd_read, shim_fdstat; /* the shim in front of them */
@@ -335,6 +337,8 @@ engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err);
 ERL_NIF_TERM key_term(ErlNifEnv *env, const engine_t *e);
 ERL_NIF_TERM plain_key(ErlNifEnv *env, int fuel);
 int pool_fits(unsigned instances);
+int private_fifo(char *path, size_t len, int *writer);
+void private_fifo_remove(char *path);
 wasmtime_module_t *engine_shim(engine_t *e, ErlNifEnv *env, ERL_NIF_TERM shim, const char **why);
 wasmtime_error_t *epoch_callback(wasmtime_context_t *ctx, void *data, uint64_t *delta,
                                  wasmtime_update_deadline_kind_t *kind);
@@ -363,9 +367,12 @@ wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtime_val_r
 wasm_trap_t *host_callback_typed(void *envp, wasmtime_caller_t *caller, const wasmtime_val_t *args,
                                  size_t nargs, wasmtime_val_t *results, size_t nresults);
 void inbox_drop_head(instance_t *inst);
-wasm_trap_t *fd_read_cb(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
-                        size_t nvals);
-ERL_NIF_TERM shadow_wasi(wasmtime_linker_t *linker, int stdin_stream, int tty_mask, ErlNifEnv *out);
+ERL_NIF_TERM shadow_wasi(wasmtime_linker_t *linker, int tty_mask, ErlNifEnv *out);
+#if NIF_HAVE_WASI
+const char *stdin_pipe_open(instance_t *inst, wasi_config_t *cfg);
+#endif
+int stdin_pump_start(instance_t *inst);
+void stdin_abort(instance_t *inst);
 ERL_NIF_TERM restrict_clocks(wasmtime_linker_t *linker, ErlNifEnv *out);
 ERL_NIF_TERM take_real_wasi(instance_t *inst, ErlNifEnv *out);
 wasmtime_linker_t *engine_wasi_linker(engine_t *e);

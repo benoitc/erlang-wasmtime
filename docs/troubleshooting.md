@@ -56,7 +56,8 @@ to look up here. Build problems show up as `rebar3 compile` output.
 | `await/3` times out on a stdin-reading program | the guest waits for input | `send/2` a line, `close/1` to end input |
 | `inbox_full` | 16 MB queued and unread | wait for the guest to read, or raise `inbox_limit` |
 | nothing arrives from a Python script | stdout is block-buffered | run with `-u` or `print(..., flush=True)` |
-| `stdin => stream` answers `unavailable` on a runtime-only build | no `priv/shims/<platform>-*.cwasm` for the platform | run `scripts/precompile-shims.sh` on a machine with that architecture |
+| `stdout => stream` answers `unavailable` on a runtime-only build | no `priv/shims/<platform>-*.cwasm` for the platform | run `scripts/precompile-shims.sh` on a machine with that architecture |
+| `send/2` answers `kind => closed` after a timeout | stopping a guest ends its stdin (a blocked read can only be woken by end of file) | instantiate a new instance; keep reads bounded by the protocol rather than by `timeout` |
 
 ## Reading a trap
 

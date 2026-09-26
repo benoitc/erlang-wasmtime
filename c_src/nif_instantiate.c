@@ -140,7 +140,8 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
       continue;
     }
     if (fd == 0 && enif_is_identical(s, atom_stream)) {
-      inst->inbox.stdin = 1; /* fd_read is put in front of WASI's below */
+      inst->inbox.stdin = 1;
+      if ((err = stdin_pipe_open(inst, cfg))) goto done;
       continue;
     }
     if (fd > 0 && (enif_is_identical(s, atom_capture) || enif_is_identical(s, atom_stream))) {
@@ -380,8 +381,8 @@ void linker_entry_free(linker_entry_t *le) {
 /* Builds the linker and InstancePre for one shape. NULL with *err set when
  * the module cannot link with it. */
 static linker_entry_t *build_entry(module_res_t *m, ErlNifEnv *env, ERL_NIF_TERM key,
-                                   ERL_NIF_TERM imports, int wasi, int monotonic, int stdin_stream,
-                                   int tty_mask, ErlNifEnv *out, ERL_NIF_TERM *err) {
+                                   ERL_NIF_TERM imports, int wasi, int monotonic, int tty_mask,
+                                   ErlNifEnv *out, ERL_NIF_TERM *err) {
   linker_entry_t *le = enif_alloc(sizeof *le);
   memset(le, 0, sizeof *le);
   le->key_env = enif_alloc_env();
@@ -396,11 +397,10 @@ static linker_entry_t *build_entry(module_res_t *m, ErlNifEnv *env, ERL_NIF_TERM
       *err = mk_error_s(out, "wasi", "config", "wasi could not be linked");
     }
     if (!*err && monotonic) *err = restrict_clocks(le->linker, out);
-    if (!*err && (stdin_stream || tty_mask))
-      *err = shadow_wasi(le->linker, stdin_stream, tty_mask, out);
+    if (!*err && tty_mask) *err = shadow_wasi(le->linker, tty_mask, out);
   }
 #else
-  (void)wasi, (void)monotonic, (void)stdin_stream, (void)tty_mask;
+  (void)wasi, (void)monotonic, (void)tty_mask;
 #endif
   if (!*err) *err = bind_imports(le, m, env, imports, out);
   if (!*err) {
@@ -423,16 +423,15 @@ static linker_entry_t *build_entry(module_res_t *m, ErlNifEnv *env, ERL_NIF_TERM
 static ERL_NIF_TERM link_entry(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM imports, int wasi,
                                int monotonic, ErlNifEnv *out) {
   module_res_t *m = inst->wasm.mod;
-  ERL_NIF_TERM key = enif_make_tuple5(
-      env, imports, wasi ? atom_true : atom_false, monotonic ? atom_true : atom_false,
-      inst->inbox.stdin ? atom_true : atom_false, enif_make_int(env, inst->inbox.tty_mask));
+  ERL_NIF_TERM key = enif_make_tuple4(env, imports, wasi ? atom_true : atom_false,
+                                      monotonic ? atom_true : atom_false,
+                                      enif_make_int(env, inst->inbox.tty_mask));
   ERL_NIF_TERM err = 0;
   pthread_mutex_lock(&m->mu);
   linker_entry_t *le = m->linkers;
   while (le && !enif_is_identical(le->key, key)) le = le->next;
   if (!le) {
-    le = build_entry(m, env, key, imports, wasi, monotonic, inst->inbox.stdin, inst->inbox.tty_mask,
-                     out, &err);
+    le = build_entry(m, env, key, imports, wasi, monotonic, inst->inbox.tty_mask, out, &err);
     if (le && m->nlinkers < MAX_LINKERS) {
       le->next = m->linkers;
       m->linkers = le;
@@ -490,10 +489,11 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
   if ((err = link_entry(inst, env, o.imports, wasi, monotonic, out))) return err;
   if ((err = instantiate_module(inst, out))) return err;
   cache_memory(inst);
-  if (inst->inbox.stdin || inst->inbox.tty_mask) {
+  if (inst->inbox.tty_mask) {
     if ((err = take_real_wasi(inst, out))) return err;
     if ((err = link_wasi_shim(inst, env, o.shim, out))) return err;
   }
+  stdin_pump_start(inst);
   inst->wasm.instantiated = 1;
   return atom_ok;
 }

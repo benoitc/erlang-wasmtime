@@ -23,6 +23,8 @@
     wasi_stdin_stream/1,
     wasi_stdin_stream_blocked/1,
     wasi_stdin_stream_other_fds/1,
+    wasi_stdin_stream_large/1,
+    wasi_stdin_stream_destroy/1,
     wasi_stdout_stream/1,
     wasi_stream_is_tty/1
 ]).
@@ -52,6 +54,8 @@ groups() ->
             wasi_stdin_stream,
             wasi_stdin_stream_blocked,
             wasi_stdin_stream_other_fds,
+            wasi_stdin_stream_large,
+            wasi_stdin_stream_destroy,
             wasi_stdout_stream,
             wasi_stream_is_tty
         ]}
@@ -236,15 +240,16 @@ wasi_stdin_stream_blocked(_) ->
     ok = wasmtime:send(Inst, ~"late"),
     {ok, [4]} = wasmtime:await(Inst, R),
     [~"late"] = collect(stdout, 1),
-    %% and can be interrupted
+    %% and can be interrupted: stopping the guest ends its stdin, which is
+    %% what wakes a read blocked inside Wasmtime
     {error, #{kind := timeout}} = wasmtime:call(Inst, ~"cat", [], #{timeout => 100}),
-    ok = wasmtime:send(Inst, ~"x"),
-    {ok, [1]} = wasmtime:call(Inst, ~"cat", []),
+    {error, #{kind := closed}} = wasmtime:send(Inst, ~"x"),
+    {ok, [0]} = wasmtime:call(Inst, ~"cat", []),
     ok.
 
 wasi_stdin_stream_other_fds(_) ->
-    %% fd_read on anything but 0 still goes to Wasmtime: same answer with
-    %% and without the override
+    %% stdin is a pipe Wasmtime reads: every fd, 0 included, gets Wasmtime's
+    %% own fd_read, with and without a streamed stdin
     Wat =
         ~"""
     (module
@@ -263,8 +268,9 @@ wasi_stdin_stream_other_fds(_) ->
     ?assert(Errno > 0),
     {ok, [Errno]} = wasmtime:call(Streamed, ~"read_fd", [1]),
     {ok, [Errno]} = wasmtime:call(Streamed, ~"read_fd", [99]),
-    %% bad iovec pointers answer EFAULT instead of trapping
-    {ok, [21]} = wasmtime:call(Streamed, ~"read_bad", []),
+    %% a bad iovec pointer is Wasmtime's trap, the same on a plain instance
+    {error, #{class := trap}} = wasmtime:call(Plain, ~"read_bad", []),
+    {error, #{class := trap}} = wasmtime:call(Streamed, ~"read_bad", []),
     ok.
 
 wasi_stdout_stream(_) ->
@@ -379,4 +385,49 @@ wasi_clocks_monotonic(_) ->
     ?assertError(
         function_clause, wasmtime:instantiate(compile(clock_wat()), #{wasi => #{clocks => none}})
     ),
+    ok.
+
+%% More than a pipe holds: the pump keeps writing as the guest reads, and a
+%% scheduler never waits on the pipe.
+wasi_stdin_stream_large(_) ->
+    Wat =
+        ~"""
+    (module
+      (import "wasi_snapshot_preview1" "fd_read" (func $fd_read (param i32 i32 i32 i32) (result i32)))
+      (memory (export "memory") 2)
+      ;; read stdin to end of file, return the byte count and a checksum
+      (func (export "drain") (result i64 i32) (local $n i64) (local $sum i32) (local $i i32)
+        (block $done (loop $next
+          (i32.store (i32.const 0) (i32.const 1024))
+          (i32.store (i32.const 4) (i32.const 65536))
+          (drop (call $fd_read (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 8)))
+          (br_if $done (i32.eqz (i32.load (i32.const 8))))
+          (local.set $n (i64.add (local.get $n) (i64.extend_i32_u (i32.load (i32.const 8)))))
+          (local.set $i (i32.const 0))
+          (block $b (loop $l
+            (br_if $b (i32.ge_u (local.get $i) (i32.load (i32.const 8))))
+            (local.set $sum (i32.add (local.get $sum)
+              (i32.load8_u (i32.add (i32.const 1024) (local.get $i)))))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $l)))
+          (br $next)))
+        (local.get $n) (local.get $sum)))
+    """,
+    Inst = instance(Wat, #{wasi => #{stdin => stream}, inbox_limit => 4 bsl 20}),
+    {ok, R} = wasmtime:call_async(Inst, ~"drain", []),
+    Chunk = binary:copy(<<1, 2, 3, 4>>, 250),
+    [ok = wasmtime:send(Inst, Chunk) || _ <- lists:seq(1, 1000)],
+    ok = wasmtime:close(Inst),
+    {ok, [1000000, 2500000]} = wasmtime:await(Inst, R, 10000),
+    ok.
+
+%% destroy/1 on a guest blocked reading stdin returns at once.
+wasi_stdin_stream_destroy(_) ->
+    Inst = instance(stdio_wat(), #{wasi => #{stdin => stream}}),
+    {ok, R} = wasmtime:call_async(Inst, ~"cat", []),
+    timer:sleep(50),
+    T0 = erlang:monotonic_time(millisecond),
+    ok = wasmtime:destroy(Inst),
+    ?assert(erlang:monotonic_time(millisecond) - T0 < 100),
+    {_, _} = wasmtime:await(Inst, R, 1000),
     ok.

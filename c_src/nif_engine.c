@@ -5,6 +5,12 @@
  */
 #include "nif.h"
 
+/* Experiment (linux-destroy): only a C API patched with this setter has
+ * it; the weak reference is null otherwise. */
+extern void
+wasmtime_pooling_allocation_config_pagemap_scan_set(wasmtime_pooling_allocation_config_t *, bool)
+    __attribute__((weak));
+
 /* Mirrors pooling_key/3 in wasmtime.erl; docs/design.md, "Numbers". */
 #define POOL_MAX_INSTANCES 10000
 #define POOL_MAX_MEMORY (4ull << 30)
@@ -190,12 +196,6 @@ static wasm_config_t *make_config(const engine_t *want, const char **missing) {
   }
   return cfg;
 }
-
-/* Experiment (linux-destroy): only a C API patched with this setter has
- * it; the weak reference is null otherwise. */
-extern void
-wasmtime_pooling_allocation_config_pagemap_scan_set(wasmtime_pooling_allocation_config_t *, bool)
-    __attribute__((weak));
 
 engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err) {
   engine_t want;

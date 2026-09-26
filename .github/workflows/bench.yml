@@ -85,6 +85,8 @@ jobs:
               c.config.pagemap_scan(if enable { wasmtime::Enabled::Auto } else { wasmtime::Enabled::No });
           }
           RS
+          sed -i 's/const MAX_REGIONS: usize = 32;/const MAX_REGIONS: usize = 4096;/' "$RUNNER_TEMP/wt/crates/wasmtime/src/runtime/vm/sys/unix/pagemap.rs"
+          grep -n "const MAX_REGIONS" "$RUNNER_TEMP/wt/crates/wasmtime/src/runtime/vm/sys/unix/pagemap.rs"
           export CARGO_PROFILE_RELEASE_PANIC=abort CARGO_PROFILE_RELEASE_STRIP=debuginfo
           cmake -S "$RUNNER_TEMP/wt/crates/c-api" -B "$RUNNER_TEMP/wtb" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/wtapi" >/dev/null
           cmake --build "$RUNNER_TEMP/wtb" >/dev/null

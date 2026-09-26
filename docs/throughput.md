@@ -23,34 +23,32 @@ runner.
 ## Results
 
 Apple M4 Pro (10 performance and 4 efficiency cores), macOS 27, OTP 29,
-Wasmtime 48.0.1, one caller, 1000 requests. Measured on a working machine
-(load average about 20), so tails are wider than on an idle one. These runs
-predate the shared linker, which later took instantiation from 0.17 ms to
-0.07 ms on the same machine; the other phases did not change.
+Wasmtime 48.0.1, one caller, 1000 requests. Load average 6 to 11 during
+the run.
 
 | Phase | p50 | p90 | p99 |
 |---|---|---|---|
-| instantiate | 0.17 ms | 0.29 ms | 0.64 ms |
-| `handle` | 1.32 ms | 2.47 ms | 6.55 ms |
-| destroy | 0.09 ms | 0.30 ms | 2.89 ms |
-| **total** | **1.60 ms** | 3.60 ms | 8.27 ms |
+| instantiate | 0.08 ms | 0.11 ms | 0.16 ms |
+| `handle` | 1.08 ms | 1.25 ms | 1.54 ms |
+| destroy | 0.06 ms | 0.08 ms | 0.13 ms |
+| **total** | **1.21 ms** | 1.42 ms | 1.77 ms |
 
 Concurrent callers, each running requests back to back for 5 s:
 
 | Callers | Requests/s | p50 | p99 |
 |---|---|---|---|
-| 1 | 690 | 1.33 ms | 2.88 ms |
-| 4 | 2,461 | 1.58 ms | 2.69 ms |
-| 8 | 3,930 | 1.98 ms | 2.97 ms |
-| 14 | **4,291** | 3.17 ms | 4.89 ms |
-| 28 | 4,123 | 6.67 ms | 11.24 ms |
+| 1 | 791 | 1.23 ms | 1.85 ms |
+| 4 | 2,478 | 1.57 ms | 2.62 ms |
+| 8 | 3,973 | 1.94 ms | 3.32 ms |
+| 14 | **4,598** | 2.98 ms | 4.54 ms |
+| 28 | 4,345 | 6.28 ms | 11.31 ms |
 
 | Measure | Value |
 |---|---|
-| Resident memory per live instance, after one request | 3.9 MB (the 40 MB image is shared) |
-| One `hornbeam.call` (two host calls), 14 callers | 75 us |
+| Resident memory per live instance, after one request | 3.8 MB (the 40 MB image is shared) |
+| One `hornbeam.call` (two host calls), 14 callers | 80 us |
 | One host call, one idle instance | 2.5 us |
-| `timeout => 50` on `while True: pass` | returns within 1.1 ms of the deadline |
+| `timeout => 50` on `while True: pass` | returns within 0.81 ms of the deadline |
 | A global set in one request, read in the next | unset |
 | A file written under one instance's writable preopen, seen by another | no |
 
@@ -79,18 +77,18 @@ Linux 6.17, OTP 28, this project's patched Wasmtime 48.0.1 archive. The
 | Isolation (globals, files) | holds |
 
 Four vCPUs cap the concurrent rows; per core, the runner serves about 270
-requests a second against the M4's 300. `handle` is CPython itself: its
+requests a second against the M4's 330. `handle` is CPython itself: its
 bootstrap string and `main.py` are compiled from source on every request.
 
 ## Reading the numbers
 
-- Instantiation is a remap of the image plus a WASI context: 0.07 to
+- Instantiation is a remap of the image plus a WASI context: 0.08 to
   0.10 ms for a 40 MB CPython heap, against 124 ms to start CPython in a
   fresh instance. The linker and its import checks are built once per
   module and import shape.
 - On macOS every request pays page faults for what it touches, because a
   freed pool slot is remapped to zeros and the image is mapped again on
-  reuse. That is most of `handle`'s 1.3 ms (0.5 ms on a heap copied up
+  reuse. That is most of `handle`'s 1.1 ms (0.5 ms on a heap copied up
   front), and it is kernel time that grows with concurrency: past 8 callers
   the machine spends more time in the kernel than in the guests. Linux,
   with this project's Wasmtime archive, restores the pages a request wrote

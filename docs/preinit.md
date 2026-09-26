@@ -72,12 +72,12 @@ hornbeam's CPython 3.14 reactor, one caller, p50
 
 | Step | Apple M4 Pro, macOS | AMD EPYC 7763 vCPU, Linux |
 |---|---|---|
-| `preinit/3` (`_initialize`, `init`, one `handle`) | 580 ms, once | 2.8 s, once |
+| `preinit/3` (`_initialize`, `init`, one `handle`) | 540 ms, once | 2.8 s, once |
 | compile the 50 MB result | 390 ms, once | 2.4 s, once |
-| `deserialize_file/2` | 1.6 ms, at start | 0.7 ms, at start |
-| instantiate | 0.07 ms | 0.10 ms |
-| `handle`: json work and one `hornbeam.call` | 1.20 ms | 1.88 ms |
-| destroy | 0.07 ms | 0.21 ms |
+| `deserialize_file/2` | 2.2 ms, at start | 0.7 ms, at start |
+| instantiate | 0.08 ms | 0.10 ms |
+| `handle`: json work and one `hornbeam.call` | 1.08 ms | 1.88 ms |
+| destroy | 0.06 ms | 0.21 ms |
 
 A fresh instance with CPython started in it, without pre-initialization:
 124 ms.
@@ -123,7 +123,7 @@ So on Linux set `keep_resident` to the size of the image (64 MB for
 CPython). With a Wasmtime from elsewhere (`WASMTIME_C_API_DIR`), or on a
 kernel older than 6.7, the reset copies all `keep_resident` bytes: use 0
 there. On macOS every request pays the page faults of what it touches,
-which is why `handle` takes 1.2 ms there against 0.6 ms on a fully copied
+which is why `handle` takes 1.1 ms there against 0.6 ms on a fully copied
 heap; the total is still lower.
 
 `preinit/3` lays the snapshot out so the image is built at all: Wasmtime

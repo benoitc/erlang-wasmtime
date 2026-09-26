@@ -2,7 +2,8 @@
 
 ## 0.2.0 (unreleased)
 
-A fresh, pre-initialized CPython per request in about 1.6 ms.
+A fresh, pre-initialized CPython per request in about 1.2 ms (M4), 2.2 ms
+(x86_64 cloud vCPU).
 
 - `preinit/3`: run a module's init exports once and get a module that
   starts in their state (Wizer's pre-initialization, in Erlang). Init calls

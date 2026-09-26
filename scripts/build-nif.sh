@@ -43,7 +43,7 @@ if [ -f "$API/lib/libwasmtime.a" ]; then
     LIBFILE="$API/lib/libwasmtime.a"
     LIB="$LIBFILE"
 else
-    LIBFILE="$(find "$API/lib" -maxdepth 1 \( -name libwasmtime.so -o -name libwasmtime.dylib \) | head -1)"
+    LIBFILE="$(find "$API/lib/" -maxdepth 1 \( -name libwasmtime.so -o -name libwasmtime.dylib \) | head -1)"
     [ -n "$LIBFILE" ] || { echo "wasmtime: no libwasmtime in $API/lib" >&2; exit 1; }
     SHARED="$LIBFILE"
     # shellcheck disable=SC2016 # the loader expands $ORIGIN, not the shell

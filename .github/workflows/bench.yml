@@ -36,7 +36,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: _build/wasmtime
-          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version') }}
+          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version', 'scripts/wasmtime-runtime.rev', 'scripts/wasmtime-patches/*') }}
       - name: Cache the reactor
         id: reactor
         uses: actions/cache@v4

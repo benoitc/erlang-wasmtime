@@ -7,6 +7,9 @@
 
 -export([all/0, groups/0, init_per_suite/1, end_per_suite/1]).
 -export([
+    linker_shared_per_shape/1,
+    linker_many_shapes/1,
+    linker_error_not_cached/1,
     imports_several_functions/1,
     imports_same_name_different_module/1,
     imports_extra_keys_ignored/1,
@@ -27,6 +30,9 @@ all() ->
 groups() ->
     [
         {imports, [parallel], [
+            linker_shared_per_shape,
+            linker_many_shapes,
+            linker_error_not_cached,
             imports_several_functions,
             imports_same_name_different_module,
             imports_extra_keys_ignored,
@@ -258,3 +264,70 @@ host_process_gone(_) ->
     ok.
 
 %% ----------------------------------------------------------------- async
+
+%% Instances of one module with the same imports share a linker; each still
+%% calls its own funs and runs in its own store.
+linker_shared_per_shape(_) ->
+    Mod = compile(
+        ~"""
+    (module
+      (import "env" "f" (func $f (param i32) (result i32)))
+      (global $g (mut i32) (i32.const 0))
+      (func (export "run") (param i32) (result i32)
+        (global.set $g (i32.add (global.get $g) (i32.const 1)))
+        (call $f (local.get 0))))
+    """
+    ),
+    Insts = [
+        begin
+            {ok, I} = wasmtime:instantiate(Mod, #{
+                imports => #{{~"env", ~"f"} => fun(_, [X]) -> {ok, [X * N]} end}
+            }),
+            {N, I}
+        end
+     || N <- lists:seq(1, 8)
+    ],
+    Self = self(),
+    [spawn_link(fun() -> Self ! {N, wasmtime:call(I, ~"run", [10])} end) || {N, I} <- Insts],
+    [
+        receive
+            {N, {ok, [R]}} -> R = 10 * N
+        end
+     || {N, _} <- Insts
+    ],
+    ok.
+
+%% More import shapes than a module keeps linkers for: the rest get their own.
+linker_many_shapes(_) ->
+    Mod = compile(
+        ~"""
+    (module
+      (import "env" "f" (func $f (result i32)))
+      (func (export "run") (result i32) (call $f)))
+    """
+    ),
+    [
+        begin
+            Extra = maps:from_list([
+                {{~"other", integer_to_binary(K)}, fun(_, []) -> {ok, []} end}
+             || K <- lists:seq(1, N)
+            ]),
+            {ok, I} = wasmtime:instantiate(Mod, #{
+                imports => Extra#{{~"env", ~"f"} => fun(_, []) -> {ok, [N]} end}
+            }),
+            {ok, [N]} = wasmtime:call(I, ~"run", []),
+            ok = wasmtime:destroy(I)
+        end
+     || N <- lists:seq(0, 40)
+    ],
+    ok.
+
+%% A shape that does not link is refused each time, not remembered.
+linker_error_not_cached(_) ->
+    Mod = compile(~"(module (import \"env\" \"f\" (func)))"),
+    {error, #{class := link}} = wasmtime:instantiate(Mod),
+    {error, #{class := link}} = wasmtime:instantiate(Mod),
+    {ok, _} = wasmtime:instantiate(Mod, #{
+        imports => #{{~"env", ~"f"} => fun(_, []) -> {ok, []} end}
+    }),
+    ok.

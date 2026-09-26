@@ -94,18 +94,14 @@ void *worker_main(void *arg) {
   inst->queue.destroy = NULL;
   inst->queue.exited = 1;
   wasmtime_store_t *store = NULL;
-  wasmtime_linker_t *linker = NULL;
   if (destroy) {
     store = inst->wasm.store;
-    linker = inst->wasm.linker;
     inst->wasm.instantiated = 0;
     inst->wasm.has_memory = 0;
     inst->wasm.store = NULL;
-    inst->wasm.linker = NULL;
     inst->wasm.ctx = NULL;
   }
   pthread_mutex_unlock(&inst->mu);
-  if (linker) wasmtime_linker_delete(linker);
   if (store) wasmtime_store_delete(store);
   if (destroy) {
     ErlNifEnv *out = enif_alloc_env();
@@ -118,9 +114,16 @@ void *worker_main(void *arg) {
   return NULL;
 }
 
+/* Every instance holds its module, so no instance uses these linkers. */
 void module_dtor(ErlNifEnv *env, void *obj) {
   module_res_t *m = obj;
+  while (m->linkers) {
+    linker_entry_t *le = m->linkers;
+    m->linkers = le->next;
+    linker_entry_free(le);
+  }
   if (m->mod) wasmtime_module_delete(m->mod);
+  pthread_mutex_destroy(&m->mu);
 }
 
 /* Runs once the handle and the worker thread have both let go: the thread
@@ -133,14 +136,8 @@ void instance_dtor(ErlNifEnv *env, void *obj) {
     req_free(r);
   }
   if (inst->queue.destroy) req_free(inst->queue.destroy);
-  if (inst->wasm.linker) wasmtime_linker_delete(inst->wasm.linker);
   if (inst->wasm.store) wasmtime_store_delete(inst->wasm.store);
-  for (size_t i = 0; i < inst->wasm.nhostfns; i++) {
-    enif_free(inst->wasm.hostfns[i].module);
-    enif_free(inst->wasm.hostfns[i].name);
-    wasm_functype_delete(inst->wasm.hostfns[i].type);
-  }
-  enif_free(inst->wasm.hostfns);
+  if (inst->wasm.owns_entry) linker_entry_free(inst->wasm.entry);
   if (inst->host.reply_env) enif_free_env(inst->host.reply_env);
   if (inst->ref_env) enif_free_env(inst->ref_env);
   enif_free(inst->capture.buf[0].data);

@@ -1,0 +1,131 @@
+diff --git a/crates/wasmtime/src/runtime/vm/sys/unix/pagemap.rs b/crates/wasmtime/src/runtime/vm/sys/unix/pagemap.rs
+index 5e35266..a3337ae 100644
+--- a/crates/wasmtime/src/runtime/vm/sys/unix/pagemap.rs
++++ b/crates/wasmtime/src/runtime/vm/sys/unix/pagemap.rs
+@@ -281,70 +281,72 @@ pub unsafe fn reset_with_pagemap(
+     // example.
+     const MAX_REGIONS: usize = 32;
+     let mut storage = [MaybeUninit::uninit(); MAX_REGIONS];
++    let end = ptr.addr() + len.byte_count();
++    let mut start = ptr;
++    let mut pages_left = keep_resident.byte_count() / host_page_size;
++    let mut bytes_resident = 0;
+ 
+-    let scan_arg = PageMapScanBuilder::new(ptr::slice_from_raw_parts(ptr, len.byte_count()))
+-        .max_pages(keep_resident.byte_count() / host_page_size)
+-        // We specifically want pages that are NOT backed by the zero page or
+-        // backed by files. Such pages mean that they haven't changed from their
+-        // original contents, so they're inverted.
++    // A scan returns at most `MAX_REGIONS` regions. A guest that wrote more
++    // disjoint regions than that (an interpreter's heap does) would have
++    // everything past the last one decommitted, including pages it will
++    // read again, so scan again from where the kernel stopped until the end
++    // of memory or the `keep_resident` budget is reached.
++    loop {
++        let scan_arg = PageMapScanBuilder::new(ptr::slice_from_raw_parts(
++            start,
++            end - start.addr(),
++        ))
++        .max_pages(pages_left)
+         .category_inverted(Categories::PFNZERO | Categories::FILE)
+-        // Search for pages that are written and present as those are the dirty
+-        // pages. Additionally search for the zero page/file page as those are
+-        // inverted above meaning we're searching for pages that specifically
+-        // don't have those flags.
+         .category_mask(
+             Categories::WRITTEN | Categories::PRESENT | Categories::PFNZERO | Categories::FILE,
+         )
+-        // Don't return any categories back. This helps group regions together
+-        // since the reported set of categories is always empty and we otherwise
+-        // aren't looking for anything in particular.
+         .return_mask(Categories::empty())
+         .build(&mut storage);
+ 
+-    // SAFETY: this should be a safe ioctl as we control the fd we're operating
+-    // on plus all of `scan_arg`, but this relies on `Ioctl` below being the
+-    // correct implementation and such.
+-    let result = match unsafe { ioctl(&pagemap.0, scan_arg) } {
+-        Ok(result) => result,
+-
+-        // If the ioctl fails for whatever reason, we at least tried, so fall
+-        // back to the default behavior.
+-        //
+-        // SAFETY: the safety requirement of
+-        // `pagemap_disabled::reset_with_pagemap` is the same as this function.
+-        Err(err) => unsafe {
+-            log::warn!("failed pagemap scan {err}");
+-            return crate::runtime::vm::pagemap_disabled::reset_with_pagemap(
+-                None,
+-                ptr,
+-                len,
+-                keep_resident,
+-                reset_manually,
+-                decommit,
+-            );
+-        },
+-    };
++        // SAFETY: see the first scan's comment in upstream Wasmtime; the
++        // region is within `ptr/len`, which is valid to read and write.
++        let result = match unsafe { ioctl(&pagemap.0, scan_arg) } {
++            Ok(result) => result,
++            Err(err) if start == ptr => unsafe {
++                log::warn!("failed pagemap scan {err}");
++                return crate::runtime::vm::pagemap_disabled::reset_with_pagemap(
++                    None,
++                    ptr,
++                    len,
++                    keep_resident,
++                    reset_manually,
++                    decommit,
++                );
++            },
++            Err(err) => {
++                log::warn!("failed pagemap scan {err}");
++                decommit(start, end - start.addr());
++                return bytes_resident;
++            }
++        };
+ 
+-    // For all regions that were written in the scan reset them manually, then
+-    // afterwards decommit everything else.
+-    let mut bytes_resident = 0;
+-    for region in result.regions() {
+-        // SAFETY: we're relying on Linux to pass in valid region ranges within
+-        // the `ptr/len` we specified to the original syscall.
+-        unsafe {
+-            reset_manually(&mut *region.region().cast_mut());
+-        }
+-        bytes_resident += region.len();
++        let mut scanned_pages = 0;
++        for region in result.regions() {
++            // SAFETY: we're relying on Linux to pass in valid region ranges
++            // within the range we specified to the syscall.
++            unsafe {
++                reset_manually(&mut *region.region().cast_mut());
++            }
++            bytes_resident += region.len();
++            scanned_pages += region.len() / host_page_size;
++        }
++        let walk_end = result.walk_end().cast_mut();
++        let full = result.regions().len() == MAX_REGIONS;
++        pages_left = pages_left.saturating_sub(scanned_pages);
++        if walk_end.addr() >= end || !full || pages_left == 0 {
++            // Everything after `walk_end` was not reached: decommit it. A
++            // scan that reached the end makes this a zero-length noop.
++            decommit(walk_end, end - walk_end.addr());
++            return bytes_resident;
++        }
++        start = walk_end;
+     }
+-
+-    // Report everything after `walk_end` to the end of memory as memory that
+-    // must be decommitted as the scan didn't reach it. Note that if `walk_end`
+-    // is already at the end of memory then the byte size of the decommitted
+-    // memory here will be 0 meaning that this is a noop.
+-    let scan_size = result.walk_end().addr() - ptr.addr();
+-    decommit(result.walk_end().cast_mut(), len.byte_count() - scan_size);
+-
+-    bytes_resident
+ }
+ 
+ mod ioctl {

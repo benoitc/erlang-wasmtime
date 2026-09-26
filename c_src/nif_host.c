@@ -159,9 +159,8 @@ wasm_trap_t *host_outcome(instance_t *inst, enum host_status st, const char *fai
  * signature has no references: values cross as wasmtime_val_raw_t. */
 wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
                            size_t nvals) {
-  hostfn_env_t *he = envp;
-  instance_t *inst = he->inst;
-  hostfn_t *fn = &inst->wasm.hostfns[he->idx];
+  instance_t *inst = caller_inst(caller);
+  hostfn_t *fn = &inst->wasm.entry->hostfns[(uintptr_t)envp];
   const wasm_valtype_vec_t *pt = wasm_functype_params(fn->type);
   const wasm_valtype_vec_t *rt = wasm_functype_results(fn->type);
   size_t nargs = pt->size, nresults = rt->size;
@@ -198,9 +197,8 @@ wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtime_val_r
  * over rooted arguments (it unroots them and the results afterwards). */
 wasm_trap_t *host_callback_typed(void *envp, wasmtime_caller_t *caller, const wasmtime_val_t *args,
                                  size_t nargs, wasmtime_val_t *results, size_t nresults) {
-  hostfn_env_t *he = envp;
-  instance_t *inst = he->inst;
-  hostfn_t *fn = &inst->wasm.hostfns[he->idx];
+  instance_t *inst = caller_inst(caller);
+  hostfn_t *fn = &inst->wasm.entry->hostfns[(uintptr_t)envp];
   const wasm_valtype_vec_t *rt = wasm_functype_results(fn->type);
   const char *fail = NULL;
 

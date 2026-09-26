@@ -23,19 +23,21 @@ tied to it: the upstream archives, this repo's runtime archives, the CLI
 that compiles the shims, the precompiled fixtures.
 
 1. Edit `scripts/wasmtime.version`.
-2. Download the six upstream C API archives (`x86_64` and `aarch64` for
-   `linux`, `musl`, `macos`) and replace their lines in
-   `scripts/wasmtime.sha256`.
+2. Download the two upstream macOS C API archives (`x86_64` and `aarch64`)
+   and replace their lines in `scripts/wasmtime.sha256`. The Linux (glibc
+   and musl) and FreeBSD full archives are this project's, from step 3.
+   Check that every patch in `scripts/wasmtime-patches` still applies and
+   is still needed; its README says what each is for.
 3. Set `scripts/wasmtime-runtime.rev` to `1` for a new Wasmtime version
    (bump it instead when only the build recipe changed), then run the
    runtime workflow: `gh workflow run wasmtime-runtime.yml`. It builds the
    runtime-only library on native runners for every platform plus the full
-   FreeBSD library, and attaches them to the release
+   library for Linux and FreeBSD, and attaches them to the release
    `wasmtime-runtime-<version>-r<rev>`. Assets are immutable: a rebuild
    gets a new revision and a new release, so a tagged erlang_wasmtime
    always downloads exactly what it pinned. Paste the workflow's
-   `SHA256SUMS` into `scripts/wasmtime-runtime.sha256` and the FreeBSD line
-   into `scripts/wasmtime.sha256`.
+   `SHA256SUMS` runtime lines into `scripts/wasmtime-runtime.sha256` and the
+   `-c-api` lines (Linux, musl, FreeBSD) into `scripts/wasmtime.sha256`.
 4. Any change to `scripts/build-wasmtime.sh` or the workflow after the
    archives were built means step 3 again with a bumped revision before
    the release: the archives must come from the recipe the tag ships.

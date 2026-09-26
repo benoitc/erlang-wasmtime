@@ -2,7 +2,8 @@
 
 ## 0.2.0 (unreleased)
 
-A fresh, pre-initialized CPython per request in about 1.6 ms.
+A fresh, pre-initialized CPython per request in about 1.2 ms (M4), 2.2 ms
+(x86_64 cloud vCPU).
 
 - `preinit/3`: run a module's init exports once and get a module that
   starts in their state (Wizer's pre-initialization, in Erlang). Init calls
@@ -17,6 +18,13 @@ A fresh, pre-initialized CPython per request in about 1.6 ms.
   pool slot is free at once.
 - `wasi => #{clocks => monotonic}`: wall and CPU clocks answer `ENOTSUP`.
 - `wat2wasm/1`.
+- Instances of a module share a linker and a Wasmtime `InstancePre` per
+  import and WASI shape: WASI and host functions are defined once, not per
+  instance (CPython: 150 us to 70 us to instantiate on macOS).
+- Linux and musl full C API archives are this project's, built with
+  `scripts/wasmtime-patches`: a pool slot is reset by restoring only the
+  pages the guest wrote (`PAGEMAP_SCAN`), which Wasmtime's C API cannot
+  turn on, and the scan no longer stops after 32 dirty regions.
 - `timeout` and `interrupt/1` stop the guest at once instead of at the next
   10 ms epoch tick.
 - A host call spins briefly for the reply before sleeping: 2.5 us round trip

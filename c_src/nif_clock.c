@@ -77,26 +77,26 @@ static wasm_functype_t *functype(int with_precision) {
   return wasm_functype_new(&pv, &rv);
 }
 
-static wasmtime_error_t *define(instance_t *inst, const char *name, int with_precision,
+static wasmtime_error_t *define(wasmtime_linker_t *linker, const char *name, int with_precision,
                                 wasmtime_func_unchecked_callback_t cb) {
   wasm_functype_t *ft = functype(with_precision);
   wasmtime_error_t *e = wasmtime_linker_define_func_unchecked(
-      inst->wasm.linker, "wasi_snapshot_preview1", 22, name, strlen(name), ft, cb, NULL, NULL);
+      linker, "wasi_snapshot_preview1", 22, name, strlen(name), ft, cb, NULL, NULL);
   wasm_functype_delete(ft);
   return e;
 }
 #endif
 
 /* Called after the WASI definitions are in the linker. */
-ERL_NIF_TERM restrict_clocks(instance_t *inst, ErlNifEnv *out) {
+ERL_NIF_TERM restrict_clocks(wasmtime_linker_t *linker, ErlNifEnv *out) {
 #if NIF_HAVE_WASI
-  wasmtime_linker_allow_shadowing(inst->wasm.linker, true);
-  wasmtime_error_t *e = define(inst, "clock_time_get", 1, time_get_cb);
-  if (!e) e = define(inst, "clock_res_get", 0, res_get_cb);
-  wasmtime_linker_allow_shadowing(inst->wasm.linker, false);
+  wasmtime_linker_allow_shadowing(linker, true);
+  wasmtime_error_t *e = define(linker, "clock_time_get", 1, time_get_cb);
+  if (!e) e = define(linker, "clock_res_get", 0, res_get_cb);
+  wasmtime_linker_allow_shadowing(linker, false);
   return e ? error_to_term(out, e, "wasi") : 0;
 #else
-  (void)inst;
+  (void)linker;
   return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
 #endif
 }

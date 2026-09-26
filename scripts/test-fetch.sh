@@ -51,9 +51,9 @@ run() { # name, expected-exit, expected-stdout-regex, expected-stderr-regex, env
     name=$1; want=$2; out_re=$3; err_re=$4; shift 4
     rm -rf "$TMP/cache" "$TMP/built-variant"
     set +e
-    out="$(env "$@" WASMTIME_CACHE_DIR="$TMP/cache" WASMTIME_BUILD_SCRIPT="$TMP/build-stub.sh" \
+    out="$(env WASMTIME_CACHE_DIR="$TMP/cache" WASMTIME_BUILD_SCRIPT="$TMP/build-stub.sh" \
         WASMTIME_UPSTREAM_URL="file://$TMP/served" WASMTIME_RELEASE_URL="file://$TMP/nowhere" \
-        "$FAKE/scripts/fetch-wasmtime.sh" 2>"$TMP/err")"
+        "$@" "$FAKE/scripts/fetch-wasmtime.sh" 2>"$TMP/err")"
     got=$?
     set -e
     [ "$got" = "$want" ] || { cat "$TMP/err" >&2; fail "$name: exit $got, wanted $want"; }
@@ -69,7 +69,9 @@ run() { # name, expected-exit, expected-stdout-regex, expected-stderr-regex, env
 run "explicit dir is used as is" 0 "^$TMP/served/$FULL\$" "" WASMTIME_C_API_DIR="$TMP/served/$FULL"
 run "explicit dir without headers is refused" 1 "^\$" "no include/wasmtime.h" WASMTIME_C_API_DIR="$TMP/nowhere"
 run "bad WASMTIME_RUNTIME_ONLY is refused" 1 "^\$" "must be 1 or unset" WASMTIME_RUNTIME_ONLY=maybe
-run "full archive is downloaded and verified" 0 "/cache/$VERSION/$FULL\$" "downloading" WASMTIME_RUNTIME_ONLY=
+# The full archive is upstream's on macOS and this project's elsewhere.
+run "full archive is downloaded and verified" 0 "/cache/$VERSION-r[0-9]+/$FULL\$" "downloading" WASMTIME_RUNTIME_ONLY= \
+    WASMTIME_RELEASE_URL="file://$TMP/served"
 [ ! -f "$TMP/built-variant" ] || fail "download case must not build"
 run "runtime without a checksum line builds from source" 0 "/source-runtime\$" "building from source" WASMTIME_RUNTIME_ONLY=1
 [ "$(cat "$TMP/built-variant")" = runtime ] || fail "stub must be asked for the runtime variant"
@@ -82,7 +84,8 @@ run "missing download falls back to source" 0 "/source-runtime\$" "not available
 
 # The archive exists but its checksum is wrong: an error, never a fallback.
 echo "0000000000000000000000000000000000000000000000000000000000000000  $FULL.tar.xz" > "$FAKE/scripts/wasmtime.sha256"
-run "checksum mismatch is fatal" 1 "^\$" "checksum mismatch" WASMTIME_RUNTIME_ONLY=
+run "checksum mismatch is fatal" 1 "^\$" "checksum mismatch" WASMTIME_RUNTIME_ONLY= \
+    WASMTIME_RELEASE_URL="file://$TMP/served"
 [ ! -f "$TMP/built-variant" ] || fail "checksum mismatch must not build"
 
 echo "1..$n"

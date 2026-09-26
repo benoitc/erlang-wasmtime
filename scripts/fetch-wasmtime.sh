@@ -4,16 +4,18 @@
 # Prints a directory holding include/ and lib/ on stdout. Resolution order:
 #
 #   1. WASMTIME_C_API_DIR       use it as is
-#   2. a prebuilt archive       upstream's C API tarball for the full library;
-#                               this project's releases for the runtime-only
-#                               library and for FreeBSD; checksum-verified
+#   2. a prebuilt archive       upstream's C API tarball for the full library
+#                               on macOS; this project's releases for the
+#                               runtime-only library and for the full one on
+#                               Linux (glibc, musl) and FreeBSD, built with
+#                               scripts/wasmtime-patches; checksum-verified
 #   3. a source build           when the platform has no archive, or the
 #                               download does not exist, or
 #                               WASMTIME_SOURCE_BUILD=1
 #
 # The archives (12-16 MB) are not in the hex package: hex caps tarballs at
 # 8 MB, so they are fetched once at compile time and cached under
-# _build/wasmtime/<version>/. Same approach as wasmtime-py's
+# _build/wasmtime/<version>-r<revision>/. Same approach as wasmtime-py's
 # ci/download-wasmtime.py, moved from publish time to build time.
 #
 # Variants:
@@ -34,10 +36,12 @@
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(tr -d '[:space:]' < "$ROOT/scripts/wasmtime.version")"
-CACHE="${WASMTIME_CACHE_DIR:-$ROOT/_build/wasmtime}/$VERSION"
 # Build revision of this repo's archives (scripts/wasmtime-runtime.rev; 1 when absent).
 REV=1
 [ -f "$ROOT/scripts/wasmtime-runtime.rev" ] && REV="$(tr -d '[:space:]' < "$ROOT/scripts/wasmtime-runtime.rev")"
+# Keyed by revision too: a new revision carries a new recipe (patches), and
+# an archive of the old one must not be picked up from the cache.
+CACHE="${WASMTIME_CACHE_DIR:-$ROOT/_build/wasmtime}/$VERSION-r$REV"
 RELEASE_URL="${WASMTIME_RELEASE_URL:-https://github.com/benoitc/erlang-wasmtime/releases/download/wasmtime-runtime-$VERSION-r$REV}"
 UPSTREAM_URL="${WASMTIME_UPSTREAM_URL:-https://github.com/bytecodealliance/wasmtime/releases/download/$VERSION}"
 BUILD_SCRIPT="${WASMTIME_BUILD_SCRIPT:-$ROOT/scripts/build-wasmtime.sh}"
@@ -80,8 +84,13 @@ if [ "$VARIANT" = runtime ]; then
     SUMS="$ROOT/scripts/wasmtime-runtime.sha256"
 else
     NAME="wasmtime-$VERSION-$ARCH-$OS-c-api"
-    # Wasmtime publishes no FreeBSD archive; this project's releases do.
-    if [ "$OS" = freebsd ]; then URL="$RELEASE_URL/$NAME.tar.xz"; else URL="$UPSTREAM_URL/$NAME.tar.xz"; fi
+    # Wasmtime publishes no FreeBSD archive, and its Linux ones lack the
+    # patches in scripts/wasmtime-patches (pagemap_scan, docs/preinit.md):
+    # this project's releases carry both. macOS takes upstream's.
+    case "$OS" in
+        linux|musl|freebsd) URL="$RELEASE_URL/$NAME.tar.xz" ;;
+        *) URL="$UPSTREAM_URL/$NAME.tar.xz" ;;
+    esac
     SUMS="$ROOT/scripts/wasmtime.sha256"
 fi
 FILE="$NAME.tar.xz"

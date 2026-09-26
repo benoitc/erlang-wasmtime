@@ -52,13 +52,16 @@ flowchart LR
   R -->|1 ref| I
   I -->|1 ref| M
   M -->|uses| E[engine_t, never freed]
-  I -->|owns| S[Wasmtime store, linker, hostfns, inbox, capture]
+  I -->|owns| S[Wasmtime store, inbox, capture]
+  M -->|owns| L[linker entries: linker, InstancePre, hostfns]
+  I -->|uses| L
   X[externref payload env] -->|freed by| GC[Wasmtime collector]
 ```
 
 | Object | Kept alive by | Destructor runs on | Destructor may |
 |---|---|---|---|
-| `module_res_t` | Erlang terms, every instance made from it | a scheduler | delete the Wasmtime module |
+| `module_res_t` | Erlang terms, every instance made from it | a scheduler | delete the Wasmtime module and its linker entries (no instance can be using them: each holds the module) |
+| `linker_entry_t` | its module, or one instance when the module's cache is full (`owns_entry`) | `module_dtor` or `instance_dtor` | free the linker, the InstancePre and the host function table |
 | `engine_t` | the registry (never freed until unload) | unload | delete the engine |
 | `handle_t` | Erlang terms | a scheduler | set `stopping`, interrupt the running request, release its instance reference. Never wait for the thread. |
 | `instance_t` | the handle, the worker thread, every `ref_t` | whichever drops the last reference | free everything: the thread has exited (it releases its reference as its last act), so nothing else can touch the store |
@@ -173,6 +176,33 @@ Rules:
   It returns 0 for a kind that cannot cross (`exnref`).
 - The kind of a raw value always comes from the function type, never from
   the value.
+
+## Linking
+
+Everything an instance is linked against that does not depend on its
+store is built once per module and shape, in a `linker_entry_t`: the WASI
+functions, the `clocks` and stdio shadows, the Erlang host functions, the
+`erlang.*` imports, and Wasmtime's `InstancePre`, which checks the imports
+once. The shape is `{Imports, Wasi, Monotonic, StdinStream, TtyMask}`;
+`link_entry` in `nif_instantiate.c` finds or builds the entry under the
+module's mutex. A module keeps `MAX_LINKERS` (16) entries; an instance
+with a further shape gets a private one.
+
+What stays per instance: the store, its WASI context (arguments,
+environment, preopens, stdio), the stdin shim. Rules that follow:
+
+- No callback may take its instance from its env. Every store's data is
+  its instance, and callbacks call `caller_inst`. A host function's env is
+  its index in the entry's `hostfns`.
+- Nothing in an entry may refer to a store. `wasmtime_linker_get` on an
+  entry's linker would materialize a function in one store; the originals
+  of shadowed WASI functions come from the engine's WASI-only linker
+  (`engine_wasi_linker`, `take_real_wasi`) instead.
+- An entry is read-only once published: several instance threads
+  instantiate from one `InstancePre` at once.
+
+On the CPython reactor this took instantiation from about 150 us to 70 us
+on macOS: `wasmtime_linker_define_wasi` alone was 60 us per instance.
 
 ## Engines and precompiled modules
 
@@ -329,6 +359,7 @@ Decisions and their reasons:
 |---|---|---|---|
 | 4 MB thread stack | `nif_instantiate` | Wasmtime runs the guest on the native stack (`max_wasm_stack` 512 KB) with our callbacks above it; macOS threads default to 512 KB | smaller: stack overflow inside deep guests on macOS; larger: address space only, not resident |
 | 10 ms epoch tick | `EPOCH_TICK_NS` | how often a running guest's epoch callback runs; `stop_current` bumps the epoch itself, so it no longer bounds interrupt latency | the cost of the callback in long guests |
+| 16 linkers per module | `MAX_LINKERS` | a module sees a handful of import shapes; the cap bounds what a caller varying its imports can make the module hold | more instances build a private linker (about 80 us) |
 | 20 us host reply spin | `HOST_SPIN_NS` | a reply from an idle process comes back in 2 to 3 us; sleeping on the condition variable costs a wake-up of several | CPU burnt when the host fun is slow |
 | 10,000 pooled instances, 4 GB per slot | `POOL_MAX_INSTANCES`, `POOL_MAX_MEMORY` in `nif_engine.c`, the same in `wasmtime.erl` | a slot may not exceed Wasmtime's 4 GB memory reservation; 10,000 slots reserve about 40 TB of address space | aborts in `Engine::new` if the C and Erlang checks drift |
 | 10,000 snapshot segments, merged across 4-byte gaps | `MAX_SEGMENTS`, `MERGE_GAP` in `nif_preinit.c` | Wizer's values: a segment costs about 4 bytes to encode, and Wasmtime handles tens of thousands slowly | the size of pre-initialized modules |

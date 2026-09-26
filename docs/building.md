@@ -7,10 +7,12 @@ fit: offline builds, a system-installed Wasmtime, unsupported platforms.
 
 `rebar3 compile` runs `scripts/build-nif.sh` as a pre-hook, which:
 
-1. Calls `scripts/fetch-wasmtime.sh`. It picks the release asset for your
-   platform (`wasmtime-<version>-<arch>-<os>-c-api.tar.xz`), downloads it into
-   `_build/wasmtime/<version>/`, checks its sha256 against
-   `scripts/wasmtime.sha256`, and extracts it.
+1. Calls `scripts/fetch-wasmtime.sh`. It picks the archive for your
+   platform (`wasmtime-<version>-<arch>-<os>-c-api.tar.xz`): Wasmtime's own
+   release on macOS, this repository's on Linux (glibc and musl) and
+   FreeBSD, built with the patches in `scripts/wasmtime-patches`. It
+   downloads it into `_build/wasmtime/<version>-r<revision>/`, checks its
+   sha256 against `scripts/wasmtime.sha256`, and extracts it.
 2. Compiles `c_src/wasmtime_nif.c` and links `libwasmtime.a` statically into
    `priv/wasmtime_nif.so`.
 
@@ -67,7 +69,8 @@ with `WASMTIME_RUNTIME_ONLY=1 rebar3 ct` and the fixtures from
 For a platform without a prebuilt archive, or when a download is not
 available, the build compiles the Wasmtime C API itself with
 `scripts/build-wasmtime.sh` (the same recipe the release workflow uses),
-into `_build/wasmtime/<version>/source-<full|runtime>/`, and caches it. That
+into `_build/wasmtime/<version>-r<revision>/source-<full|runtime>/`, with
+`scripts/wasmtime-patches` applied, and caches it. That
 needs `git`, `cmake` and a Rust toolchain; the script says so when one is
 missing. `WASMTIME_SOURCE_BUILD=1` forces the source build anywhere. A
 checksum mismatch on an archive that does exist is never a reason to fall
@@ -93,9 +96,11 @@ Wasmtime's C ABI changes between major releases.
 To pre-seed the cache instead, place the tarball where the script looks:
 
 ```sh
-mkdir -p _build/wasmtime/v48.0.1
-cp wasmtime-v48.0.1-x86_64-linux-c-api.tar.xz _build/wasmtime/v48.0.1/
+mkdir -p _build/wasmtime/v48.0.1-r3
+cp wasmtime-v48.0.1-x86_64-linux-c-api.tar.xz _build/wasmtime/v48.0.1-r3/
 ```
+
+The revision is `scripts/wasmtime-runtime.rev`.
 
 `WASMTIME_CACHE_DIR` moves that cache, for example to a directory shared
 between builds.
@@ -140,12 +145,17 @@ provides what it needs.
 
 `.github/workflows/wasmtime-runtime.yml` builds the runtime-only library on
 native runners for macOS (arm64, x86_64), Linux glibc and musl (arm64,
-x86_64) and FreeBSD (x86_64, in a VM), plus the full FreeBSD library, with
-`scripts/build-wasmtime.sh`, and attaches them to the release
+x86_64) and FreeBSD (x86_64, in a VM), plus the full library for Linux and
+FreeBSD, with `scripts/build-wasmtime.sh`, and attaches them to the release
 `wasmtime-runtime-<version>-r<revision>` (`scripts/wasmtime-runtime.rev`,
 bumped for a rebuild so pinned assets are never replaced). Its checksums go into
-`scripts/wasmtime-runtime.sha256` (and the FreeBSD line of
-`scripts/wasmtime.sha256`) by hand, reviewed like any other change.
+`scripts/wasmtime-runtime.sha256` and the `-c-api` lines of
+`scripts/wasmtime.sha256` by hand, reviewed like any other change.
+
+The full Linux library is this project's rather than Wasmtime's because of
+`scripts/wasmtime-patches`: Wasmtime's C API cannot turn on the
+`PAGEMAP_SCAN` slot reset that pooled, pre-initialized instances need on
+Linux. The macOS archives stay Wasmtime's: the reset is Linux-only.
 
 ## Upgrade Wasmtime
 

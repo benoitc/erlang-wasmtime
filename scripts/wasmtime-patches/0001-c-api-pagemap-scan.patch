@@ -1,0 +1,42 @@
+diff --git a/crates/c-api/include/wasmtime/config.h b/crates/c-api/include/wasmtime/config.h
+index e01b2dd..62796e7 100644
+--- a/crates/c-api/include/wasmtime/config.h
++++ b/crates/c-api/include/wasmtime/config.h
+@@ -731,6 +731,13 @@ WASMTIME_POOLING_ALLOCATION_CONFIG_PROP(linear_memory_keep_resident, size_t)
+  */
+ WASMTIME_POOLING_ALLOCATION_CONFIG_PROP(table_keep_resident, size_t)
+ 
++/**
++ * \brief Whether a freed slot's memory is reset with the Linux PAGEMAP_SCAN
++ * ioctl, touching only the pages the guest wrote (when the host supports it).
++ * Added by erlang_wasmtime's build (scripts/wasmtime-patches).
++ */
++WASMTIME_POOLING_ALLOCATION_CONFIG_PROP(pagemap_scan, bool)
++
+ /**
+  * \brief The maximum number of concurrent component instances supported
+  * (default is 1000).
+diff --git a/crates/c-api/src/config.rs b/crates/c-api/src/config.rs
+index 1196dc4..226959b 100644
+--- a/crates/c-api/src/config.rs
++++ b/crates/c-api/src/config.rs
+@@ -575,6 +575,19 @@ pub extern "C" fn wasmtime_pooling_allocation_config_linear_memory_keep_resident
+     c.config.linear_memory_keep_resident(size);
+ }
+ 
++#[unsafe(no_mangle)]
++#[cfg(feature = "pooling-allocator")]
++pub extern "C" fn wasmtime_pooling_allocation_config_pagemap_scan_set(
++    c: &mut wasmtime_pooling_allocation_config_t,
++    enable: bool,
++) {
++    c.config.pagemap_scan(if enable {
++        wasmtime::Enabled::Auto
++    } else {
++        wasmtime::Enabled::No
++    });
++}
++
+ #[unsafe(no_mangle)]
+ #[cfg(feature = "pooling-allocator")]
+ pub extern "C" fn wasmtime_pooling_allocation_config_table_keep_resident_set(

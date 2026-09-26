@@ -5,6 +5,13 @@
  */
 #include "nif.h"
 
+/* Added by scripts/wasmtime-patches, so present in this project's Linux
+ * and FreeBSD archives and in source builds, absent from upstream's macOS
+ * archives: the weak reference is null there. docs/preinit.md. */
+extern void
+wasmtime_pooling_allocation_config_pagemap_scan_set(wasmtime_pooling_allocation_config_t *, bool)
+    __attribute__((weak));
+
 /* Mirrors pooling_key/3 in wasmtime.erl; docs/design.md, "Numbers". */
 #define POOL_MAX_INSTANCES 10000
 #define POOL_MAX_MEMORY (4ull << 30)
@@ -167,6 +174,8 @@ static wasm_config_t *make_config(const engine_t *want, const char **missing) {
     wasmtime_pooling_allocation_config_max_memory_size_set(pc, (size_t)want->pool_max_memory);
     wasmtime_pooling_allocation_config_linear_memory_keep_resident_set(
         pc, (size_t)want->pool_keep_resident);
+    if (wasmtime_pooling_allocation_config_pagemap_scan_set)
+      wasmtime_pooling_allocation_config_pagemap_scan_set(pc, true);
     wasmtime_pooling_allocation_strategy_set(cfg, pc);
     wasmtime_pooling_allocation_config_delete(pc);
   }
@@ -328,6 +337,27 @@ wasmtime_module_t *engine_shim(engine_t *e, ErlNifEnv *env, ERL_NIF_TERM shim, c
   return e->shim;
 }
 
+/* A linker holding only Wasmtime's WASI, once per engine. The instances'
+ * own linkers shadow some WASI functions; this one is where the originals
+ * are found (take_real_wasi). */
+wasmtime_linker_t *engine_wasi_linker(engine_t *e) {
+  pthread_mutex_lock(&engines_mu);
+  if (!e->wasi) {
+    wasmtime_linker_t *l = wasmtime_linker_new(e->engine);
+#if NIF_HAVE_WASI
+    wasmtime_error_t *err = wasmtime_linker_define_wasi(l);
+    if (err) {
+      wasmtime_error_delete(err);
+      wasmtime_linker_delete(l);
+      l = NULL;
+    }
+#endif
+    e->wasi = l;
+  }
+  pthread_mutex_unlock(&engines_mu);
+  return e->wasi;
+}
+
 static void *ticker_main(void *arg) {
   struct timespec ts = {0, EPOCH_TICK_NS};
   while (!__atomic_load_n(&ticker_stop, __ATOMIC_ACQUIRE)) {
@@ -358,6 +388,7 @@ void engines_free_all(void) {
     engine_t *e = engines_head;
     engines_head = e->next;
     if (e->shim) wasmtime_module_delete(e->shim);
+    if (e->wasi) wasmtime_linker_delete(e->wasi);
     wasm_engine_delete(e->engine);
     enif_free(e);
   }

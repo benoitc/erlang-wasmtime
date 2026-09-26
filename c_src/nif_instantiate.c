@@ -14,7 +14,12 @@ static char *bin_to_cstr(ErlNifEnv *env, ERL_NIF_TERM t) {
   return s;
 }
 
-/* Wasi :: none | #{args, env, dirs, stdin, stdout, stderr, output_limit, clocks}
+/* Configures the store's WASI context: everything per instance (arguments,
+ * environment, preopens, stdio). What the linker needs to know of it, the
+ * clocks and the shadowed stdio functions, goes to *monotonic and the
+ * inbox flags; the WASI functions themselves are in the shared linker.
+ *
+ * Wasi :: none | #{args, env, dirs, stdin, stdout, stderr, output_limit, clocks}
  * (wasi_options/1 in wasmtime.erl fills every key)
  * args  :: inherit | [binary()]     env :: inherit | [{binary(), binary()}]
  * stdin :: none | inherit | stream | {file, Path} | {binary, Bytes}
@@ -22,7 +27,7 @@ static char *bin_to_cstr(ErlNifEnv *env, ERL_NIF_TERM t) {
  * dirs  :: [{GuestPath, HostPath, read | write}]
  * clocks :: all | monotonic */
 static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *out,
-                                   ERL_NIF_TERM wasi) {
+                                   ERL_NIF_TERM wasi, int *monotonic) {
   ERL_NIF_TERM t[8];
   const ERL_NIF_TERM keys[8] = {atom_args,   atom_env,    atom_dirs,         atom_stdin,
                                 atom_stdout, atom_stderr, atom_output_limit, atom_clocks};
@@ -36,7 +41,6 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
 
   wasi_config_t *cfg = wasi_config_new();
   const char *err = NULL;
-  ERL_NIF_TERM err_t;
   unsigned n;
   ERL_NIF_TERM l, h;
   const ERL_NIF_TERM *tt;
@@ -49,6 +53,7 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
   }
   inst->capture.limit = limit;
   int monotonic_only = enif_is_identical(t[7], atom_monotonic);
+  *monotonic = monotonic_only;
   if (!monotonic_only && !enif_is_identical(t[7], atom_all)) {
     err = "wasi clocks must be all or monotonic";
     goto done;
@@ -189,13 +194,6 @@ done:
     wasmtime_error_delete(werr);
     return mk_error_s(out, "wasi", "config", "wasi could not be configured");
   }
-  werr = wasmtime_linker_define_wasi(inst->wasm.linker);
-  if (werr) {
-    wasmtime_error_delete(werr);
-    return mk_error_s(out, "wasi", "config", "wasi could not be linked");
-  }
-  if (monotonic_only && (err_t = restrict_clocks(inst, out))) return err_t;
-  if (inst->inbox.stdin || inst->inbox.tty_mask) return shadow_wasi(inst, out);
   return 0;
 #endif
 }
@@ -250,16 +248,16 @@ static ERL_NIF_TERM parse_options(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM
   return 0;
 }
 
-/* The store, its limits, the epoch hook and an empty linker. */
+/* The store, its limits and the epoch hook. Its data is the instance, which
+ * outlives it: callbacks find their instance there (caller_inst). */
 static void configure_store(instance_t *inst, const opts_t *o) {
   wasm_engine_t *engine = inst->wasm.mod->engine->engine;
-  inst->wasm.store = wasmtime_store_new(engine, NULL, NULL);
+  inst->wasm.store = wasmtime_store_new(engine, inst, NULL);
   inst->wasm.ctx = wasmtime_store_context(inst->wasm.store);
   wasmtime_store_limiter(inst->wasm.store, o->memory_limit, o->max_table_elements, o->max_instances,
                          o->max_tables, -1);
   wasmtime_store_epoch_deadline_callback(inst->wasm.store, epoch_callback, inst, NULL);
   wasmtime_context_set_epoch_deadline(inst->wasm.ctx, 1);
-  inst->wasm.linker = wasmtime_linker_new(engine);
 }
 
 /* The import type named {Module, Name}, or NULL when the module does not
@@ -276,8 +274,10 @@ static const wasm_importtype_t *find_import(const wasm_importtype_vec_t *imports
   return NULL;
 }
 
-/* Binds one Erlang-backed import. Takes ownership of `module` and `name`. */
-static ERL_NIF_TERM bind_import(instance_t *inst, ErlNifEnv *out, char *module, char *name,
+/* Binds one Erlang-backed import into the entry's linker. Takes ownership
+ * of `module` and `name`. The callback's env is the import's index in
+ * `hostfns`; the instance comes from the store (caller_inst). */
+static ERL_NIF_TERM bind_import(linker_entry_t *le, ErlNifEnv *out, char *module, char *name,
                                 const wasm_importtype_t *found) {
   if (strcmp(module, "erlang") == 0 && (strcmp(name, "send") == 0 || strcmp(name, "recv") == 0)) {
     enif_free(module);
@@ -303,40 +303,36 @@ static ERL_NIF_TERM bind_import(instance_t *inst, ErlNifEnv *out, char *module, 
                       : sh.refs ? "v128 and references cannot mix in one signature"
                                 : "too many results");
   }
-  hostfn_t *fn = &inst->wasm.hostfns[inst->wasm.nhostfns];
+  size_t idx = le->nhostfns++;
+  hostfn_t *fn = &le->hostfns[idx];
   fn->module = module;
   fn->name = name;
   fn->type = wasm_functype_copy(ft);
   fn->typed = sh.refs;
-  hostfn_env_t *he = enif_alloc(sizeof *he);
-  he->inst = inst;
-  he->idx = inst->wasm.nhostfns;
-  inst->wasm.nhostfns++;
-  /* The linker owns `he` from here and frees it with enif_free, on the
-   * error path too. */
+  void *env = (void *)(uintptr_t)idx;
   wasmtime_error_t *e =
       fn->typed
-          ? wasmtime_linker_define_func(inst->wasm.linker, module, strlen(module), name,
-                                        strlen(name), fn->type, host_callback_typed, he, enif_free)
-          : wasmtime_linker_define_func_unchecked(inst->wasm.linker, module, strlen(module), name,
-                                                  strlen(name), fn->type, host_callback, he,
-                                                  enif_free);
+          ? wasmtime_linker_define_func(le->linker, module, strlen(module), name, strlen(name),
+                                        fn->type, host_callback_typed, env, NULL)
+          : wasmtime_linker_define_func_unchecked(le->linker, module, strlen(module), name,
+                                                  strlen(name), fn->type, host_callback, env, NULL);
   return e ? error_to_term(out, e, "link") : 0;
 }
 
 /* Host functions: only imports named in the map are defined. Anything else
- * the module needs makes wasmtime_linker_instantiate fail with a link error.
- * The erlang.* imports are bound by the runtime when the module has them. */
-static ERL_NIF_TERM bind_imports(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM list,
-                                 ErlNifEnv *out) {
+ * the module needs makes wasmtime_linker_instantiate_pre fail with a link
+ * error. The erlang.* imports are bound by the runtime when the module has
+ * them. */
+static ERL_NIF_TERM bind_imports(linker_entry_t *le, module_res_t *m, ErlNifEnv *env,
+                                 ERL_NIF_TERM list, ErlNifEnv *out) {
   unsigned nimports;
   if (!enif_get_list_length(env, list, &nimports))
     return mk_error_s(out, "link", "badarg", "imports must be a list");
-  inst->wasm.hostfns = enif_alloc(sizeof(hostfn_t) * (nimports + 1));
-  memset(inst->wasm.hostfns, 0, sizeof(hostfn_t) * (nimports + 1));
+  le->hostfns = enif_alloc(sizeof(hostfn_t) * (nimports + 1));
+  memset(le->hostfns, 0, sizeof(hostfn_t) * (nimports + 1));
 
   wasm_importtype_vec_t imports;
-  wasmtime_module_imports(inst->wasm.mod->mod, &imports);
+  wasmtime_module_imports(m->mod, &imports);
   ERL_NIF_TERM h, result = 0;
   while (!result && enif_get_list_cell(env, list, &h, &list)) {
     const ERL_NIF_TERM *mn;
@@ -360,18 +356,101 @@ static ERL_NIF_TERM bind_imports(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM 
       enif_free(name);
       continue;
     }
-    result = bind_import(inst, out, module, name, found);
+    result = bind_import(le, out, module, name, found);
   }
-  if (!result) result = define_erlang_imports(inst, out, &imports);
+  if (!result) result = define_erlang_imports(le->linker, out, &imports);
   wasm_importtype_vec_delete(&imports);
   return result;
+}
+
+void linker_entry_free(linker_entry_t *le) {
+  if (!le) return;
+  if (le->pre) wasmtime_instance_pre_delete(le->pre);
+  if (le->linker) wasmtime_linker_delete(le->linker);
+  for (size_t i = 0; i < le->nhostfns; i++) {
+    enif_free(le->hostfns[i].module);
+    enif_free(le->hostfns[i].name);
+    wasm_functype_delete(le->hostfns[i].type);
+  }
+  enif_free(le->hostfns);
+  if (le->key_env) enif_free_env(le->key_env);
+  enif_free(le);
+}
+
+/* Builds the linker and InstancePre for one shape. NULL with *err set when
+ * the module cannot link with it. */
+static linker_entry_t *build_entry(module_res_t *m, ErlNifEnv *env, ERL_NIF_TERM key,
+                                   ERL_NIF_TERM imports, int wasi, int monotonic, int stdin_stream,
+                                   int tty_mask, ErlNifEnv *out, ERL_NIF_TERM *err) {
+  linker_entry_t *le = enif_alloc(sizeof *le);
+  memset(le, 0, sizeof *le);
+  le->key_env = enif_alloc_env();
+  le->key = enif_make_copy(le->key_env, key);
+  le->linker = wasmtime_linker_new(m->engine->engine);
+  *err = 0;
+#if NIF_HAVE_WASI
+  if (wasi) {
+    wasmtime_error_t *werr = wasmtime_linker_define_wasi(le->linker);
+    if (werr) {
+      wasmtime_error_delete(werr);
+      *err = mk_error_s(out, "wasi", "config", "wasi could not be linked");
+    }
+    if (!*err && monotonic) *err = restrict_clocks(le->linker, out);
+    if (!*err && (stdin_stream || tty_mask))
+      *err = shadow_wasi(le->linker, stdin_stream, tty_mask, out);
+  }
+#else
+  (void)wasi, (void)monotonic, (void)stdin_stream, (void)tty_mask;
+#endif
+  if (!*err) *err = bind_imports(le, m, env, imports, out);
+  if (!*err) {
+    wasmtime_error_t *e = wasmtime_linker_instantiate_pre(le->linker, m->mod, &le->pre);
+    if (e) *err = error_to_term(out, e, "link");
+  }
+  if (*err) {
+    linker_entry_free(le);
+    return NULL;
+  }
+  return le;
+}
+
+/* Linkers kept per module; a module instantiated with more shapes than this
+ * builds a private linker for each further instance. */
+#define MAX_LINKERS 16
+
+/* The entry for this instance's shape: the module's, built on first use, or
+ * a private one when the module's cache is full. */
+static ERL_NIF_TERM link_entry(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM imports, int wasi,
+                               int monotonic, ErlNifEnv *out) {
+  module_res_t *m = inst->wasm.mod;
+  ERL_NIF_TERM key = enif_make_tuple5(
+      env, imports, wasi ? atom_true : atom_false, monotonic ? atom_true : atom_false,
+      inst->inbox.stdin ? atom_true : atom_false, enif_make_int(env, inst->inbox.tty_mask));
+  ERL_NIF_TERM err = 0;
+  pthread_mutex_lock(&m->mu);
+  linker_entry_t *le = m->linkers;
+  while (le && !enif_is_identical(le->key, key)) le = le->next;
+  if (!le) {
+    le = build_entry(m, env, key, imports, wasi, monotonic, inst->inbox.stdin, inst->inbox.tty_mask,
+                     out, &err);
+    if (le && m->nlinkers < MAX_LINKERS) {
+      le->next = m->linkers;
+      m->linkers = le;
+      m->nlinkers++;
+    } else if (le) {
+      inst->wasm.owns_entry = 1;
+    }
+  }
+  pthread_mutex_unlock(&m->mu);
+  inst->wasm.entry = le;
+  return err;
 }
 
 /* Runs the module's start section, which may call host functions. */
 static ERL_NIF_TERM instantiate_module(instance_t *inst, ErlNifEnv *out) {
   wasm_trap_t *trap = NULL;
-  wasmtime_error_t *e = wasmtime_linker_instantiate(
-      inst->wasm.linker, inst->wasm.ctx, inst->wasm.mod->mod, &inst->wasm.instance, &trap);
+  wasmtime_error_t *e = wasmtime_instance_pre_instantiate(inst->wasm.entry->pre, inst->wasm.ctx,
+                                                          &inst->wasm.instance, &trap);
   ERL_NIF_TERM result = outcome(inst, out, e, trap, "link");
   return enif_is_identical(result, atom_ok) ? 0 : result;
 }
@@ -406,12 +485,15 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
   ERL_NIF_TERM err;
   if ((err = parse_options(inst, env, req->opts, &o, out))) return err;
   configure_store(inst, &o);
-  if ((err = configure_wasi(inst, env, out, o.wasi))) return err;
-  if ((err = bind_imports(inst, env, o.imports, out))) return err;
+  int monotonic = 0, wasi = !enif_is_identical(o.wasi, atom_none);
+  if ((err = configure_wasi(inst, env, out, o.wasi, &monotonic))) return err;
+  if ((err = link_entry(inst, env, o.imports, wasi, monotonic, out))) return err;
   if ((err = instantiate_module(inst, out))) return err;
   cache_memory(inst);
-  if ((inst->inbox.stdin || inst->inbox.tty_mask) && (err = link_wasi_shim(inst, env, o.shim, out)))
-    return err;
+  if (inst->inbox.stdin || inst->inbox.tty_mask) {
+    if ((err = take_real_wasi(inst, out))) return err;
+    if ((err = link_wasi_shim(inst, env, o.shim, out))) return err;
+  }
   inst->wasm.instantiated = 1;
   return atom_ok;
 }

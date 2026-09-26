@@ -31,7 +31,7 @@ all come back as `{error, #{class => ..., kind => ..., message => ...}}`.
   stops a running guest at once.
 - Pre-initialization: `preinit/3` captures a guest after its init exports ran;
   with the pooling allocator each request gets a fresh CPython with its
-  interpreter started in about 0.2 ms, 1.6 ms for a whole request. See
+  interpreter started in about 0.1 ms, 1.2 ms for a whole request on an M4. See
   [throughput](docs/throughput.md).
 - WASI preview 1 with explicit capabilities: `args`, `env`, preopened `dirs`,
   stdio redirected to files or inherited, and clocks restricted to the

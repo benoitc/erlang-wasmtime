@@ -71,6 +71,29 @@ jobs:
           head -30 /tmp/strace.txt
           echo "--- faults"
           /usr/bin/time -v $E -eval "destroy_diag:main([\"$R\", \"/tmp/d3\", \"pool\"]), halt()." 2>&1 | grep -E "us \(p50|faults|Elapsed"
+      - name: Patched C API with pagemap_scan (temporary)
+        run: |
+          git clone -q --depth 1 --branch "$(cat scripts/wasmtime.version)" https://github.com/bytecodealliance/wasmtime "$RUNNER_TEMP/wt"
+          cat >> "$RUNNER_TEMP/wt/crates/c-api/src/config.rs" <<'RS'
+
+          #[unsafe(no_mangle)]
+          #[cfg(feature = "pooling-allocator")]
+          pub extern "C" fn wasmtime_pooling_allocation_config_pagemap_scan_set(
+              c: &mut wasmtime_pooling_allocation_config_t,
+              enable: bool,
+          ) {
+              c.config.pagemap_scan(if enable { wasmtime::Enabled::Auto } else { wasmtime::Enabled::No });
+          }
+          RS
+          export CARGO_PROFILE_RELEASE_PANIC=abort CARGO_PROFILE_RELEASE_STRIP=debuginfo
+          cmake -S "$RUNNER_TEMP/wt/crates/c-api" -B "$RUNNER_TEMP/wtb" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/wtapi" >/dev/null
+          cmake --build "$RUNNER_TEMP/wtb" >/dev/null
+          cmake --install "$RUNNER_TEMP/wtb" >/dev/null
+          nm "$RUNNER_TEMP/wtapi/lib/libwasmtime.a" 2>/dev/null | grep -c pagemap_scan_set || true
+          WASMTIME_C_API_DIR="$RUNNER_TEMP/wtapi" rebar3 compile >/dev/null
+          nm -D priv/wasmtime_nif.so | grep pagemap_scan_set || nm priv/wasmtime_nif.so | grep pagemap_scan_set
+          erl -noshell -pa _build/default/lib/erlang_wasmtime/ebin -pa _build/diag -eval "destroy_diag:main([\"$PWD/_build/py-reactor/dist\", \"/tmp/d4\", \"all\"]), halt()."
+          rm -f _build/wasmtime_nif.stamp
       - name: Run the benchmark
         run: |
           uname -a

@@ -167,6 +167,8 @@ static wasm_config_t *make_config(const engine_t *want, const char **missing) {
     wasmtime_pooling_allocation_config_max_memory_size_set(pc, (size_t)want->pool_max_memory);
     wasmtime_pooling_allocation_config_linear_memory_keep_resident_set(
         pc, (size_t)want->pool_keep_resident);
+    if (wasmtime_pooling_allocation_config_pagemap_scan_set)
+      wasmtime_pooling_allocation_config_pagemap_scan_set(pc, true);
     wasmtime_pooling_allocation_strategy_set(cfg, pc);
     wasmtime_pooling_allocation_config_delete(pc);
   }
@@ -188,6 +190,12 @@ static wasm_config_t *make_config(const engine_t *want, const char **missing) {
   }
   return cfg;
 }
+
+/* Experiment (linux-destroy): only a C API patched with this setter has
+ * it; the weak reference is null otherwise. */
+extern void
+wasmtime_pooling_allocation_config_pagemap_scan_set(wasmtime_pooling_allocation_config_t *, bool)
+    __attribute__((weak));
 
 engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err) {
   engine_t want;

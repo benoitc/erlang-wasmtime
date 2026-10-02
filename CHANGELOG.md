@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Pools sized for components: `pooling` takes `core_instances`, `memories`
+  and `tables` (each `instances` by default); a component instance's store
+  allows 100 core instances by default instead of 10.
+- `bench/agent_bench.erl`: a componentize-py agent per request, 0.75 ms and
+  5,900 requests a second with 14 callers on an M4 Pro.
 - Components: `compile/2`, `deserialize/1,2`, `deserialize_file/1,2` and
   `validate/1` take components; `module_kind/1`; `call/3,4` by `Export` or
   `Interface#Function`, answering `{ok, Value}`; every WIT value crosses

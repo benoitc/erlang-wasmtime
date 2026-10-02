@@ -101,3 +101,44 @@ bootstrap string and `main.py` are compiled from source on every request.
   instance threads, 14 schedulers) on 14 cores.
 - A deadline stops the guest at once: `timeout` and `interrupt/1` bump the
   engine's epoch as they fire instead of waiting for the next 10 ms tick.
+
+## Components: a componentize-py agent
+
+`bench/agent_bench.erl` (`scripts/build-agent.sh`, then
+`scripts/bench-agent.sh`) runs the same request as a component built by
+componentize-py 0.25: a WIT world exporting `handle(context)` and
+importing one `call(name, payload) -> result<list<u8>, string>`
+capability, instantiated from a pool sized for components and destroyed
+per request.
+
+Apple M4 Pro, macOS 27, load average 8 to 10:
+
+| Phase | p50 | p90 | p99 |
+|---|---|---|---|
+| instantiate | 0.33 ms | 0.38 ms | 0.47 ms |
+| `handle` | 0.37 ms | 0.44 ms | 0.54 ms |
+| destroy | 0.04 ms | 0.06 ms | 0.11 ms |
+| **total** | **0.75 ms** | 0.88 ms | 1.05 ms |
+
+| Callers | Requests/s | p50 | p99 |
+|---|---|---|---|
+| 1 | 1,234 | 0.78 ms | 1.14 ms |
+| 4 | 3,347 | 1.06 ms | 3.88 ms |
+| 8 | 5,630 | 1.35 ms | 2.58 ms |
+| 14 | **5,929** | 2.29 ms | 4.00 ms |
+| 28 | 5,886 | 4.52 ms | 12.22 ms |
+
+| Measure | Value |
+|---|---|
+| Resident memory per live instance | 2.8 MB |
+| One capability `call` (one typed import), 14 callers | 57 us |
+| `timeout => 50` on `while True: pass` | returns within 1.3 ms of the deadline |
+| A module global set in one request, read in the next | starts over |
+
+The component is cheaper per request than the core reactor: componentize-py
+pre-initializes the interpreter with the app imported when it builds the
+component, and `handle` runs the app's function directly, where the
+reactor compiles its bootstrap and `main.py` on every request; one typed
+import call replaces the reactor's `call` and `take`. Instantiation costs
+more (0.33 ms against 0.08 ms): the component has 16 core instances and the
+C API has no component InstancePre, so linking runs per instance.

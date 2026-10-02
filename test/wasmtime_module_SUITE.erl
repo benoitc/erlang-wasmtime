@@ -273,8 +273,17 @@ bad_compile_options(_) ->
 pooling_roundtrip(_) ->
     Pool = wasmtime_test:pooling(),
     {ok, Mod} = wasmtime:compile({wat, add_wat()}, Pool),
-    #{allocator := pooling, pooling := #{instances := 64, max_memory := Max, keep_resident := 0}} =
-        wasmtime:module_options(Mod),
+    #{
+        allocator := pooling,
+        pooling := #{
+            instances := 64,
+            max_memory := Max,
+            keep_resident := 0,
+            core_instances := 64,
+            memories := 64,
+            tables := 64
+        }
+    } = wasmtime:module_options(Mod),
     64 bsl 20 = Max,
     {ok, Inst} = wasmtime:instantiate(Mod),
     {ok, [3]} = wasmtime:call(Inst, ~"add", [1, 2]),
@@ -316,6 +325,10 @@ bad_pooling_options(_) ->
     Bad(#{max_memory => 8 bsl 30}),
     Bad(#{keep_resident => -1}),
     Bad(#{max_memory => 1 bsl 20, keep_resident => 2 bsl 20}),
+    Bad(#{core_instances => 0}),
+    Bad(#{core_instances => 100_001}),
+    Bad(#{memories => 10_001}),
+    Bad(#{tables => 0}),
     ?assertError({case_clause, _}, wasmtime:compile({wat, add_wat()}, #{allocator => arena})),
     ok.
 

@@ -180,7 +180,11 @@ Options for `compile/2`, `validate/2` and `deserialize/2`.
   instance (default 256 MB, a multiple of 64 KB up to 4 GB; a guest that
   grows past it fails like one past `memory_limit`), and `keep_resident`,
   bytes of a freed slot kept mapped and zeroed rather than released
-  (default 0).
+  (default 0). `core_instances`, `memories` and `tables` are the slots for
+  what instances are made of, `instances` each by default: a core module
+  uses one of each, a component one per core instance, memory and table it
+  holds (a componentize-py agent: 16 core instances), so size them for
+  components.
 
 Of these, only `fuel` is part of a precompiled module's compatibility
 check: give it again to `deserialize/2` (or rely on `deserialize/1`, which
@@ -196,7 +200,10 @@ one Wasmtime engine, created on first use and kept; at most 32 exist per VM.
     pooling => #{
         instances => pos_integer(),
         max_memory => pos_integer(),
-        keep_resident => non_neg_integer()
+        keep_resident => non_neg_integer(),
+        core_instances => pos_integer(),
+        memories => pos_integer(),
+        tables => pos_integer()
     }
 }.
 
@@ -325,121 +332,13 @@ module_kind(Mod) -> wasmtime_nif:module_kind(Mod).
 
 -doc "The `t:compile_options/0` a module was compiled or deserialized with.".
 -spec module_options(module_ref()) -> compile_options().
-module_options(Mod) -> key_to_options(wasmtime_nif:module_options(Mod)).
+module_options(Mod) -> wasmtime_options:key_to_options(wasmtime_nif:module_options(Mod)).
 
 with_key(Opts, Fun) ->
-    case compile_key(Opts) of
+    case wasmtime_options:compile_key(Opts) of
         {ok, Key} -> Fun(Key);
         {error, _} = Error -> Error
     end.
-
-%% The engine key the NIF reads: {Fuel, OptLevel, [{Proposal, Bool}],
-%% Allocator} with the overrides sorted, so equal maps mean the same engine.
-%% Malformed options raise; a set Wasmtime would refuse when the engine is
-%% created (which it does by aborting the process) is returned as an error
-%% here.
-compile_key(Opts) when is_map(Opts) ->
-    Fuel = maps:get(fuel, Opts, false),
-    OptLevel = maps:get(opt_level, Opts, speed),
-    Proposals = maps:get(proposals, Opts, #{}),
-    true = is_boolean(Fuel),
-    true = lists:member(OptLevel, [none, speed, speed_and_size]),
-    maybe
-        {ok, Overrides} ?= proposal_overrides(Proposals),
-        {ok, Allocator} ?= allocator_key(Opts),
-        {ok, {Fuel, OptLevel, Overrides, Allocator}}
-    end.
-
-%% Wasmtime builds the pool when the engine is created and aborts the
-%% process if it cannot, so every bound it checks is checked here first.
-%% A slot may not exceed the memory reservation (4 GB by default); the
-%% instance cap keeps the reserved address space, about 4 GB per slot,
-%% within what a 64-bit host maps. docs/design.md, "Numbers".
--define(POOL_MAX_INSTANCES, 10_000).
--define(POOL_MAX_MEMORY, 4 bsl 30).
--define(WASM_PAGE, 16#10000).
-
-allocator_key(Opts) ->
-    case maps:get(allocator, Opts, on_demand) of
-        on_demand ->
-            {ok, on_demand};
-        pooling ->
-            Pool = maps:get(pooling, Opts, #{}),
-            true = is_map(Pool),
-            N = maps:get(instances, Pool, 1000),
-            Max = maps:get(max_memory, Pool, ?DEFAULT_MEMORY_LIMIT),
-            Keep = maps:get(keep_resident, Pool, 0),
-            pooling_key(N, Max, Keep)
-    end.
-
-pooling_key(N, _, _) when not is_integer(N); N < 1; N > ?POOL_MAX_INSTANCES ->
-    pool_error(~"pooling instances must be 1 to 10000");
-pooling_key(_, Max, _) when
-    not is_integer(Max); Max < ?WASM_PAGE; Max > ?POOL_MAX_MEMORY; Max rem ?WASM_PAGE =/= 0
-->
-    pool_error(~"pooling max_memory must be a multiple of 64 KB up to 4 GB");
-pooling_key(_, Max, Keep) when not is_integer(Keep); Keep < 0; Keep > Max ->
-    pool_error(~"pooling keep_resident must be 0 to max_memory");
-pooling_key(N, Max, Keep) ->
-    {ok, {pooling, N, Max, Keep}}.
-
-pool_error(Msg) -> {error, #{class => compile, kind => badarg, message => Msg}}.
-
-%% Sorted, checked, with the implications Wasmtime insists on: relaxed SIMD
-%% sits on SIMD, so turning SIMD off turns relaxed SIMD off too, and asking
-%% for the opposite is refused.
-proposal_overrides(Proposals) when is_map(Proposals) ->
-    Overrides = lists:sort(maps:to_list(Proposals)),
-    lists:foreach(
-        fun({P, V}) ->
-            true = is_proposal(P),
-            true = is_boolean(V)
-        end,
-        Overrides
-    ),
-    case {maps:get(simd, Proposals, true), maps:get(relaxed_simd, Proposals, false)} of
-        {false, true} ->
-            {error, #{
-                class => compile,
-                kind => badarg,
-                message => ~"relaxed_simd needs simd: disable both or neither"
-            }};
-        {false, false} ->
-            {ok, lists:usort([{relaxed_simd, false} | Overrides])};
-        {true, _} ->
-            {ok, Overrides}
-    end.
-
-key_to_options({Fuel, OptLevel, Overrides, Allocator}) ->
-    Base = #{fuel => Fuel, opt_level => OptLevel, proposals => maps:from_list(Overrides)},
-    case Allocator of
-        on_demand ->
-            Base#{allocator => on_demand};
-        {pooling, N, Max, Keep} ->
-            Base#{
-                allocator => pooling,
-                pooling => #{instances => N, max_memory => Max, keep_resident => Keep}
-            }
-    end.
-
-is_proposal(P) ->
-    lists:member(P, [
-        simd,
-        relaxed_simd,
-        relaxed_simd_deterministic,
-        bulk_memory,
-        multi_value,
-        multi_memory,
-        memory64,
-        tail_call,
-        wide_arithmetic,
-        custom_page_sizes,
-        threads,
-        reference_types,
-        function_references,
-        gc,
-        exceptions
-    ]).
 
 -doc """
 Serialize a compiled module into Wasmtime's precompiled form.
@@ -627,6 +526,8 @@ memory at most. Options:
   A build without WASI (see `features/0`) answers `kind => unavailable`.
 - `memory_limit`, `max_tables`, `max_table_elements`, `max_instances`:
   per-store caps enforced by Wasmtime. `unlimited` removes a cap.
+  `max_instances` counts core instances: 10 by default for a module, 100
+  for a component, which holds several.
 - `host_timeout`: how long a host function may run before the guest traps
   (default 30 s).
 - `host`: a process that serves host calls instead of the caller. It receives
@@ -676,7 +577,8 @@ nif_options(Mod, Imports, Opts) ->
         memory_limit => limit(memory_limit, Opts, ?DEFAULT_MEMORY_LIMIT),
         max_tables => limit(max_tables, Opts, 100),
         max_table_elements => limit(max_table_elements, Opts, 10_000_000),
-        max_instances => limit(max_instances, Opts, 10),
+        %% a component holds several core instances (componentize-py: 16)
+        max_instances => limit(max_instances, Opts, default_instances(Mod)),
         host_timeout => HostTimeout,
         host => HostPid,
         stream => StreamPid,
@@ -736,6 +638,12 @@ priv_dir() ->
             filename:join(filename:dirname(filename:dirname(code:which(?MODULE))), "priv");
         Dir ->
             Dir
+    end.
+
+default_instances(Mod) ->
+    case module_kind(Mod) of
+        component -> 100;
+        module -> 10
     end.
 
 limit(Key, Opts, Default) ->

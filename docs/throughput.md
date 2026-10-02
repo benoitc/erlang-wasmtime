@@ -135,10 +135,31 @@ Apple M4 Pro, macOS 27, load average 8 to 10:
 | `timeout => 50` on `while True: pass` | returns within 1.3 ms of the deadline |
 | A module global set in one request, read in the next | starts over |
 
+Linux x86_64 (the `bench` workflow, GitHub's `ubuntu-24.04` runner, AMD
+EPYC 9V74, 4 vCPUs):
+
+| Phase | p50 | p90 | p99 |
+|---|---|---|---|
+| instantiate | 0.92 ms | 0.96 ms | 0.99 ms |
+| `handle` | 0.19 ms | 0.21 ms | 0.24 ms |
+| destroy | 0.17 ms | 0.20 ms | 0.22 ms |
+| **total** | **1.27 ms** | 1.36 ms | 1.41 ms |
+
+| Callers | Requests/s | p50 | p99 |
+|---|---|---|---|
+| 1 | 797 | 1.26 ms | 1.40 ms |
+| 4 | 1,719 | 2.18 ms | 4.43 ms |
+| 14 | **2,005** | 6.79 ms | 14.84 ms |
+
+1.1 MB resident per live instance; one capability `call` 111 us with 14
+callers on 4 vCPUs; isolation holds; a deadline returns within 0.7 ms.
+
 The component is cheaper per request than the core reactor: componentize-py
 pre-initializes the interpreter with the app imported when it builds the
 component, and `handle` runs the app's function directly, where the
 reactor compiles its bootstrap and `main.py` on every request; one typed
 import call replaces the reactor's `call` and `take`. Instantiation costs
-more (0.33 ms against 0.08 ms): the component has 16 core instances and the
-C API has no component InstancePre, so linking runs per instance.
+more (0.33 ms on the M4, 0.92 ms on Linux, against 0.08 and 0.10 ms): the
+component has 16 core instances and the C API has no component
+InstancePre, so linking runs per instance. On Linux it is now most of a
+request.

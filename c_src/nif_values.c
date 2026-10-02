@@ -63,12 +63,17 @@ ERL_NIF_TERM raw_to_term(ErlNifEnv *env, uint8_t kind, const wasmtime_val_raw_t 
   default: return mk_binary(env, v->v128, 16);
   }
 flt:
+  return double_to_term(env, d);
+}
+
+/* NaN and infinities are atoms: an Erlang float holds neither. */
+ERL_NIF_TERM double_to_term(ErlNifEnv *env, double d) {
   if (isnan(d)) return atom_nan;
   if (isinf(d)) return d > 0 ? atom_infinity : atom_neg_infinity;
   return enif_make_double(env, d);
 }
 
-static int term_to_double(ErlNifEnv *env, ERL_NIF_TERM t, double *d) {
+int term_to_double(ErlNifEnv *env, ERL_NIF_TERM t, double *d) {
   ErlNifSInt64 i;
   if (enif_get_double(env, t, d)) return 1;
   if (enif_get_int64(env, t, &i)) {

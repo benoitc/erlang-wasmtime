@@ -60,6 +60,9 @@ static ERL_NIF_TERM call_typed(instance_t *inst, req_t *req, ErlNifEnv *out, was
 
 ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
   ErlNifEnv *env = req->env;
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  if (inst->wasm.component) return component_call(inst, req, out);
+#endif
   ErlNifBinary name;
   wasmtime_func_t func;
   ref_t *r;

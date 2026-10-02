@@ -28,7 +28,9 @@ thread, but never from two at once.
 | Change streams (stdin/stdout, the `erlang` imports) | `c_src/nif_stream.c` |
 | Change engine settings, compile options, the pooling allocator, precompiled compatibility | `c_src/nif_engine.c` and `compile_key/1` in `src/wasmtime.erl` |
 | Change pre-initialization | `src/wasmtime_preinit.erl` (parse, instrument, rewrite) and `c_src/nif_preinit.c` (what is read back) |
-| Change what `clocks => monotonic` allows | `c_src/nif_clock.c` |
+| Change what `clocks => monotonic` allows | `c_src/nif_clock.c` (preview 1), `refuse_wall_clock` in `c_src/nif_component.c` (WASI 0.2) |
+| Change how components link, call or serve imports | `c_src/nif_component.c` |
+| Change how WIT values map to terms | `c_src/nif_cvalues.c` |
 | Measure a change against the CPython reactor | `bench/reactor_bench.erl`, run by `scripts/bench-reactor.sh` |
 | Add a NIF entry point | `c_src/nif_api.c`, then [CONTRIBUTING.md](../CONTRIBUTING.md) |
 | Change the build, the download, the archives | `scripts/`, [building](building.md), [RELEASING.md](../RELEASING.md) |
@@ -203,6 +205,44 @@ environment, preopens, stdio, the stdin pipe), the shim. Rules that follow:
 
 On the CPython reactor this took instantiation from about 150 us to 70 us
 on macOS: `wasmtime_linker_define_wasi` alone was 60 us per instance.
+
+## Components
+
+A `module_res_t` holds either a core module (`mod`) or a component
+(`comp`); `module_kind/1` says which, `compile` and `deserialize` decide
+(the binary's layer field, or trying the module then the component for a
+`.cwasm`). Everything per instance above holds for components: one
+worker thread, the same queue, host calls through `host_exchange`,
+`destroy/1`, pooling. The differences:
+
+- The linker is a `wasmtime_component_linker_t` in the same per-module
+  cache, under a key starting with `component`; the C API has no component
+  InstancePre, so each instance runs `wasmtime_component_linker_instantiate`.
+- Host functions are bound by walking the component type's imports:
+  `{Interface, Function}` with or without the interface's version, or
+  `{<<>>, Function}` at the root. The key sent to Erlang is the one the
+  caller wrote.
+- `clocks => monotonic` puts two functions in front of Wasmtime's
+  `WALL_CLOCK` (`wasi:clocks/wall-clock@0.2.12`, the version Wasmtime 48
+  defines); they set `clock_refused` and fail the call. A Wasmtime bump
+  must check the constant (RELEASING.md).
+- Resources are integer handles into `wasm.res`, owned clones of
+  `wasmtime_component_resource_any_t`, freed with the store. A drop runs
+  the guest's destructor, which is guest code, so it is a queued request
+  (`{drop, Handle}`) run on the worker.
+- A component instance that trapped cannot be entered again (Component
+  Model); calls answer Wasmtime's error.
+
+Rules for `nif_cvalues.c`, which a change must keep:
+
+- The C API converts values with `unwrap()` on UTF-8 and `char`: a bad one
+  panics and aborts the VM. Every string and `char` from Erlang is checked
+  first (`valid_utf8`, `valid_char`).
+- Names inside a value (record fields, variant cases, enum cases, flags)
+  are always copied from the type, never from the term, so they are valid
+  by construction.
+- Every slot of a vector is blanked before it is filled, so an error half
+  way leaves a value `wasmtime_component_val_delete` can free.
 
 ## Engines and precompiled modules
 

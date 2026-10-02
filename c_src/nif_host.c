@@ -28,6 +28,12 @@ static void set_host_failure(instance_t *inst, const char *msg, size_t len) {
  * error wrapping a backtrace; the instance flags tell the real cause. */
 ERL_NIF_TERM outcome(instance_t *inst, ErlNifEnv *out, wasmtime_error_t *e, wasm_trap_t *trap,
                      const char *cls) {
+  if (inst->clock_refused) {
+    if (e) wasmtime_error_delete(e);
+    if (trap) wasm_trap_delete(trap);
+    return mk_error_s(out, "trap", "clock_refused",
+                      "the guest read the wall clock, which clocks => monotonic refuses");
+  }
   if (inst->interrupted_fired || inst->host.failed) {
     if (e) wasmtime_error_delete(e);
     if (trap) wasm_trap_delete(trap);
@@ -71,14 +77,13 @@ static void spin_for_reply(instance_t *inst) {
 
 /* Runs on the instance thread, inside wasmtime_func_call. The mutex is not
  * held while the guest runs, so take it here. */
-enum host_status { HOST_OK, HOST_INTERRUPTED, HOST_FAILED };
 
 /* Sends {wasmtime_host_call, Ref, Id, {Module, Name}, Args} (`args` lives in
  * `menv`, consumed here) and waits for the reply. Returns with the mutex
  * held. On HOST_OK, *results is the reply's result list in inst->host.reply_env;
  * on HOST_FAILED, inst->host.failed is set or *fail names the reason. */
-static enum host_status host_exchange(instance_t *inst, hostfn_t *fn, ErlNifEnv *menv,
-                                      ERL_NIF_TERM args, ERL_NIF_TERM *results, const char **fail) {
+enum host_status host_exchange(instance_t *inst, hostfn_t *fn, ErlNifEnv *menv, ERL_NIF_TERM args,
+                               ERL_NIF_TERM *results, const char **fail) {
   *fail = NULL;
   pthread_mutex_lock(&inst->mu);
   if (inst->host.abort || inst->queue.current->cancelled) {

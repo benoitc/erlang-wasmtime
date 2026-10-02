@@ -6,6 +6,7 @@
     wat2wasm/1,
     validate/2,
     module_options/1,
+    module_kind/1,
     module_imports/1,
     module_exports/1,
     serialize/1,
@@ -49,6 +50,7 @@
     wat2wasm/1,
     validate/2,
     module_options/1,
+    module_kind/1,
     module_imports/1,
     module_exports/1,
     serialize/1,
@@ -103,6 +105,7 @@ compile(_Bin, _IsWat, _Key) -> erlang:nif_error(not_loaded).
 wat2wasm(_Text) -> erlang:nif_error(not_loaded).
 validate(_Bin, _Key) -> erlang:nif_error(not_loaded).
 module_options(_Mod) -> erlang:nif_error(not_loaded).
+module_kind(_Mod) -> erlang:nif_error(not_loaded).
 module_imports(_Mod) -> erlang:nif_error(not_loaded).
 module_exports(_Mod) -> erlang:nif_error(not_loaded).
 serialize(_Mod) -> erlang:nif_error(not_loaded).

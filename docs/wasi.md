@@ -91,9 +91,32 @@ instantiation, so readings a [pre-initialized](preinit.md) guest took
 during its init are still in the past. The default, `clocks => all`, is
 Wasmtime's WASI with every clock.
 
+## WASI 0.2
+
+A [component](components.md) instantiated with a `wasi` option gets WASI
+0.2 (Wasmtime's `wasi:cli`, `wasi:io`, `wasi:clocks`, `wasi:random`,
+`wasi:filesystem`), configured by the same keys as preview 1 above. A
+command component runs with `run/1,2`:
+
+```erlang
+{ok, Inst} = wasmtime:instantiate(Mod, #{wasi => #{args => [~"prog"], stdout => capture}}),
+ok = wasmtime:run(Inst).
+```
+
+| Preview 1 | WASI 0.2 |
+|---|---|
+| `_start` called with `call/3` | `run/1,2`, which calls `wasi:cli/run#run` |
+| `proc_exit(N)`: `{error, #{class := exit, status := N}}` | `exit`: `ok` or `{error, #{class := exit, status := 1}}`; WASI 0.2 carries success or failure only |
+| `clocks => monotonic`: a refused clock answers `ENOTCAPABLE` | `clocks => monotonic`: `wall-clock` `now` and `resolution` trap with `kind => clock_refused`, since they have no error case |
+| `stdin => stream`, `stdout => stream` | the same, through the same pipe and callback |
+| a streamed stdout reports itself a terminal | it does not: Wasmtime's custom stdout is no terminal for WASI 0.2, so a program's C library buffers it; flush in the guest |
+
+`wasi:sockets` is linked, but no address is ever granted and name lookup is
+off, so every network operation answers `access-denied`.
+
 ## Notes
 
-- Preview 1 only. Components and WASI preview 2 are not exposed.
+- Components get WASI 0.2 (above); core modules get preview 1.
 - No network. The preview 1 surface Wasmtime exposes has no sockets, and no
   option here enables them.
 - Randomness (`random_get`) is the host's cryptographic generator, seeded

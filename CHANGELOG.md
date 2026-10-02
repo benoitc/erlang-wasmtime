@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Components: `compile/2`, `deserialize/1,2`, `deserialize_file/1,2` and
+  `validate/1` take components; `module_kind/1`; `call/3,4` by `Export` or
+  `Interface#Function`, answering `{ok, Value}`; every WIT value crosses
+  with erlang_wasm's term mapping; host imports keyed `{Interface,
+  Function}`, raw funs answering `{ok, [V]}` or erlang_wasm's typed
+  `import_fun/2`; resources as integer handles with `drop_resource/2,3`;
+  pooling and precompiled components.
+- WASI 0.2 for components with a `wasi` option, from the same keys as
+  preview 1; `run/1,2`; streamed stdin and stdout; `clocks => monotonic`
+  traps the wall clock with `kind => clock_refused`.
 - Wasmtime archives revision 4: every archive carries Wasmtime's `LICENSE`
   and `PATCHES.md` with the patches applied; the runtime-only library adds
   the component model (4.2 MB on macOS arm64, from 2.5 MB).

@@ -14,6 +14,7 @@
     deserialize_and_call/1,
     deserialize_garbage/1,
     pooling_from_file/1,
+    component/1,
     host_functions/1,
     memory_access/1,
     interrupt/1,
@@ -30,6 +31,7 @@ all() ->
         deserialize_and_call,
         deserialize_garbage,
         pooling_from_file,
+        component,
         host_functions,
         memory_access,
         interrupt,
@@ -114,6 +116,20 @@ pooling_from_file(Config) ->
      || _ <- lists:seq(1, 50)
     ],
     ok.
+
+%% A precompiled component loads and runs on a runtime-only library that
+%% has the component model (archive revision 4 and later).
+component(Config) ->
+    case wasmtime:features() of
+        #{components := true} ->
+            Mod = load(Config, "component"),
+            component = wasmtime:module_kind(Mod),
+            {ok, Inst} = wasmtime:instantiate(Mod),
+            {ok, 42} = wasmtime:call(Inst, ~"add", [2, 40]),
+            ok;
+        _ ->
+            {skip, "this runtime library has no component model"}
+    end.
 
 deserialize_garbage(_) ->
     {error, #{class := compile}} = wasmtime:deserialize(<<"not precompiled">>),

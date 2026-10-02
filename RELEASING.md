@@ -49,8 +49,13 @@ that compiles the shims, the precompiled fixtures.
    in the tests fails when they drift.
 6. Check the C API for changes that matter here: `wasmtime/conf.h`
    feature macros, the `wasmtime_val_t` layout, the reference API
-   (`*_unroot` signatures), `wasi.h` stdio hooks. `docs/design.md` lists
-   what the code relies on.
+   (`*_unroot` signatures), `wasi.h` stdio hooks, the component value
+   conversions (which strings and chars they unwrap). `docs/design.md`
+   lists what the code relies on. Set `WALL_CLOCK` in
+   `c_src/nif_component.c` to the `wasi:clocks` version the new Wasmtime
+   defines (`crates/wasi/src/p2/wit/deps/clocks.wit`);
+   `wasi_clocks_component` in the tests fails when it no longer shadows
+   Wasmtime's.
 7. `rebar3 compile && rebar3 ct` on a full build, then the runtime-only
    recipe with fresh fixtures from `scripts/precompile-fixtures.escript`.
    The runtime-only CI job proves the full and runtime builds still

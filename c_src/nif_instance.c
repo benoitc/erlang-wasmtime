@@ -5,6 +5,8 @@
  */
 #include "nif.h"
 
+#include <unistd.h>
+
 ErlNifResourceType *module_type, *instance_type, *handle_type, *ref_type;
 
 static void req_free(req_t *r) {
@@ -136,6 +138,7 @@ void instance_dtor(ErlNifEnv *env, void *obj) {
     req_free(r);
   }
   if (inst->queue.destroy) req_free(inst->queue.destroy);
+  if (inst->inbox.pipe_w >= 0) close(inst->inbox.pipe_w); /* the pump never started */
   if (inst->wasm.store) wasmtime_store_delete(inst->wasm.store);
   if (inst->wasm.owns_entry) linker_entry_free(inst->wasm.entry);
   if (inst->host.reply_env) enif_free_env(inst->host.reply_env);
@@ -153,6 +156,7 @@ void instance_dtor(ErlNifEnv *env, void *obj) {
 void stop_current(instance_t *inst) {
   inst->host.abort = 1;
   __atomic_store_n(&inst->interrupt, 1, __ATOMIC_RELEASE);
+  stdin_abort(inst); /* a guest blocked reading stdin wakes on end of file */
   pthread_cond_broadcast(&inst->cv);
   /* Reach the epoch callback now rather than at the next tick: the
    * increment is one atomic add, and the engine's other running guests
@@ -184,6 +188,7 @@ ERL_NIF_TERM nif_destroy(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   inst->queue.destroy = r;
   inst->queue.stopping = 1;
   if (inst->queue.current) stop_current(inst);
+  stdin_abort(inst);
   pthread_cond_broadcast(&inst->cv);
   pthread_mutex_unlock(&inst->mu);
   return atom_enqueued;

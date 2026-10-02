@@ -49,8 +49,10 @@ ok = wasmtime:close(Inst),
 - `close/1` ends the input: the guest drains what is queued, then its reads
   return end of file, which is how a read loop ends.
 - `call_async/3` starts the program without waiting; `await/2,3` collects
-  its exit when the loop is done. `timeout` on `await/3` and `interrupt/1`
-  stop a guest parked on stdin like any other.
+  its exit when the loop is done. `timeout`, `interrupt/1` and `destroy/1`
+  stop a guest parked on stdin like any other, and end its stdin: a read
+  blocked inside Wasmtime is woken by end of file, so an interrupted
+  instance's stdin stays closed and `send/2` answers `kind => closed`.
 
 [Run JavaScript](javascript.md) and [Run Python](python.md) show a worker
 script for each.
@@ -119,15 +121,16 @@ dropped and the guest does not notice, the same as `none`.
   routing (`host => Pid`).
 - The inbox is per instance and shared by stdin and `erlang.recv`; a module
   using both would compete with itself, so use one.
-- `stdin => stream` puts an `fd_read` in front of Wasmtime's own for fd 0
-  and forwards every other fd through a small module (`scripts/stdin-shim.wat`);
-  a `stream` stdout or stderr puts an `fd_fdstat_get` in front of WASI's
+- `stdin => stream` gives the guest a pipe as stdin, which Wasmtime reads
+  like any file, and a thread per instance moves what `send/2` queues into
+  it. It works on every build and with any Wasmtime library.
+- A `stream` stdout or stderr puts an `fd_fdstat_get` in front of WASI's
   that answers "character device", which is what makes the guest's C
-  library line-buffer it.
-  A build with a compiler compiles it on first use; a runtime-only build
-  loads the precompiled copy for its platform from `priv/shims`, produced
-  by `scripts/precompile-shims.sh` for every platform with a runtime
-  archive. A platform without one answers `kind => unavailable`.
+  library line-buffer it. Other fds are forwarded through a small module
+  (`scripts/stdin-shim.wat`): a build with a compiler compiles it on first
+  use; a runtime-only build loads the precompiled copy for its platform
+  from `priv/shims`, produced by `scripts/precompile-shims.sh`. A platform
+  without one answers `kind => unavailable`.
 - Reads by the guest with nothing queued and no `close/1` wait for as long
   as the caller lets them: bound them with `timeout` on `call/4` or
   `await/3`.

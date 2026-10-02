@@ -117,6 +117,7 @@ jobs:
           NAME="wasmtime-$V-${{ matrix.asset }}-c-api"
           mkdir -p "dist/$NAME"
           cp -r out/full/include out/full/lib "dist/$NAME/"
+          scripts/archive-notices.sh out/wasmtime-src "dist/$NAME"
           ls -la "dist/$NAME/lib"
           tar -C dist -cJf "dist/$NAME.tar.xz" "$NAME"
           ls -la "dist/$NAME.tar.xz"
@@ -127,6 +128,7 @@ jobs:
           NAME="wasmtime-runtime-$V-${{ matrix.asset }}"
           mkdir -p "dist/$NAME"
           cp -r out/prefix/include "dist/$NAME/"
+          scripts/archive-notices.sh out/wasmtime-src "dist/$NAME"
           mkdir -p "dist/$NAME/lib"
           cp out/prefix/lib/libwasmtime.so out/prefix/lib/libwasmtime.dylib "dist/$NAME/lib/" 2>/dev/null || true
           ls -la "dist/$NAME/lib"
@@ -160,9 +162,11 @@ jobs:
             mkdir -p dist
             R="wasmtime-runtime-$V-x86_64-freebsd"
             mkdir -p "dist/$R/lib" && cp -r out/runtime/include "dist/$R/" && cp out/runtime/lib/libwasmtime.so "dist/$R/lib/"
+            scripts/archive-notices.sh out/wasmtime-src "dist/$R"
             tar -C dist -cJf "dist/$R.tar.xz" "$R"
             F="wasmtime-$V-x86_64-freebsd-c-api"
             mkdir -p "dist/$F" && cp -r out/full/include out/full/lib "dist/$F/"
+            scripts/archive-notices.sh out/wasmtime-src "dist/$F"
             tar -C dist -cJf "dist/$F.tar.xz" "$F"
             ls -la dist/*.tar.xz
       - uses: actions/upload-artifact@v4

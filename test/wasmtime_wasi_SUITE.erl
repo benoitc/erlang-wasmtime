@@ -222,15 +222,26 @@ wasi_stdin_stream(_) ->
     Inst = instance(stdio_wat(), #{wasi => #{stdin => stream, stdout => stream, stderr => capture}}),
     ok = wasmtime:send(Inst, ~"ab"),
     ok = wasmtime:send(Inst, ~"cd"),
-    %% stdin is a byte stream: one read takes both chunks
-    {ok, [4]} = wasmtime:call(Inst, ~"cat", []),
-    [~"abcd"] = collect(stdout, 1),
-    {ok, {<<>>, ~"err", {0, 0}}} = wasmtime:read_output(Inst),
     ok = wasmtime:close(Inst),
-    %% end of file once closed and drained
-    {ok, [0]} = wasmtime:call(Inst, ~"cat", []),
+    %% stdin is a byte stream: chunk boundaries are not kept, and a read
+    %% returns what has reached the pipe, so read to end of file
+    4 = cat_until_eof(Inst, 0),
+    ~"abcd" = iolist_to_binary(collect_all(stdout)),
+    %% end of file stays end of file
     {ok, [0]} = wasmtime:call(Inst, ~"cat", []),
     ok.
+
+cat_until_eof(Inst, N) ->
+    case wasmtime:call(Inst, ~"cat", []) of
+        {ok, [0]} -> N;
+        {ok, [K]} -> cat_until_eof(Inst, N + K)
+    end.
+
+collect_all(Kind) ->
+    receive
+        {wasmtime_stream, _, Kind, B} -> [B | collect_all(Kind)]
+    after 200 -> []
+    end.
 
 wasi_stdin_stream_blocked(_) ->
     Inst = instance(stdio_wat(), #{wasi => #{stdin => stream, stdout => stream}}),

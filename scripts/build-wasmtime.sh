@@ -12,7 +12,8 @@
 #             built the way Wasmtime builds its own release archives (LTO,
 #             panic abort, debug info stripped)
 #   runtime   no compiler, no WAT: wasi, async, gc, gc-drc, threads,
-#             pooling-allocator, disable-logging, built with Wasmtime's own
+#             pooling-allocator, component-model, disable-logging, built
+#             with Wasmtime's own
 #             size flags (opt-level s, LTO, one codegen unit, panic abort).
 #             Only the shared library is kept: linked statically its LTO
 #             objects make an 8 MB NIF, dynamically the total is 4 MB.
@@ -50,7 +51,8 @@ case "$VARIANT" in
     runtime)
         FEATURES="-DWASMTIME_DISABLE_ALL_FEATURES=ON -DWASMTIME_FEATURE_WASI=ON \
 -DWASMTIME_FEATURE_ASYNC=ON -DWASMTIME_FEATURE_DISABLE_LOGGING=ON -DWASMTIME_FEATURE_GC=ON \
--DWASMTIME_FEATURE_GC_DRC=ON -DWASMTIME_FEATURE_THREADS=ON -DWASMTIME_FEATURE_POOLING_ALLOCATOR=ON"
+-DWASMTIME_FEATURE_GC_DRC=ON -DWASMTIME_FEATURE_THREADS=ON -DWASMTIME_FEATURE_POOLING_ALLOCATOR=ON \
+-DWASMTIME_FEATURE_COMPONENT_MODEL=ON"
         export CARGO_PROFILE_RELEASE_OPT_LEVEL=s
         export CARGO_PROFILE_RELEASE_LTO=true
         export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1

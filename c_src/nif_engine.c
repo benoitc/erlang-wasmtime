@@ -13,7 +13,8 @@ wasmtime_pooling_allocation_config_pagemap_scan_set(wasmtime_pooling_allocation_
     __attribute__((weak));
 
 /* Mirrors pooling_key/3 in wasmtime.erl; docs/design.md, "Numbers". */
-#define POOL_MAX_INSTANCES 10000
+#define POOL_MAX_INSTANCES 10000 /* also the cap on memories: 4 GB of address space each */
+#define POOL_MAX_SLOTS 100000    /* core instances and tables: about 1 MB and 160 KB each */
 #define POOL_MAX_MEMORY (4ull << 30)
 #define WASM_PAGE 65536
 
@@ -39,14 +40,15 @@ static int nengines;
 
 static pthread_mutex_t engines_mu = PTHREAD_MUTEX_INITIALIZER;
 
-/* Allocator :: on_demand | {pooling, Instances, MaxMemory, KeepResident} */
+/* Allocator :: on_demand
+ *            | {pooling, Instances, MaxMemory, KeepResident, CoreInstances, Memories, Tables} */
 static int parse_allocator(ErlNifEnv *env, ERL_NIF_TERM a, engine_t *k) {
   const ERL_NIF_TERM *t;
   int arity;
   char buf[16];
   ErlNifUInt64 n;
   if (enif_get_atom(env, a, buf, sizeof buf, ERL_NIF_LATIN1)) return strcmp(buf, "on_demand") == 0;
-  if (!enif_get_tuple(env, a, &arity, &t) || arity != 4 ||
+  if (!enif_get_tuple(env, a, &arity, &t) || arity != 7 ||
       !enif_get_atom(env, t[0], buf, sizeof buf, ERL_NIF_LATIN1) || strcmp(buf, "pooling") != 0)
     return 0;
   k->pooling = 1;
@@ -57,6 +59,14 @@ static int parse_allocator(ErlNifEnv *env, ERL_NIF_TERM a, engine_t *k) {
   if (!enif_get_uint64(env, t[2], &k->pool_max_memory) ||
       !enif_get_uint64(env, t[3], &k->pool_keep_resident))
     return 0;
+  ErlNifUInt64 c, m, tb;
+  if (!enif_get_uint64(env, t[4], &c) || c == 0 || c > POOL_MAX_SLOTS ||
+      !enif_get_uint64(env, t[5], &m) || m == 0 || m > POOL_MAX_INSTANCES ||
+      !enif_get_uint64(env, t[6], &tb) || tb == 0 || tb > POOL_MAX_SLOTS)
+    return 0;
+  k->pool_core_instances = (uint32_t)c;
+  k->pool_memories = (uint32_t)m;
+  k->pool_tables = (uint32_t)tb;
   return k->pool_max_memory >= WASM_PAGE && k->pool_max_memory <= POOL_MAX_MEMORY &&
          k->pool_max_memory % WASM_PAGE == 0 && k->pool_keep_resident <= k->pool_max_memory;
 }
@@ -105,7 +115,9 @@ static int same_key(const engine_t *a, const engine_t *b) {
   return a->fuel == b->fuel && a->opt_level == b->opt_level && a->set_mask == b->set_mask &&
          a->val_mask == b->val_mask && a->pooling == b->pooling &&
          a->pool_instances == b->pool_instances && a->pool_max_memory == b->pool_max_memory &&
-         a->pool_keep_resident == b->pool_keep_resident;
+         a->pool_keep_resident == b->pool_keep_resident &&
+         a->pool_core_instances == b->pool_core_instances && a->pool_memories == b->pool_memories &&
+         a->pool_tables == b->pool_tables;
 }
 
 /* The proposal setters exist per build feature; a toggle the headers do not
@@ -165,11 +177,20 @@ static wasm_config_t *make_config(const engine_t *want, const char **missing) {
     /* The allocator is not recorded in a precompiled module: the same
      * .cwasm loads on either. The bounds were checked in Erlang. */
     wasmtime_pooling_allocation_config_t *pc = wasmtime_pooling_allocation_config_new();
-    wasmtime_pooling_allocation_config_total_core_instances_set(pc, want->pool_instances);
-    wasmtime_pooling_allocation_config_total_memories_set(pc, want->pool_instances);
-    wasmtime_pooling_allocation_config_total_tables_set(pc, want->pool_instances);
+    wasmtime_pooling_allocation_config_total_core_instances_set(pc, want->pool_core_instances);
+    wasmtime_pooling_allocation_config_total_memories_set(pc, want->pool_memories);
+    wasmtime_pooling_allocation_config_total_tables_set(pc, want->pool_tables);
 #ifdef WASMTIME_FEATURE_GC
-    wasmtime_pooling_allocation_config_total_gc_heaps_set(pc, want->pool_instances);
+    wasmtime_pooling_allocation_config_total_gc_heaps_set(pc, want->pool_memories);
+#endif
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+    /* A component may use what the whole pool holds: Wasmtime refuses at
+     * compile time one that needs more than these. */
+    wasmtime_pooling_allocation_config_total_component_instances_set(pc, want->pool_instances);
+    wasmtime_pooling_allocation_config_max_core_instances_per_component_set(
+        pc, want->pool_core_instances);
+    wasmtime_pooling_allocation_config_max_memories_per_component_set(pc, want->pool_memories);
+    wasmtime_pooling_allocation_config_max_tables_per_component_set(pc, want->pool_tables);
 #endif
     wasmtime_pooling_allocation_config_max_memory_size_set(pc, (size_t)want->pool_max_memory);
     wasmtime_pooling_allocation_config_linear_memory_keep_resident_set(
@@ -225,11 +246,11 @@ engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err) {
     return 0;
   }
 #endif
-  if (want.pooling && !pool_fits(want.pool_instances)) {
+  if (want.pooling && !pool_fits(want.pool_memories, want.pool_core_instances)) {
     pthread_mutex_unlock(&engines_mu);
     *err = mk_error_s(env, "compile", "pool_too_large",
-                      "this host cannot reserve the address space for that many pooled instances "
-                      "(about 4 GB each): lower pooling instances");
+                      "this host cannot reserve the address space for that many pooled memories "
+                      "(about 4 GB each): lower pooling memories or instances");
     return 0;
   }
   const char *missing = NULL;
@@ -264,11 +285,15 @@ ERL_NIF_TERM key_term(ErlNifEnv *env, const engine_t *e) {
                                                 (e->val_mask >> i) & 1 ? atom_true : atom_false),
                                list);
   }
-  ERL_NIF_TERM alloc = e->pooling ? enif_make_tuple4(env, mk_atom(env, "pooling"),
-                                                     enif_make_uint64(env, e->pool_instances),
-                                                     enif_make_uint64(env, e->pool_max_memory),
-                                                     enif_make_uint64(env, e->pool_keep_resident))
-                                  : mk_atom(env, "on_demand");
+  ERL_NIF_TERM pool[7] = {mk_atom(env, "pooling"),
+                          enif_make_uint64(env, e->pool_instances),
+                          enif_make_uint64(env, e->pool_max_memory),
+                          enif_make_uint64(env, e->pool_keep_resident),
+                          enif_make_uint64(env, e->pool_core_instances),
+                          enif_make_uint64(env, e->pool_memories),
+                          enif_make_uint64(env, e->pool_tables)};
+  ERL_NIF_TERM alloc =
+      e->pooling ? enif_make_tuple_from_array(env, pool, 7) : mk_atom(env, "on_demand");
   return enif_make_tuple4(env, e->fuel ? atom_true : atom_false, mk_atom(env, levels[e->opt_level]),
                           list, alloc);
 }

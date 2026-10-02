@@ -13,6 +13,8 @@ on:
       - "src/**"
       - "scripts/bench-reactor.sh"
       - "scripts/build-py-reactor.sh"
+      - "scripts/bench-agent.sh"
+      - "scripts/build-agent.sh"
       - ".github/workflows/bench.yml"
 
 jobs:
@@ -61,7 +63,12 @@ jobs:
           nproc
           scripts/bench-reactor.sh | tee bench.md
           cat bench.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Run the component benchmark
+        run: |
+          scripts/build-agent.sh
+          scripts/bench-agent.sh | tee bench-agent.md
+          cat bench-agent.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: bench-${{ matrix.os }}
-          path: bench.md
+          path: bench*.md

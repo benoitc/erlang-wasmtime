@@ -17,18 +17,18 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-int pool_fits(unsigned instances);
+int pool_fits(unsigned memories, unsigned core_instances);
 int private_fifo(char *path, size_t len, int *writer);
 void private_fifo_remove(char *path);
 
 /* Whether the address space a pool reserves when its engine is created can
  * be reserved at all: under `ulimit -v` or strict overcommit it may not,
- * and Wasmtime aborts the process then. Each slot is the 4 GB memory
- * reservation, its 32 MB guard and about 1 MB of instance state; the probe
- * maps that much without access and unmaps it. */
-int pool_fits(unsigned instances) {
-  uint64_t per_slot = (4ull << 30) + (32ull << 20) + (1ull << 20);
-  uint64_t bytes = per_slot * instances + (4ull << 30);
+ * and Wasmtime aborts the process then. Each memory slot is the 4 GB
+ * memory reservation and its 32 MB guard, each core instance slot about
+ * 1 MB of state; the probe maps that much without access and unmaps it. */
+int pool_fits(unsigned memories, unsigned core_instances) {
+  uint64_t bytes =
+      ((4ull << 30) + (32ull << 20)) * memories + (1ull << 20) * core_instances + (4ull << 30);
   if (bytes > SIZE_MAX) return 0;
   int flags = MAP_PRIVATE | MAP_ANON;
 #ifdef MAP_NORESERVE

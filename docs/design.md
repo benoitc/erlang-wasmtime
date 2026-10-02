@@ -255,13 +255,16 @@ engine has epoch interruption on, copy-on-write memory images on and
 `EPOCH_TICK_NS`.
 
 `Allocator` is `on_demand` or `{pooling, Instances, MaxMemory,
-KeepResident}`. Wasmtime builds the pool inside `Engine::new` and the C
+KeepResident, CoreInstances, Memories, Tables}`; the last three are the
+slots instances are made of (a component takes several), and the
+per-component maxima are set to the same totals. Wasmtime builds the pool inside `Engine::new` and the C
 API unwraps the result, so a pool it cannot build aborts the process. Three
 guards stand in front of it: `pooling_key/3` in `wasmtime.erl` checks the
 bounds, `parse_allocator` in `nif_engine.c` checks them again (the NIF can
 be called directly), and `pool_fits` (`nif_os.c`) reserves the address space the pool
 will ask for (about 4 GB per slot) and releases it, so a host under
-`ulimit -v` gets `pool_too_large`. Change the bounds in both files.
+`ulimit -v` gets `pool_too_large`; it counts 4 GB per memory slot and
+1 MB per core instance slot. Change the bounds in both files.
 
 The allocator is not recorded in a precompiled module: the same `.cwasm`
 loads on a pooled engine and on the default one.

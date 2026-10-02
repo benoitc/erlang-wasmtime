@@ -315,6 +315,9 @@ typedef struct engine_entry {
   int pooling;
   uint32_t pool_instances;
   ErlNifUInt64 pool_max_memory, pool_keep_resident;
+  /* Slots for what an instance is made of: a component holds several core
+   * instances, memories and tables. Equal to pool_instances by default. */
+  uint32_t pool_core_instances, pool_memories, pool_tables;
   wasmtime_module_t *shim; /* the stdin stream forwarder, compiled on first use */
   wasmtime_linker_t *wasi; /* WASI alone: where Wasmtime's own fd_read is found */
   struct engine_entry *next;
@@ -354,7 +357,7 @@ ERL_NIF_TERM term_or_unsupported(ErlNifEnv *env, const char *cls, ERL_NIF_TERM t
 engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err);
 ERL_NIF_TERM key_term(ErlNifEnv *env, const engine_t *e);
 ERL_NIF_TERM plain_key(ErlNifEnv *env, int fuel);
-int pool_fits(unsigned instances);
+int pool_fits(unsigned memories, unsigned core_instances);
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
 /* nif_cvalues.c */
 const char *term_to_cval(ErlNifEnv *env, instance_t *inst, ERL_NIF_TERM t,

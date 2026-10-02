@@ -180,7 +180,11 @@ Options for `compile/2`, `validate/2` and `deserialize/2`.
   instance (default 256 MB, a multiple of 64 KB up to 4 GB; a guest that
   grows past it fails like one past `memory_limit`), and `keep_resident`,
   bytes of a freed slot kept mapped and zeroed rather than released
-  (default 0).
+  (default 0). `core_instances`, `memories` and `tables` are the slots for
+  what instances are made of, `instances` each by default: a core module
+  uses one of each, a component one per core instance, memory and table it
+  holds (a componentize-py agent: 16 core instances), so size them for
+  components.
 
 Of these, only `fuel` is part of a precompiled module's compatibility
 check: give it again to `deserialize/2` (or rely on `deserialize/1`, which
@@ -196,7 +200,10 @@ one Wasmtime engine, created on first use and kept; at most 32 exist per VM.
     pooling => #{
         instances => pos_integer(),
         max_memory => pos_integer(),
-        keep_resident => non_neg_integer()
+        keep_resident => non_neg_integer(),
+        core_instances => pos_integer(),
+        memories => pos_integer(),
+        tables => pos_integer()
     }
 }.
 
@@ -356,6 +363,7 @@ compile_key(Opts) when is_map(Opts) ->
 %% instance cap keeps the reserved address space, about 4 GB per slot,
 %% within what a 64-bit host maps. docs/design.md, "Numbers".
 -define(POOL_MAX_INSTANCES, 10_000).
+-define(POOL_MAX_SLOTS, 100_000).
 -define(POOL_MAX_MEMORY, 4 bsl 30).
 -define(WASM_PAGE, 16#10000).
 
@@ -369,19 +377,30 @@ allocator_key(Opts) ->
             N = maps:get(instances, Pool, 1000),
             Max = maps:get(max_memory, Pool, ?DEFAULT_MEMORY_LIMIT),
             Keep = maps:get(keep_resident, Pool, 0),
-            pooling_key(N, Max, Keep)
+            Slots = {
+                maps:get(core_instances, Pool, N),
+                maps:get(memories, Pool, N),
+                maps:get(tables, Pool, N)
+            },
+            pooling_key(N, Max, Keep, Slots)
     end.
 
-pooling_key(N, _, _) when not is_integer(N); N < 1; N > ?POOL_MAX_INSTANCES ->
+pooling_key(N, _, _, _) when not is_integer(N); N < 1; N > ?POOL_MAX_INSTANCES ->
     pool_error(~"pooling instances must be 1 to 10000");
-pooling_key(_, Max, _) when
+pooling_key(_, Max, _, _) when
     not is_integer(Max); Max < ?WASM_PAGE; Max > ?POOL_MAX_MEMORY; Max rem ?WASM_PAGE =/= 0
 ->
     pool_error(~"pooling max_memory must be a multiple of 64 KB up to 4 GB");
-pooling_key(_, Max, Keep) when not is_integer(Keep); Keep < 0; Keep > Max ->
+pooling_key(_, Max, Keep, _) when not is_integer(Keep); Keep < 0; Keep > Max ->
     pool_error(~"pooling keep_resident must be 0 to max_memory");
-pooling_key(N, Max, Keep) ->
-    {ok, {pooling, N, Max, Keep}}.
+pooling_key(_, _, _, {C, _, _}) when not is_integer(C); C < 1; C > ?POOL_MAX_SLOTS ->
+    pool_error(~"pooling core_instances must be 1 to 100000");
+pooling_key(_, _, _, {_, M, _}) when not is_integer(M); M < 1; M > ?POOL_MAX_INSTANCES ->
+    pool_error(~"pooling memories must be 1 to 10000");
+pooling_key(_, _, _, {_, _, T}) when not is_integer(T); T < 1; T > ?POOL_MAX_SLOTS ->
+    pool_error(~"pooling tables must be 1 to 100000");
+pooling_key(N, Max, Keep, {C, M, T}) ->
+    {ok, {pooling, N, Max, Keep, C, M, T}}.
 
 pool_error(Msg) -> {error, #{class => compile, kind => badarg, message => Msg}}.
 
@@ -415,10 +434,17 @@ key_to_options({Fuel, OptLevel, Overrides, Allocator}) ->
     case Allocator of
         on_demand ->
             Base#{allocator => on_demand};
-        {pooling, N, Max, Keep} ->
+        {pooling, N, Max, Keep, C, M, T} ->
             Base#{
                 allocator => pooling,
-                pooling => #{instances => N, max_memory => Max, keep_resident => Keep}
+                pooling => #{
+                    instances => N,
+                    max_memory => Max,
+                    keep_resident => Keep,
+                    core_instances => C,
+                    memories => M,
+                    tables => T
+                }
             }
     end.
 
@@ -627,6 +653,8 @@ memory at most. Options:
   A build without WASI (see `features/0`) answers `kind => unavailable`.
 - `memory_limit`, `max_tables`, `max_table_elements`, `max_instances`:
   per-store caps enforced by Wasmtime. `unlimited` removes a cap.
+  `max_instances` counts core instances: 10 by default for a module, 100
+  for a component, which holds several.
 - `host_timeout`: how long a host function may run before the guest traps
   (default 30 s).
 - `host`: a process that serves host calls instead of the caller. It receives
@@ -676,7 +704,8 @@ nif_options(Mod, Imports, Opts) ->
         memory_limit => limit(memory_limit, Opts, ?DEFAULT_MEMORY_LIMIT),
         max_tables => limit(max_tables, Opts, 100),
         max_table_elements => limit(max_table_elements, Opts, 10_000_000),
-        max_instances => limit(max_instances, Opts, 10),
+        %% a component holds several core instances (componentize-py: 16)
+        max_instances => limit(max_instances, Opts, default_instances(Mod)),
         host_timeout => HostTimeout,
         host => HostPid,
         stream => StreamPid,
@@ -736,6 +765,12 @@ priv_dir() ->
             filename:join(filename:dirname(filename:dirname(code:which(?MODULE))), "priv");
         Dir ->
             Dir
+    end.
+
+default_instances(Mod) ->
+    case module_kind(Mod) of
+        component -> 100;
+        module -> 10
     end.
 
 limit(Key, Opts, Default) ->

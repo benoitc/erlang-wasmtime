@@ -122,7 +122,13 @@ See [WASI](wasi.md), "WASI 0.2", for streams, clocks and exit statuses.
   `global_get/2`, the table functions and the memory functions answer
   `kind => component` or `no_memory`.
 - Precompiled components work as modules do: `serialize/1`,
-  `deserialize/1,2`, `deserialize_file/1,2`; `allocator => pooling` too.
+  `deserialize/1,2`, `deserialize_file/1,2`.
+- A component in a pool takes one slot per core instance, memory and table
+  it holds. Size the pool for it: a componentize-py agent holds 16 core
+  instances, 1 memory and 2 tables, so 256 live agents need
+  `#{instances => 256, core_instances => 4096, memories => 256, tables => 512}`.
+  `max_instances` (per store) defaults to 100 for a component.
+  [Throughput](throughput.md) has the numbers.
 - `preinit/3` takes core modules only. Componentize-py already
   pre-initializes the component it builds.
 - WASI interfaces are linked by version. A component importing a `wasi:*`

@@ -1,0 +1,10 @@
+package hornbeam:agent@0.1.0;
+
+interface caps {
+  call: func(name: string, payload: list<u8>) -> result<list<u8>, string>;
+}
+
+world agent {
+  import caps;
+  export handle: func(context: string) -> string;
+}

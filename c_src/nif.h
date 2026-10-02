@@ -310,7 +310,7 @@ typedef struct engine_entry {
   int opt_level;               /* 0 none, 1 speed, 2 speed_and_size */
   uint32_t set_mask, val_mask; /* proposal overrides: which, and to what */
   /* Allocator: on demand, or a pool of `pool_instances` slots of
-   * `pool_max_memory` bytes each. Checked by pooling_key/1 in wasmtime.erl:
+   * `pool_max_memory` bytes each. Checked by pooling_key/4 in wasmtime_options.erl:
    * Wasmtime aborts the process on a pool it cannot build. */
   int pooling;
   uint32_t pool_instances;

@@ -12,7 +12,7 @@ extern void
 wasmtime_pooling_allocation_config_pagemap_scan_set(wasmtime_pooling_allocation_config_t *, bool)
     __attribute__((weak));
 
-/* Mirrors pooling_key/3 in wasmtime.erl; docs/design.md, "Numbers". */
+/* Mirrors pooling_key/4 in wasmtime_options.erl; docs/design.md, "Numbers". */
 #define POOL_MAX_INSTANCES 10000 /* also the cap on memories: 4 GB of address space each */
 #define POOL_MAX_SLOTS 100000    /* core instances and tables: about 1 MB and 160 KB each */
 #define POOL_MAX_MEMORY (4ull << 30)
@@ -52,7 +52,7 @@ static int parse_allocator(ErlNifEnv *env, ERL_NIF_TERM a, engine_t *k) {
       !enif_get_atom(env, t[0], buf, sizeof buf, ERL_NIF_LATIN1) || strcmp(buf, "pooling") != 0)
     return 0;
   k->pooling = 1;
-  /* The bounds pooling_key/3 in wasmtime.erl checks, again: Wasmtime
+  /* The bounds pooling_key/4 in wasmtime_options.erl checks, again: Wasmtime
    * aborts the process on a pool it cannot build. */
   if (!enif_get_uint64(env, t[1], &n) || n == 0 || n > POOL_MAX_INSTANCES) return 0;
   k->pool_instances = (uint32_t)n;

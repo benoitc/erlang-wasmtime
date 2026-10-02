@@ -26,7 +26,7 @@ thread, but never from two at once.
 | Change what an instance is given at creation (options, WASI, imports) | `c_src/nif_instantiate.c` |
 | Change how host functions are served | `c_src/nif_host.c` and `run_host/4` in `src/wasmtime.erl` |
 | Change streams (stdin/stdout, the `erlang` imports) | `c_src/nif_stream.c` |
-| Change engine settings, compile options, the pooling allocator, precompiled compatibility | `c_src/nif_engine.c` and `compile_key/1` in `src/wasmtime.erl` |
+| Change engine settings, compile options, the pooling allocator, precompiled compatibility | `c_src/nif_engine.c` and `src/wasmtime_options.erl` |
 | Change pre-initialization | `src/wasmtime_preinit.erl` (parse, instrument, rewrite) and `c_src/nif_preinit.c` (what is read back) |
 | Change what `clocks => monotonic` allows | `c_src/nif_clock.c` (preview 1), `refuse_wall_clock` in `c_src/nif_component.c` (WASI 0.2) |
 | Change how components link, call or serve imports | `c_src/nif_component.c` |
@@ -36,8 +36,10 @@ thread, but never from two at once.
 | Change the build, the download, the archives | `scripts/`, [building](building.md), [RELEASING.md](../RELEASING.md) |
 
 `c_src/nif.h` holds every struct and the prototypes shared between files.
-`src/wasmtime.erl` is the public API and owns defaults and option
-validation; `src/wasmtime_nif.erl` is only the NIF stub table. Options
+`src/wasmtime.erl` is the public API and owns instantiate defaults and
+option validation; `src/wasmtime_options.erl` builds and checks the engine
+key from compile options; `src/wasmtime_nif.erl` is only the NIF stub
+table. Options
 reach the NIF as maps read by key (`parse_options`, `configure_wasi` in
 `nif_instantiate.c`), never by tuple position, so the two sides cannot
 drift silently: a missing or ill-typed key is `badarg` naming the key.
@@ -259,7 +261,7 @@ KeepResident, CoreInstances, Memories, Tables}`; the last three are the
 slots instances are made of (a component takes several), and the
 per-component maxima are set to the same totals. Wasmtime builds the pool inside `Engine::new` and the C
 API unwraps the result, so a pool it cannot build aborts the process. Three
-guards stand in front of it: `pooling_key/3` in `wasmtime.erl` checks the
+guards stand in front of it: `pooling_key/4` in `wasmtime_options.erl` checks the
 bounds, `parse_allocator` in `nif_engine.c` checks them again (the NIF can
 be called directly), and `pool_fits` (`nif_os.c`) reserves the address space the pool
 will ask for (about 4 GB per slot) and releases it, so a host under

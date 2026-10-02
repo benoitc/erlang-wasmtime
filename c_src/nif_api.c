@@ -255,6 +255,7 @@ static ERL_NIF_TERM nif_instantiate(ErlNifEnv *env, int argc, const ERL_NIF_TERM
   inst->wasm.mod = m;
   enif_keep_resource(m);
   inst->host.timeout_ms = 30000;
+  inst->inbox.pipe_w = -1;
 
   /* The handle holds one reference to the instance, the thread the other
    * (the one enif_alloc_resource returned). */

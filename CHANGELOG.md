@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `stdin => stream` is a pipe Wasmtime reads, filled by a thread per
+  instance: the `fd_read` override is gone, streamed stdin works on
+  runtime-only builds without a shim, and WASI 0.2 components will read it
+  the same way. Stopping a guest (`timeout`, `interrupt/1`, `destroy/1`)
+  now ends its stdin, since that is what wakes a blocked read.
 - `clocks => monotonic`: a refused clock answers `ENOTCAPABLE` (76) instead
   of `ENOTSUP` (58), the errno erlang_wasm uses.
 

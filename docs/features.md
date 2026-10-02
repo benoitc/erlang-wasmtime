@@ -75,7 +75,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | `send/2` past `inbox_limit`, or after `close/1` | `kind => inbox_full`, `kind => closed` |
 | An `imports` entry for `erlang.send` or `erlang.recv` | `kind => reserved_import` |
 | `erlang.send` or `erlang.recv` imported with another type | `kind => unsupported_type` |
-| `stdin => stream` on a runtime-only build of a platform without a shim in `priv/shims` | `kind => unavailable` |
+| `stdout` or `stderr => stream` on a runtime-only build of a platform without a shim in `priv/shims` | `kind => unavailable` |
 | Pooling options out of range | `kind => badarg` |
 | A pool whose address space the host cannot reserve | `kind => pool_too_large` |
 | A module whose memory does not fit a pool slot | `class => compile` |

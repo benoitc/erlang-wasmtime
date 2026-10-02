@@ -189,7 +189,7 @@ module's mutex. A module keeps `MAX_LINKERS` (16) entries; an instance
 with a further shape gets a private one.
 
 What stays per instance: the store, its WASI context (arguments,
-environment, preopens, stdio), the stdin shim. Rules that follow:
+environment, preopens, stdio, the stdin pipe), the shim. Rules that follow:
 
 - No callback may take its instance from its env. Every store's data is
   its instance, and callbacks call `caller_inst`. A host function's env is
@@ -219,7 +219,7 @@ KeepResident}`. Wasmtime builds the pool inside `Engine::new` and the C
 API unwraps the result, so a pool it cannot build aborts the process. Three
 guards stand in front of it: `pooling_key/3` in `wasmtime.erl` checks the
 bounds, `parse_allocator` in `nif_engine.c` checks them again (the NIF can
-be called directly), and `pool_fits` (`nif_mmap.c`) reserves the address space the pool
+be called directly), and `pool_fits` (`nif_os.c`) reserves the address space the pool
 will ask for (about 4 GB per slot) and releases it, so a host under
 `ulimit -v` gets `pool_too_large`. Change the bounds in both files.
 
@@ -251,17 +251,31 @@ Every instance has one inbox (a list of byte chunks under `mu`).
 `send/2` appends, `close/1` marks end of input. Two guest faces read it:
 
 - the `erlang.recv` import, one whole chunk per call;
-- stdin, when `stdin => stream`: a `fd_read` defined in the linker in
-  front of WASI's own (`wasmtime_linker_allow_shadowing`), serving fd 0
-  from the inbox as a byte stream.
+- stdin, when `stdin => stream`: the read end of a pipe, given to Wasmtime
+  as a stdin file (`/dev/fd/N`, or a named pipe in a private directory
+  where that path cannot be opened, `private_fifo` in `nif_os.c`). The
+  pump thread (`pump_main`, one per such instance, holding an instance
+  reference) copies inbox chunks into the write end without blocking and
+  closes it on `close/1` once drained. Wasmtime reads the pipe
+  asynchronously, so preview 1 and WASI 0.2 reads and 0.2 pollables all
+  wait correctly.
 
-Other fds must still reach Wasmtime's `fd_read`, but Wasmtime's WASI
-functions find the guest memory through their *caller's* `memory` export,
-and a host-to-host call has no caller. The shim module
-(`scripts/stdin-shim.wat`, embedded as `SHIM_WASM`) imports the guest
-memory, exports it as `memory` and forwards; the override calls the shim's
-export. A full build compiles the shim once per engine; a runtime-only
-build has no compiler and loads `priv/shims/<platform>-<plain|fuel>.cwasm`.
+A guest blocked in a stdin read is inside Wasmtime, where the epoch cannot
+reach it. `stop_current` and `nif_destroy` call `stdin_abort`, which makes
+the pump close the pipe: the read returns end of file, the guest runs, and
+the epoch callback ends it. The cost, documented in [streams](streams.md):
+an interrupted instance's stdin stays closed.
+
+The `stream` stdout rule below needs the real `fd_fdstat_get` for other
+fds, but Wasmtime's WASI functions find the guest memory through their
+*caller's* `memory` export, and a host-to-host call has no caller. The shim
+module (`scripts/stdin-shim.wat`, embedded as `SHIM_WASM`) imports the
+guest memory, exports it as `memory` and forwards; the override calls the
+shim's export. A full build compiles the shim once per engine; a
+runtime-only build has no compiler and loads
+`priv/shims/<platform>-<plain|fuel>.cwasm`. The shim also exports an
+`fd_read` forwarder, no longer used; it stays so the precompiled shims need
+not be rebuilt.
 
 Output is push: the custom stdout/stderr callback (`stream_write`) and
 `erlang.send` deliver one message per write; the mailbox is the buffer.
@@ -269,7 +283,9 @@ What a write is depends on the guest's C library: it fully buffers a
 stdout it believes is a file, so a `stream` stdout or stderr also shadows
 `fd_fdstat_get` and reports a character device without seek and tell
 rights (wasi-libc's `isatty` test); musl then line-buffers and every line
-is one message. The shim forwards both `fd_read` and `fd_fdstat_get`.
+is one message. Wasmtime's custom stdout reports no terminal to WASI 0.2
+either, and there is no preview 1 function to shadow there, so a
+component's streamed stdout is buffered by its C library.
 
 ## Pre-initialization
 

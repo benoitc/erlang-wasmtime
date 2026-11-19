@@ -4,7 +4,7 @@ Instructions for AI coding agents working on this project.
 
 ## Project overview
 
-Wasmtime bindings for Erlang. A C NIF (`c_src/wasmtime_nif.c`) links the
+Wasmtime bindings for Erlang. A C NIF (`c_src/nif_*.c`) links the
 Wasmtime C API statically; `src/wasmtime.erl` is the public API. Erlang only,
 no Elixir layer. Requires OTP 27+, rebar3, a C compiler and `curl` (the first
 build downloads the pinned Wasmtime C API release).
@@ -19,7 +19,7 @@ rebar3 compile              # Builds the NIF too; warnings are errors
 rebar3 lint                 # Elvis
 rebar3 xref
 rebar3 dialyzer
-rebar3 ct                   # Both suites
+rebar3 ct                   # All suites
 clang-format --dry-run -Werror c_src/*.c
 shellcheck scripts/*.sh
 scripts/test-fetch.sh       # fetch-wasmtime.sh branches, offline
@@ -35,7 +35,7 @@ rebar3 ct                                        # All Common Test suites
 rebar3 ct --suite=test/wasmtime_SUITE            # One suite
 rebar3 ct --suite=test/wasmtime_SUITE --case=traps
 rebar3 fmt --check                               # Formatting check only
-clang-format -i c_src/wasmtime_nif.c             # Format the C
+clang-format -i c_src/*.c c_src/*.h              # Format the C
 rebar3 ex_doc                                    # Docs into doc/
 rebar3 hex build                                 # Must stay under 8 MB
 WASMTIME_C_API_DIR=/path rebar3 compile          # Use a local Wasmtime C API

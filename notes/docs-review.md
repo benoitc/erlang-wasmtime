@@ -228,3 +228,12 @@ After the release:
 7. Small moves: preinit mechanism to design, maintainer sections of
    building to RELEASING, the repeated WASI 0.2 intro, banners in
    `wasmtime.erl`, header of `wasmtime_test.erl`.
+
+## Decisions (2026-11-19)
+
+- Before publishing 0.3.0: stale statements and the component entries in
+  `troubleshooting.md`. Done on `docs-review`, except the `nif.h` header
+  comment (a source file, left for a code change).
+- `wasmtime.erl` and the lint length limit: as in erlang_wasm, which has no
+  length limit. The API stays one module; raise the limit when it is hit.
+- Open: the CHANGELOG date, and questions 2 to 5.

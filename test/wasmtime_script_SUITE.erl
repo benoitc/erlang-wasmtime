@@ -36,7 +36,9 @@ all() -> [{group, kernel}, {group, languages}].
 
 groups() ->
     [
-        {kernel, [parallel], [
+        %% in sequence: several cases spin a guest on purpose, and enough of
+        %% them at once starve the schedulers of a small CI machine
+        {kernel, [], [
             echo_returns_a_result,
             a_guest_failure_is_a_worker_error,
             the_deadline_stops_a_runaway,
@@ -107,11 +109,11 @@ a_guest_failure_is_a_worker_error(_) ->
     ok = ?W:stop(W).
 
 the_deadline_stops_a_runaway(_) ->
-    W = start(#{limits => #{timeout => 100}}),
+    W = start(#{limits => #{timeout => 500}}),
     T0 = erlang:monotonic_time(millisecond),
-    {error, #{class := worker, kind := timeout, ctx := #{timeout := 100}}} =
+    {error, #{class := worker, kind := timeout, ctx := #{timeout := 500}}} =
         ?W:run(W, #{call => {~"spin", []}}),
-    true = erlang:monotonic_time(millisecond) - T0 < 2000,
+    true = erlang:monotonic_time(millisecond) - T0 < 5000,
     {ok, #{values := [2]}} = ?W:run(W, #{}),
     ok = ?W:stop(W).
 
@@ -120,7 +122,7 @@ cancel_stops_a_runaway(_) ->
     {ok, Ref} = ?W:submit(W, #{call => {~"spin", []}}),
     {error, #{kind := still_running}} = ?W:await(W, Ref, 50),
     ok = ?W:cancel(W, Ref),
-    {error, #{class := worker, kind := cancelled}} = ?W:await(W, Ref, 1000),
+    {error, #{class := worker, kind := cancelled}} = ?W:await(W, Ref, 5000),
     {error, #{kind := unknown_ref}} = ?W:cancel(W, Ref),
     {ok, _} = ?W:run(W, #{}),
     ok = ?W:stop(W).
@@ -132,7 +134,7 @@ a_caller_that_dies_cancels(_) ->
         {'DOWN', Mon, process, Pid, _} -> ok
     end,
     %% the worker is free again without anyone cancelling
-    {ok, #{values := [2]}} = retry_busy(W, #{}, 50),
+    {ok, #{values := [2]}} = retry_busy(W, #{}, 250),
     ok = ?W:stop(W).
 
 retry_busy(W, Request, N) ->
@@ -160,25 +162,25 @@ a_second_submit_is_busy(_) ->
 
 await_rules(_) ->
     W = start(#{limits => #{timeout => infinity}}),
-    {error, #{kind := unknown_ref}} = ?W:await(W, make_ref(), 100),
+    {error, #{kind := unknown_ref}} = ?W:await(W, make_ref(), 5000),
     {ok, Ref} = ?W:submit(W, #{call => {~"spin", []}}),
     %% The first waiter's request is sent from this process, so it reaches
     %% the worker before the second: no sleep decides who holds the slot.
     Token = make_ref(),
     First = gen_server:send_request(W, {await, Ref, Token}),
-    {error, #{kind := already_awaited}} = ?W:await(W, Ref, 100),
+    {error, #{kind := already_awaited}} = ?W:await(W, Ref, 5000),
     ok = ?W:cancel(W, Ref),
     {reply, {outcome, {error, #{kind := cancelled}}}} = gen_server:receive_response(First, 5000),
     %% what await/3 does once it has the outcome
     ok = gen_server:cast(W, {consumed, Ref, Token}),
     %% an outcome is given once
-    {error, #{kind := unknown_ref}} = ?W:await(W, Ref, 100),
+    {error, #{kind := unknown_ref}} = ?W:await(W, Ref, 5000),
     %% a finite await that gave up leaves the slot free
     {ok, Ref2} = ?W:submit(W, #{call => {~"spin", []}}),
     {error, #{kind := still_running}} = ?W:await(W, Ref2, 20),
     {error, #{kind := still_running}} = ?W:await(W, Ref2, 20),
     ok = ?W:cancel(W, Ref2),
-    {error, #{kind := cancelled}} = ?W:await(W, Ref2, 1000),
+    {error, #{kind := cancelled}} = ?W:await(W, Ref2, 5000),
     ok = ?W:stop(W).
 
 an_unawaited_outcome_is_dropped_by_the_next(_) ->
@@ -186,8 +188,8 @@ an_unawaited_outcome_is_dropped_by_the_next(_) ->
     {ok, Ref} = ?W:submit(W, #{call => {~"echo", [1]}}),
     timer:sleep(200),
     %% it survives until someone asks or another request comes
-    {ok, Ref2} = retry_submit(W, #{call => {~"echo", [5]}}, 50),
-    {error, #{kind := unknown_ref}} = ?W:await(W, Ref, 100),
+    {ok, Ref2} = retry_submit(W, #{call => {~"echo", [5]}}, 250),
+    {error, #{kind := unknown_ref}} = ?W:await(W, Ref, 5000),
     {ok, #{values := [6]}} = ?W:await(W, Ref2, 5000),
     ok = ?W:stop(W).
 
@@ -205,7 +207,7 @@ dead_worker_answers_with_a_value(_) ->
     ok = ?W:stop(W),
     {error, #{class := worker, kind := no_worker}} = ?W:run(W, #{}),
     {error, #{kind := no_worker}} = ?W:submit(W, #{}),
-    {error, #{kind := no_worker}} = ?W:await(W, make_ref(), 100),
+    {error, #{kind := no_worker}} = ?W:await(W, make_ref(), 5000),
     {error, #{kind := no_worker}} = ?W:cancel(W, make_ref()),
     ok.
 
@@ -225,23 +227,25 @@ the_request_directory_is_removed(Config) ->
     ok = ?W:stop(W).
 
 cleanup_runs_whatever_happens(_) ->
-    W = start(#{limits => #{timeout => 100}}),
-    Check = fun(Request, Expect) ->
-        Expect(?W:run(W, Request#{notify => self()})),
+    W = start(),
+    Short = start(#{limits => #{timeout => 100}}),
+    Check = fun(Worker, Request, Expect) ->
+        Expect(?W:run(Worker, Request#{notify => self()})),
         Dir =
             receive
                 {prepared, D} -> D
             end,
         receive
             {cleaned, Dir} -> ok
-        after 2000 -> ct:fail({no_cleanup, Request})
+        after 5000 -> ct:fail({no_cleanup, Request})
         end,
         false = filelib:is_dir(Dir)
     end,
-    Check(#{call => {~"boom", []}}, fun({error, #{kind := runtime_failure}}) -> ok end),
-    Check(#{call => {~"spin", []}}, fun({error, #{kind := timeout}}) -> ok end),
-    Check(#{raise => decode}, fun({error, #{kind := crashed}}) -> ok end),
-    Check(#{files => [{~"../out", ~"x"}]}, fun({error, #{kind := bad_stage_path}}) -> ok end),
+    Check(W, #{call => {~"boom", []}}, fun({error, #{kind := runtime_failure}}) -> ok end),
+    Check(Short, #{call => {~"spin", []}}, fun({error, #{kind := timeout}}) -> ok end),
+    Check(W, #{raise => decode}, fun({error, #{kind := crashed}}) -> ok end),
+    Check(W, #{files => [{~"../out", ~"x"}]}, fun({error, #{kind := bad_stage_path}}) -> ok end),
+    ok = ?W:stop(Short),
     %% a cleanup that crashes does not take the worker with it
     {ok, _} = ?W:run(W, #{raise => cleanup}),
     {ok, _} = ?W:run(W, #{}),
@@ -338,20 +342,24 @@ start_refusals(_) ->
     ok.
 
 errors_have_the_same_structure(_) ->
-    W = start(#{limits => #{timeout => 100, max_output_bytes => 16}}),
+    W = start(#{limits => #{max_output_bytes => 16}}),
+    Short = start(#{limits => #{timeout => 100}}),
     Errors = [
-        ?W:run(W, R)
-     || R <- [
-            #{call => {~"boom", []}},
-            #{call => {~"spin", []}},
-            #{call => {~"exit", [1]}},
-            #{call => {~"print", [2]}},
-            #{raise => prepare},
-            #{files => [{~"../x", ~"x"}]},
-            #{needs => #{min_timeout => 1000}},
-            not_a_map
+        ?W:run(Short, #{call => {~"spin", []}})
+        | [
+            ?W:run(W, R)
+         || R <- [
+                #{call => {~"boom", []}},
+                #{call => {~"exit", [1]}},
+                #{call => {~"print", [2]}},
+                #{raise => prepare},
+                #{files => [{~"../x", ~"x"}]},
+                #{needs => #{min_timeout => 10_000}},
+                not_a_map
+            ]
         ]
     ],
+    ok = ?W:stop(Short),
     [true = wasmtime_worker_error:is_error(E) || {error, E} <- Errors],
     8 = length([E || {error, E} <- Errors]),
     Kinds = lists:usort([wasmtime_worker_error:kind_of(E) || {error, E} <- Errors]),

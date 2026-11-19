@@ -234,6 +234,9 @@ After the release:
 - Before publishing 0.3.0: stale statements and the component entries in
   `troubleshooting.md`. Done on `docs-review`, except the `nif.h` header
   comment (a source file, left for a code change).
-- `wasmtime.erl` and the lint length limit: as in erlang_wasm, which has no
-  length limit. The API stays one module; raise the limit when it is hit.
+- `wasmtime.erl` and the lint length limit: as in erlang_quic. Size rules
+  keep their default and a module that outgrows one goes in the rule's
+  `ignore` list with its reason. `elvis.config`, the erlfmt file list and
+  `AGENTS.md` now follow erlang_quic's layout, adapted. Done on
+  `docs-review`.
 - Open: the CHANGELOG date, and questions 2 to 5.

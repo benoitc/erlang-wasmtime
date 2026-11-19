@@ -8,7 +8,9 @@
 %% machine's CPU features, so produce and consume it on the same machine.
 main([SrcDir, OutDir]) ->
     Root = filename:dirname(filename:dirname(escript:script_name())),
-    true = code:add_patha(filename:join([Root, "_build", "default", "lib", "erlang_wasmtime", "ebin"])),
+    true = code:add_patha(
+        filename:join([Root, "_build", "default", "lib", "erlang_wasmtime", "ebin"])
+    ),
     case wasmtime:features() of
         #{compiler := true, wat := true} -> ok;
         F -> halt_with("this build cannot compile WAT: ~p", [F])

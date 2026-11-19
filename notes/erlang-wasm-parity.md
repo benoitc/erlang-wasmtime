@@ -46,20 +46,40 @@ image is a module here, not a memory copy, so capture costs a compile unless
 cached; tables are not carried (preinit's rule); components are not covered
 by preinit.
 
-## Phase 4: `wasi:http` and network grants
+## Phase 4: `wasi:http` and network access
 
-The C API has `wasmtime_component_linker_add_wasi_http` and all-or-nothing
-network switches (`wasi_config_inherit_network`,
-`wasi_config_allow_ip_name_lookup`). First step is a spike: what the host
-can decide per request and per address. erlang_wasm's `wasi_net` grants by
-address; if the C API cannot, the option is refused for anything narrower
-than all or nothing.
+Spike done 2026-11-19 on the Wasmtime 48 C API headers:
+
+- `wasmtime_component_linker_add_wasi_http` and
+  `wasmtime_context_set_wasi_http` give a component `wasi:http/types` and
+  `wasi:http/outgoing-handler`. There is no configuration: no hook to allow
+  or refuse a request, no way to supply the transport. Wasmtime makes the
+  request itself. So outgoing HTTP is all or nothing.
+- Nothing lets the host build an incoming request or a response outparam,
+  so `wasi:http/incoming-handler` cannot be called: no serving.
+- Sockets: `wasi_config_inherit_network` and
+  `wasi_config_allow_ip_name_lookup`. All or nothing, no grant per address.
+- The full archives have `WASMTIME_FEATURE_WASI_HTTP`; the runtime-only
+  archives are built without it and would need a new revision.
+
+Proposal, waiting for the maintainer: two explicit opt-ins in the `wasi`
+options, off by default, `network => all` and `http => all`. erlang_wasm's
+grants by address (`wasi_net`), its transports and its listener are
+refused and listed under Deferred.
 
 ## Phase 5: host resources, component async, WASI 0.3
 
-`wasm_component:host_new/2,3`, `host_get/1`, `host_update/2`,
-`host_drop/1`; `call_async`, `start_async`, `pump`; streams and futures.
-Each starts with a C API check. Both are under "Deferred" today.
+Spike done 2026-11-19:
+
+- Host resources are feasible: `wasmtime_component_resource_host_new(owned,
+  rep, ty)` and `wasmtime_component_linker_instance_add_resource` exist. To
+  do: `wasmtime_component:host_new/2,3`, `host_get/1`, `host_update/2`,
+  `host_drop/1`, with the table of host objects on the Erlang side.
+- Component async is not: `wasmtime_component_func_call_async` exists, but
+  `stream`, `future` and `error-context` are types only, with no value kind
+  to build or read one, and every engine here has `concurrency_support` off
+  (the runtime-only library records it in `.cwasm` files). WASI 0.3 depends
+  on it. Stays under Deferred.
 
 ## Phase 6: script workers
 
@@ -90,4 +110,5 @@ the page budget (`wasm_engine`), the compiled tier's caches.
   `save_snapshot/2`, `load_snapshot/2`, `acquire/1`, `release/1`, with
   `wasmtime_snapshot_SUITE` and `docs/snapshots.md`. Not done: components,
   capturing a restored instance again, erlang_wasm's on-disk format.
-- Next: phase 4, a spike on `wasi:http` and network grants in the C API.
+- 2026-11-19: spikes for phases 4 and 5 done, findings above.
+- Next: host resources (phase 5); phase 4 waits for a decision.

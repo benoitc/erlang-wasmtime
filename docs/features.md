@@ -9,7 +9,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 |---|---|
 | Compile from binary or `.wat` text | yes, dirty CPU scheduler |
 | WebAssembly proposals | Wasmtime 48 defaults, verified by compiling probe modules: bulk memory, reference types, multi-value, SIMD, relaxed SIMD, tail calls, extended const, multi-memory, memory64, exceptions, GC and typed function references, threads and shared memories |
-| Instantiate with host functions | yes, function imports only; `instantiate/3` takes the import map as erlang_wasm does, `instantiate/2` the import map or the options |
+| Instantiate with host functions | yes, function imports only; an import you give wins over the WASI function of the same name; `instantiate/3` takes the import map as erlang_wasm does, `instantiate/2` the import map or the options |
 | Call exports | yes, `i32`, `i64`, `f32`, `f64`, `v128` values |
 | Traps | reported with `class => trap` and a `kind` per Wasmtime trap code |
 | Interruption | `timeout` option and `interrupt/1`, epoch based: the epoch is bumped as they fire, so the guest stops at its next loop back-edge or call |
@@ -38,6 +38,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Source build fallback | a platform without a prebuilt archive compiles the C API itself |
 | WASI preview 1 | args, env, preopened dirs with read or write, stdio to file or inherited; `clocks => monotonic` refuses wall and CPU clocks with `ENOTCAPABLE` |
 | Snapshots | `snapshot/1,2` of an instance made with `snapshotable => true`, `restore/3`, `snapshot_info/1`, `save_snapshot/2`, `load_snapshot/2`, `compatibility_key`; core modules, memories and mutable globals; see [snapshots](snapshots.md) |
+| Script workers | `wasmtime_script_worker` (`run/2,3`, `submit/2,3`, `await/3`, `cancel/2`) over an adapter (`wasmtime_worker_adapter`); `wasmtime_javascript_command` and `wasmtime_python_command`; a directory, a deadline and bounded output per request; see [scripting](scripting.md) |
 | Instance worker | `wasmtime_instance_worker`: one instance in a process, a deadline per request, `fresh` or `reuse` between requests; see [workers](worker.md) |
 | Module cache | `load/1,2`, `load_file/1`, `unload/1`: one compiled module per source and option set for the node, a claim per load, given back by `unload/1` or when the loader dies; needs the application started |
 | Function types without an instance | `func_types_of/1`, `func_type_of/2`, on a module or on bytes |
@@ -145,6 +146,19 @@ feature is missing the runtime says so with an error; it does not approximate.
   `kind => badarg`. erlang_wasm supports part of it.
 - **`preinit/3` for components.** Core modules only; componentize-py
   pre-initializes what it builds.
+- **Snapshot adapters for script workers.** erlang_wasm's `wasm_javascript`,
+  `wasm_python` and `wasm_lua` start the interpreter once and restore a
+  snapshot per request. Here the command adapters start it for every
+  request: a snapshot does not carry what WASI holds for an instance, and
+  the reactor builds and their protocol are not ported.
+- **The reaper.** erlang_wasm journals every request so a restarted node
+  removes what a crashed one left, and bounds cleanup work. Here a
+  request's directory is removed by its worker when the request ends; a
+  node crash leaves it. `cleanup_stats/0` and `cleanup_requests/0` do not
+  exist.
+- **Other script worker options.** `restore_ahead`, `compiled`, the heap
+  floors, a result channel apart from stdout, and the conformance kit
+  module are erlang_wasm's and have no counterpart yet.
 - **Sockets for a guest.** Wasmtime 48 starts a WASI context with TCP and
   UDP off, and its C API can open the address check
   (`wasi_config_inherit_network`) but not turn them on. `network => all` is

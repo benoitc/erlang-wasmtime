@@ -435,7 +435,14 @@ static linker_entry_t *build_entry(module_res_t *m, ErlNifEnv *env, ERL_NIF_TERM
 #else
   (void)wasi, (void)monotonic, (void)tty_mask;
 #endif
-  if (!*err) *err = bind_imports(le, m, env, imports, out);
+  if (!*err) {
+    /* An import the caller gives wins over the WASI function of that name:
+     * the map is explicit, and it is how an engine built for another host's
+     * WASI dialect (wasmedge-quickjs's sockets) is made to link. */
+    wasmtime_linker_allow_shadowing(le->linker, true);
+    *err = bind_imports(le, m, env, imports, out);
+    wasmtime_linker_allow_shadowing(le->linker, false);
+  }
   if (!*err) {
     wasmtime_error_t *e = wasmtime_linker_instantiate_pre(le->linker, m->mod, &le->pre);
     if (e) *err = error_to_term(out, e, "link");

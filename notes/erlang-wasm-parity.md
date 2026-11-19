@@ -119,4 +119,8 @@ the page budget (`wasm_engine`), the compiled tier's caches.
 - Sockets: left refused (maintainer, option 1); no Wasmtime release up to
   main has a C API call to enable TCP and UDP. An upstream issue is drafted,
   not filed.
-- Next: script workers (phase 6).
+- 2026-11-19, phase 6 first cut: `wasmtime_script_worker`,
+  `wasmtime_worker_adapter`, `wasmtime_script_v1`, `wasmtime_worker_error`,
+  the JavaScript and Python command adapters, `docs/scripting.md`. Not
+  ported, listed under Deferred: snapshot adapters (reactors, Lua), the
+  reaper and its journal, `restore_ahead`, the conformance kit module.

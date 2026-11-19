@@ -14,6 +14,13 @@ same on the other.
   the node. Loading the same bytes twice compiles once. `erlang_wasmtime`
   is now an application with a supervisor; the cache needs it started, the
   rest of the library does not.
+- `wasmtime_script_worker` runs scripts through an adapter, one request at
+  a time, each in a fresh instance with its own directory, a deadline and
+  bounded output. `wasmtime_javascript_command` and
+  `wasmtime_python_command` ship; `wasmtime_worker_adapter` is the behaviour
+  for your own.
+- An import you give `instantiate/3` now wins over the WASI function of
+  the same name. It was a link error before.
 - Host resources for components: a `resource` in an interface you serve is
   kept by `wasmtime_component` (`host_new/2`, `host_get/1`,
   `host_update/2`, `host_drop/1`), and the guest holds handles to it.

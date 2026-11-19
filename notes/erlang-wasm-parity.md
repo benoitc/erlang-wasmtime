@@ -71,3 +71,12 @@ separately once those are in.
 
 `wasi_nn` (nothing in the C API headers), linking instances (`extern/2`),
 the page budget (`wasm_engine`), the compiled tier's caches.
+
+## Status
+
+- 2026-11-19, phase 1, done on `wasm-parity`: `instantiate/3`,
+  `get_global/2` (`global_get/2` deprecated), `format_error/1`,
+  `func_types_of/1`, `func_type_of/2`, `wasmtime_limits` with `timeout`,
+  `fuel` and `max_memory_pages` at instantiate.
+- Phase 1, left: the module cache (`load/1,2`, `load_file/1`, `unload/1`),
+  `exports/1` on an instance, `pin/2` and `release/2`, the `profile` option.

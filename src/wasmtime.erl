@@ -26,6 +26,8 @@ on an instance at a time; concurrent callers are queued.
     module_kind/1,
     imports/1,
     exports/1,
+    func_type_of/2,
+    func_types_of/1,
     serialize/1,
     deserialize/1, deserialize/2,
     deserialize_file/1, deserialize_file/2,
@@ -82,6 +84,7 @@ on an instance at a time; concurrent callers are queued.
     frame/0,
     host_fun/0,
     imports/0,
+    valtype/0,
     options/0,
     compile_options/0,
     proposal/0,
@@ -102,7 +105,9 @@ on an instance at a time; concurrent callers are queued.
     handle :: reference(),
     ref :: reference(),
     imports :: #{{binary(), binary()} => host_fun()},
-    kind = module :: module | component
+    kind = module :: module | component,
+    %% `timeout` and `fuel` given at instantiate: the defaults of every call
+    defaults = #{} :: #{timeout => timeout(), fuel => non_neg_integer()}
 }).
 
 -opaque module_ref() :: reference().
@@ -269,6 +274,18 @@ WASI configuration. Nothing is granted by default.
     clocks => all | monotonic
 }.
 
+-doc """
+A value type, spelled as erlang_wasm does. A reference to a concrete
+(indexed) type answers its family: `func`, `struct`, `array` or `exn`.
+""".
+-type valtype() ::
+    i32
+    | i64
+    | f32
+    | f64
+    | v128
+    | {ref, null | nonull, atom()}.
+
 -type imports() :: #{{binary(), binary()} => host_fun()}.
 
 -type options() :: #{
@@ -278,6 +295,9 @@ WASI configuration. Nothing is granted by default.
     max_tables => pos_integer() | unlimited,
     max_table_elements => pos_integer() | unlimited,
     max_instances => pos_integer() | unlimited,
+    timeout => timeout(),
+    fuel => pos_integer() | infinity,
+    max_memory_pages => non_neg_integer() | infinity,
     host_timeout => timeout(),
     host => pid(),
     stream => pid(),
@@ -514,6 +534,49 @@ imports(Mod) -> wasmtime_nif:module_imports(Mod).
 -spec exports(module_ref()) -> [{binary(), func | global | table | memory | tag}].
 exports(Mod) -> wasmtime_nif:module_exports(Mod).
 
+-doc """
+The type of every function a core module exports, without instantiating it,
+as erlang_wasm's `wasm:func_types_of/1`: `#{Name => {ok, {Params, Results}}}`.
+
+Takes a compiled module, or what `compile/1` takes. Bytes are compiled
+first, so pass the module when you already have one. A component has no core
+function exports and answers an empty map.
+""".
+-spec func_types_of(module_ref() | binary() | {wat, iodata()}) ->
+    {ok, #{binary() => {ok, {[valtype()], [valtype()]}}}} | error().
+func_types_of(Source) when is_binary(Source); is_tuple(Source) ->
+    case compile(Source) of
+        {ok, Mod} -> func_types_of(Mod);
+        {error, _} = Error -> Error
+    end;
+func_types_of(Mod) ->
+    {ok,
+        #{
+            Name => {ok, {Params, Results}}
+         || {Name, Params, Results} <- wasmtime_nif:module_func_types(Mod)
+        }}.
+
+-doc """
+The type of one function export, `{ok, {Params, Results}}`, without
+instantiating. `kind => not_a_func_export` when the module exports no
+function of that name.
+""".
+-spec func_type_of(module_ref() | binary() | {wat, iodata()}, binary()) ->
+    {ok, {[valtype()], [valtype()]}} | error().
+func_type_of(Source, Name) ->
+    case func_types_of(Source) of
+        {ok, #{Name := Type}} ->
+            Type;
+        {ok, _} ->
+            {error, #{
+                class => link,
+                kind => not_a_func_export,
+                message => <<"no function export named ", Name/binary>>
+            }};
+        {error, _} = Error ->
+            Error
+    end.
+
 %% ---------------------------------------------------------------- instances
 
 -doc #{equiv => instantiate(Mod, #{})}.
@@ -535,6 +598,8 @@ memory at most. Options:
   per-store caps enforced by Wasmtime. `unlimited` removes a cap.
   `max_instances` counts core instances: 10 by default for a module, 100
   for a component, which holds several.
+- `timeout`, `fuel`, `max_memory_pages`: the limits of `wasmtime_limits`.
+  `timeout` and `fuel` become the defaults of every call on the instance.
 - `host_timeout`: how long a host function may run before the guest traps
   (default 30 s).
 - `host`: a process that serves host calls instead of the caller. It receives
@@ -569,12 +634,34 @@ Log = fun(_Ctx, [N]) -> logger:info("got ~p", [N]), {ok, []} end,
 """.
 -spec instantiate(module_ref(), imports(), options()) -> {ok, instance()} | error().
 instantiate(Mod, Imports, Opts) when is_map(Imports), is_map(Opts) ->
+    case wasmtime_limits:validate(Opts) of
+        ok ->
+            do_instantiate(Mod, Imports, page_limit(Opts));
+        {error, {invalid_limits, Bad}} ->
+            {error, #{
+                class => link,
+                kind => invalid_limits,
+                message => format_reason({invalid_limits, Bad})
+            }}
+    end.
+
+%% `max_memory_pages` is `memory_limit` in pages; an explicit byte limit wins.
+page_limit(#{memory_limit := _} = Opts) -> Opts;
+page_limit(#{max_memory_pages := infinity} = Opts) -> Opts#{memory_limit => unlimited};
+page_limit(#{max_memory_pages := Pages} = Opts) -> Opts#{memory_limit => max(Pages * 65536, 1)};
+page_limit(Opts) -> Opts.
+
+do_instantiate(Mod, Imports, Opts) ->
     Ref = make_ref(),
     Id = erlang:unique_integer([positive, monotonic]),
     case wasmtime_nif:instantiate(Mod, nif_options(Mod, Imports, Opts), Ref, Id) of
         {ok, Handle} ->
             Inst = #instance{
-                handle = Handle, ref = Ref, imports = Imports, kind = module_kind(Mod)
+                handle = Handle,
+                ref = Ref,
+                imports = Imports,
+                kind = module_kind(Mod),
+                defaults = call_defaults(Opts)
             },
             case wait_result(Inst, Id, infinity) of
                 ok -> {ok, Inst};
@@ -583,6 +670,9 @@ instantiate(Mod, Imports, Opts) when is_map(Imports), is_map(Opts) ->
         {error, _} = Error ->
             Error
     end.
+
+call_defaults(Opts) ->
+    maps:filter(fun(_, V) -> V =/= infinity end, maps:with([timeout, fuel], Opts)).
 
 %% The map the NIF reads by key; see parse_options in c_src/nif_instantiate.c.
 nif_options(Mod, Imports, Opts) ->
@@ -763,7 +853,8 @@ or a host function argument), with the options of `call/4`.
 call_ref(Inst, Ref, Args, Opts) when is_reference(Ref), is_list(Args), is_map(Opts) ->
     do_call(Inst, Ref, Args, Opts).
 
-do_call(#instance{handle = H} = Inst, Name, Args, Opts) ->
+do_call(#instance{handle = H, defaults = Defaults} = Inst, Name, Args, Opts0) ->
+    Opts = maps:merge(Defaults, Opts0),
     Id = erlang:unique_integer([positive, monotonic]),
     case wasmtime_nif:call(H, Name, Args, Id, maps:get(fuel, Opts, undefined)) of
         enqueued -> wait_result(Inst, Id, maps:get(timeout, Opts, infinity));
@@ -834,9 +925,12 @@ guest that calls back before `await` waits until then, within
 `host_timeout`.
 """.
 -spec call_async(instance(), iodata(), [value()]) -> {ok, call_ref()} | error().
-call_async(#instance{handle = H}, Name, Args) when is_list(Args) ->
+call_async(#instance{handle = H, defaults = Defaults}, Name, Args) when is_list(Args) ->
     Id = erlang:unique_integer([positive, monotonic]),
-    case wasmtime_nif:call(H, iolist_to_binary(Name), Args, Id, undefined) of
+    %% the instance's `fuel` applies; its `timeout` does not, `await/3` has its own
+    case
+        wasmtime_nif:call(H, iolist_to_binary(Name), Args, Id, maps:get(fuel, Defaults, undefined))
+    of
         enqueued -> {ok, {call_ref, Id}};
         {error, _} = Error -> Error
     end.

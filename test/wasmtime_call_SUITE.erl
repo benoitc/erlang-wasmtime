@@ -38,6 +38,7 @@
     global_get_deprecated/1,
     instantiate_with_imports/1,
     format_error_one_line/1,
+    limits_at_instantiate/1,
     tables_size_grow/1
 ]).
 
@@ -87,6 +88,7 @@ groups() ->
             global_get_deprecated,
             instantiate_with_imports,
             format_error_one_line,
+            limits_at_instantiate,
             tables_size_grow
         ]}
     ].
@@ -527,4 +529,55 @@ format_error_one_line(_) ->
         )
     ),
     {0, _} = binary:match(iolist_to_binary(wasmtime:format_error(L)), ~"link: "),
+    ok.
+
+%% wasmtime_limits: timeout and fuel given at instantiate bound every call,
+%% max_memory_pages caps the memory, erlang_wasm's other limits are refused.
+limits_at_instantiate(_) ->
+    Wat =
+        ~"""
+        (module
+          (memory (export "memory") 1)
+          (func (export "spin") (loop br 0))
+          (func (export "one") (result i32) i32.const 1)
+          (func (export "grow") (param i32) (result i32) local.get 0 memory.grow))
+        """,
+    #{timeout := 1000, max_memory_pages := 256} = wasmtime_limits:untrusted(),
+    #{timeout := infinity} = wasmtime_limits:trusted(),
+    true = wasmtime_limits:default() =:= wasmtime_limits:untrusted(),
+    ok = wasmtime_limits:validate(wasmtime_limits:untrusted()),
+    {error, {invalid_limits, [timeout]}} = wasmtime_limits:validate(#{timeout => lots}),
+    Mod = wasmtime_test:compile(Wat),
+    Opts = wasmtime_limits:merge(wasmtime_limits:untrusted(), #{
+        timeout => 50, max_memory_pages => 2
+    }),
+    {ok, A} = wasmtime:instantiate(Mod, #{}, Opts),
+    {error, #{kind := timeout}} = wasmtime:call(A, ~"spin", []),
+    {ok, [1]} = wasmtime:call(A, ~"one", []),
+    %% the call's own option wins
+    {ok, [1]} = wasmtime:call(A, ~"one", [], #{timeout => infinity}),
+    {ok, [1]} = wasmtime:call(A, ~"grow", [1]),
+    {ok, [-1]} = wasmtime:call(A, ~"grow", [1]),
+    %% an explicit byte limit wins over the page limit
+    {ok, B} = wasmtime:instantiate(Mod, #{}, #{max_memory_pages => 1, memory_limit => 4 * 65536}),
+    {ok, [1]} = wasmtime:call(B, ~"grow", [3]),
+    {ok, Metered} = wasmtime:compile({wat, Wat}, #{fuel => true}),
+    {ok, C} = wasmtime:instantiate(Metered, #{}, #{fuel => 1000}),
+    {error, #{kind := out_of_fuel}} = wasmtime:call(C, ~"spin", []),
+    {ok, [1]} = wasmtime:call(C, ~"one", []),
+    {ok, Ref} = wasmtime:call_async(C, ~"spin", []),
+    {error, #{kind := out_of_fuel}} = wasmtime:await(C, Ref),
+    {ok, D} = wasmtime:instantiate(Mod, #{}, wasmtime_limits:trusted()),
+    {ok, [1]} = wasmtime:call(D, ~"one", []),
+    [
+        {error, #{class := link, kind := invalid_limits}} = wasmtime:instantiate(Mod, #{}, Bad)
+     || Bad <- [
+            #{max_depth => 256},
+            #{max_heap_words => 1024},
+            #{max_host_calls => 10},
+            #{timeout => 0},
+            #{fuel => lots},
+            #{max_memory_pages => -1}
+        ]
+    ],
     ok.

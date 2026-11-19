@@ -77,6 +77,14 @@ Or from another process while it runs:
 ok = wasmtime:interrupt(Inst).
 ```
 
+To bound every call on an instance, give the limit when you create it.
+`wasmtime_limits:untrusted()` is one second per call and 16 MB of memory:
+
+```erlang
+{ok, Inst} = wasmtime:instantiate(Mod, #{}, wasmtime_limits:untrusted()),
+{error, #{kind := timeout}} = wasmtime:call(Inst, ~"loop", []).
+```
+
 ## Run a call without blocking
 
 ```erlang

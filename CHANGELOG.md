@@ -11,6 +11,13 @@ same on the other.
 - `get_global/2` answers the value in a list, like a call result.
   `global_get/2` is deprecated: calling it gives a compiler warning.
 - `format_error/1` renders an error on one line for logs.
+- `func_types_of/1` and `func_type_of/2` give the types of a module's
+  function exports without instantiating it.
+- `wasmtime_limits` has the presets of erlang_wasm's `wasm_limits`.
+  `instantiate/3` takes `timeout`, `fuel` and `max_memory_pages`: the first
+  two apply to every call on the instance unless the call gives its own.
+  The limits this runtime cannot enforce (`max_depth`, `max_heap_words`,
+  `max_host_calls`) are refused, not ignored.
 
 ## 0.3.0 (unreleased)
 

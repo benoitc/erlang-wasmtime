@@ -28,7 +28,8 @@
     pool_address_space/1,
     deserialize_file/1,
     engine_cap/1,
-    validate_module/1
+    validate_module/1,
+    module_func_types/1
 ]).
 
 all() ->
@@ -42,6 +43,7 @@ groups() ->
             module_invalid,
             module_import_kinds,
             module_export_kinds,
+            module_func_types,
             module_reuse_across_processes,
             module_validation_rejects_bad_types
         ]},
@@ -401,4 +403,33 @@ validate_module(_) ->
         <<0, "asm", 1, 0, 0, 0, 1, 1, 5>>
     ),
     ?assert(byte_size(Msg) > 0),
+    ok.
+
+%% erlang_wasm's func_types_of/1 and func_type_of/2: types without an instance.
+module_func_types(_) ->
+    Wat =
+        ~"""
+        (module
+          (memory (export "memory") 1)
+          (func (export "add") (param i32 i64) (result f64) f64.const 0)
+          (func (export "none"))
+          (func (export "vec") (param v128) (result f32 f32) f32.const 0 f32.const 0)
+          (func (export "refs") (param externref (ref func)) (result funcref) ref.null func))
+        """,
+    Mod = wasmtime_test:compile(Wat),
+    {ok, Types} = wasmtime:func_types_of(Mod),
+    #{
+        ~"add" := {ok, {[i32, i64], [f64]}},
+        ~"none" := {ok, {[], []}},
+        ~"vec" := {ok, {[v128], [f32, f32]}},
+        ~"refs" := {ok, {[{ref, null, extern}, {ref, nonull, func}], [{ref, null, func}]}}
+    } = Types,
+    4 = map_size(Types),
+    {ok, Types} = wasmtime:func_types_of({wat, Wat}),
+    {ok, Bin} = wasmtime:wat2wasm(Wat),
+    {ok, Types} = wasmtime:func_types_of(Bin),
+    {ok, {[i32, i64], [f64]}} = wasmtime:func_type_of(Mod, ~"add"),
+    {error, #{class := link, kind := not_a_func_export}} = wasmtime:func_type_of(Mod, ~"memory"),
+    {error, #{class := link, kind := not_a_func_export}} = wasmtime:func_type_of(Mod, ~"nope"),
+    {error, #{class := compile}} = wasmtime:func_types_of(~"not wasm"),
     ok.

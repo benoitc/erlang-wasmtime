@@ -1,9 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (unreleased)
 
-Names shared with erlang_wasm, so code written for one runtime reads the
-same on the other.
+Components and WASI 0.2, with erlang_wasm's term mapping: a componentize-py
+agent per request in 0.75 ms on an M4 Pro, 1.27 ms on a 4-vCPU x86_64
+runner.
+
+The API now follows erlang_wasm's, so code written for one runtime reads
+the same on the other.
 
 - `instantiate/3` takes the import map as its second argument.
   `instantiate/2` takes the import map or the options map. The `imports`
@@ -46,13 +50,6 @@ same on the other.
   two apply to every call on the instance unless the call gives its own.
   The limits this runtime cannot enforce (`max_depth`, `max_heap_words`,
   `max_host_calls`) are refused, not ignored.
-
-## 0.3.0 (unreleased)
-
-Components and WASI 0.2, with erlang_wasm's term mapping: a componentize-py
-agent per request in 0.75 ms on an M4 Pro, 1.27 ms on a 4-vCPU x86_64
-runner.
-
 - Pools sized for components: `pooling` takes `core_instances`, `memories`
   and `tables` (each `instances` by default); a component instance's store
   allows 100 core instances by default instead of 10.

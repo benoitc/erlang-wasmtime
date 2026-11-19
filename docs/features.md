@@ -22,6 +22,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Explicit teardown | `destroy/1`: stops the instance and frees its store (and pool slot) before returning |
 | Text to binary | `wat2wasm/1` (core modules and components) |
 | Components | compiled, validated, precompiled, pooled like modules; `module_kind/1`; `call/3,4` by `Export` or `Interface#Function`, `{ok, Value}`; erlang_wasm's term mapping for every WIT value; host imports keyed `{Interface, Function}` (raw `{ok, [V]}` funs or erlang_wasm's typed `import_fun/2`); resources as integer handles, `drop_resource/2,3`; see [components](components.md) |
+| Host resources | a `resource` in an interface the import map serves is the host's: `wasmtime_component:host_new/2,3`, `host_get/1`, `host_update/2`, `host_drop/1`, `host_live/0`; the guest's drop removes the entry, or calls your `[resource-drop]<name>` fun |
 | WASI 0.2 | for components with a `wasi` option: the same keys as preview 1, `run/1,2`, streamed stdin and stdout, `clocks => monotonic` traps the wall clock (`kind => clock_refused`); `http => all` grants `wasi:http/outgoing-handler` to any server, on full builds |
 | Host functions in a dedicated process | `host => Pid` at instantiate, `handle_host_call/2` in that process |
 | Non-blocking calls | `call_async/3` and `await/2,3` |
@@ -142,8 +143,6 @@ feature is missing the runtime says so with an error; it does not approximate.
 - **Component Model async and WASI 0.3.** `stream`, `future` and
   `error-context` values, and async exports and imports, are refused with
   `kind => badarg`. erlang_wasm supports part of it.
-- **Host-defined resources.** A host function cannot create a resource of
-  its own type for a component; guest resources cross as handles.
 - **`preinit/3` for components.** Core modules only; componentize-py
   pre-initializes what it builds.
 - **Sockets for a guest.** Wasmtime 48 starts a WASI context with TCP and

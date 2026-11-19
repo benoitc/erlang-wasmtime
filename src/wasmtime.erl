@@ -1155,6 +1155,13 @@ settle(#instance{handle = H, ref = Ref} = Inst, Id) ->
 %% typed form (import_fun/2): it returns the value bare and raises to trap.
 %% The NIF reads {ok, Results} for a core import and {ok, Value} for a
 %% component one.
+%% The guest dropped a host resource and the import map has no fun for it:
+%% the entry goes (wasmtime_component, c_src/nif_component.c).
+run_host(Imports, {_, <<"[resource-drop]", _/binary>>} = Key, _Inst, [Handle]) when
+    not is_map_key(Key, Imports)
+->
+    ok = wasmtime_component:host_drop(Handle),
+    {ok, undefined};
 run_host(Imports, Key, #instance{kind = Kind} = Inst, Args) ->
     Fun = maps:get(Key, Imports),
     try

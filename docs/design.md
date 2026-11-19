@@ -234,6 +234,14 @@ worker thread, the same queue, host calls through `host_exchange`,
   (`{drop, Handle}`) run on the worker.
 - A component instance that trapped cannot be entered again (Component
   Model); calls answer Wasmtime's error.
+- A resource declared by an interface the import map serves is defined as a
+  host resource (`add_host_resource`): its type id is its rank in the
+  linker entry, and `host_resource_id` in `nif_cvalues.c` compares a value's
+  type with those ids to tell a host handle, which crosses as its rep, from
+  a guest one, which crosses as a table handle. The guest's drop reaches
+  Erlang through `host_exchange` under `{Interface, "[resource-drop]Name"}`,
+  so it only ever runs inside a request. The table of host objects is
+  Erlang's (`wasmtime_component`, the serving process's dictionary).
 
 Rules for `nif_cvalues.c`, which a change must keep:
 

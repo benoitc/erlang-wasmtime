@@ -1,0 +1,28 @@
+package example:kv;
+
+// A resource the host defines: the guest holds handles, the host the data.
+interface store {
+  resource bucket {
+    constructor(name: string);
+    put: func(item: string);
+    count: func() -> u32;
+  }
+  // an owned handle made by a plain function
+  open: func(name: string) -> bucket;
+  // a borrowed handle given back to the host
+  describe: func(b: borrow<bucket>) -> string;
+  // an owned handle given back: the host takes it over
+  close: func(b: bucket) -> u32;
+}
+
+world app {
+  import store;
+  // makes a bucket, fills it, describes it, drops it
+  export fill: func(name: string, items: list<string>) -> string;
+  // makes a bucket and hands it back to the host with `close`
+  export fill-and-close: func(name: string) -> u32;
+  // keeps a bucket across calls; `forget` drops it
+  export keep: func(name: string);
+  export kept: func() -> u32;
+  export forget: func();
+}

@@ -114,4 +114,9 @@ the page budget (`wasm_engine`), the compiled tier's caches.
   capturing a restored instance again, erlang_wasm's on-disk format.
 - 2026-11-19: spikes for phases 4 and 5 done, findings above.
 - 2026-11-19, phase 4 done as far as the C API goes: `http => all`.
-- Next: host resources (phase 5), then script workers.
+- 2026-11-19, host resources done (phase 5): `wasmtime_component` and the
+  `hostres` fixture. Async stays deferred.
+- Sockets: left refused (maintainer, option 1); no Wasmtime release up to
+  main has a C API call to enable TCP and UDP. An upstream issue is drafted,
+  not filed.
+- Next: script workers (phase 6).

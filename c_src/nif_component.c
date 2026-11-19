@@ -90,19 +90,101 @@ static wasmtime_error_t *add_host_func(linker_entry_t *le, wasmtime_component_li
 }
 
 /* Binds every import the component declares and `imports` provides. */
+/* Whether the import map serves the interface `iface` (with or without its
+ * version): any key naming it. *module gets the name as the caller wrote it. */
+static int iface_served(ErlNifEnv *env, ERL_NIF_TERM imports, const char *iface, size_t ilen,
+                        char **module) {
+  size_t base = ilen;
+  for (size_t i = 0; i < ilen; i++)
+    if (iface[i] == '@') {
+      base = i;
+      break;
+    }
+  ERL_NIF_TERM h, l = imports;
+  while (enif_get_list_cell(env, l, &h, &l)) {
+    const ERL_NIF_TERM *mn;
+    int ar;
+    ErlNifBinary m;
+    if (!enif_get_tuple(env, h, &ar, &mn) || ar != 2 ||
+        !enif_inspect_iolist_as_binary(env, mn[0], &m))
+      continue;
+    if (!((m.size == ilen && memcmp(m.data, iface, ilen) == 0) ||
+          (m.size == base && memcmp(m.data, iface, base) == 0)))
+      continue;
+    *module = enif_alloc(m.size + 1);
+    memcpy(*module, m.data, m.size);
+    (*module)[m.size] = 0;
+    return 1;
+  }
+  return 0;
+}
+
+/* The guest dropped its handle on a host resource. The host is told through
+ * the same exchange as a host function, under {Interface,
+ * "[resource-drop]<name>"} with the rep: wasmtime.erl answers it by
+ * dropping the entry (wasmtime_component:host_drop/1) unless the import map
+ * has a fun under that key. Runs on the instance thread, inside a call. */
+static wasmtime_error_t *host_resource_dropped(void *data, wasmtime_context_t *ctx, uint32_t rep) {
+  instance_t *inst = wasmtime_context_get_data(ctx);
+  hostfn_t *fn = &inst->wasm.entry->hostfns[(uintptr_t)data];
+  const char *fail = NULL;
+  ErlNifEnv *menv = enif_alloc_env();
+  ERL_NIF_TERM value,
+      list = enif_make_list_cell(menv, enif_make_uint(menv, rep), enif_make_list(menv, 0));
+  enum host_status st = host_exchange(inst, fn, menv, list, &value, &fail);
+  pthread_mutex_unlock(&inst->mu);
+  wasm_trap_t *trap = host_outcome(inst, st, fail);
+  if (!trap) return NULL;
+  wasm_message_t msg;
+  wasm_trap_message(trap, &msg);
+  wasmtime_error_t *e = wasmtime_error_new(msg.size ? msg.data : "host error");
+  wasm_byte_vec_delete(&msg);
+  wasm_trap_delete(trap);
+  return e;
+}
+
+/* Defines the resource `rname` of an interface as a host resource: its type
+ * id is its rank among the entry's host resources, which nif_cvalues.c
+ * uses to tell a host handle from a guest one. Takes `module`. */
+#define MAX_HOST_RESOURCES 32
+#define DROP_PREFIX "[resource-drop]"
+static wasmtime_error_t *add_host_resource(linker_entry_t *le,
+                                           wasmtime_component_linker_instance_t *li,
+                                           const char *rname, size_t rlen, char *module) {
+  if (le->nhostres == MAX_HOST_RESOURCES) {
+    enif_free(module);
+    return wasmtime_error_new("too many host resources in one component");
+  }
+  size_t idx = le->nhostfns++;
+  hostfn_t *fn = &le->hostfns[idx];
+  fn->module = module;
+  fn->name = enif_alloc(sizeof DROP_PREFIX + rlen);
+  memcpy(fn->name, DROP_PREFIX, sizeof DROP_PREFIX - 1);
+  memcpy(fn->name + sizeof DROP_PREFIX - 1, rname, rlen);
+  fn->name[sizeof DROP_PREFIX - 1 + rlen] = 0;
+  fn->type = NULL;
+  wasmtime_component_resource_type_t *rt =
+      wasmtime_component_resource_type_new_host(le->nhostres++);
+  wasmtime_error_t *e = wasmtime_component_linker_instance_add_resource(
+      li, rname, rlen, rt, host_resource_dropped, (void *)(uintptr_t)idx, NULL);
+  wasmtime_component_resource_type_delete(rt);
+  return e;
+}
+
 static ERL_NIF_TERM bind_component_imports(linker_entry_t *le, module_res_t *m, ErlNifEnv *env,
                                            ERL_NIF_TERM imports, ErlNifEnv *out) {
   unsigned nkeys;
   if (!enif_get_list_length(env, imports, &nkeys))
     return mk_error_s(out, "link", "badarg", "imports must be a list");
-  le->hostfns = enif_alloc(sizeof(hostfn_t) * (nkeys + 1));
-  memset(le->hostfns, 0, sizeof(hostfn_t) * (nkeys + 1));
+  le->hostfns = enif_alloc(sizeof(hostfn_t) * (nkeys + MAX_HOST_RESOURCES + 1));
+  memset(le->hostfns, 0, sizeof(hostfn_t) * (nkeys + MAX_HOST_RESOURCES + 1));
   if (nkeys == 0) return 0;
+  size_t nfuncs = 0; /* host functions bound; hostfns also holds the resource drops */
   wasm_engine_t *engine = m->engine->engine;
   wasmtime_component_type_t *ct = wasmtime_component_type(m->comp);
   size_t n = wasmtime_component_type_import_count(ct, engine);
   wasmtime_error_t *e = NULL;
-  for (size_t i = 0; i < n && !e && le->nhostfns < nkeys; i++) {
+  for (size_t i = 0; i < n && !e && nfuncs < nkeys; i++) {
     const char *iname;
     size_t ilen;
     wasmtime_component_item_t item;
@@ -112,6 +194,7 @@ static ERL_NIF_TERM bind_component_imports(linker_entry_t *le, module_res_t *m, 
       if (match_key(env, imports, "", 0, iname, ilen, &module, &name)) {
         wasmtime_component_linker_instance_t *root = wasmtime_component_linker_root(le->clinker);
         e = add_host_func(le, root, iname, ilen, module, name);
+        nfuncs++;
         wasmtime_component_linker_instance_delete(root);
       }
     } else if (item.kind == WASMTIME_COMPONENT_ITEM_COMPONENT_INSTANCE) {
@@ -124,14 +207,27 @@ static ERL_NIF_TERM bind_component_imports(linker_entry_t *le, module_res_t *m, 
         wasmtime_component_item_t fitem;
         if (!wasmtime_component_instance_type_export_nth(it, engine, j, &fname, &flen, &fitem))
           continue;
-        if (fitem.kind == WASMTIME_COMPONENT_ITEM_COMPONENT_FUNC &&
-            match_key(env, imports, iname, ilen, fname, flen, &module, &name)) {
+        /* A resource the interface declares is the host's to define when
+         * the caller serves that interface: an import map key names it. */
+        if (fitem.kind == WASMTIME_COMPONENT_ITEM_RESOURCE &&
+            iface_served(env, imports, iname, ilen, &module)) {
+          if (!li) {
+            root = wasmtime_component_linker_root(le->clinker);
+            e = wasmtime_component_linker_instance_add_instance(root, iname, ilen, &li);
+          }
+          if (!e)
+            e = add_host_resource(le, li, fname, flen, module);
+          else
+            enif_free(module);
+        } else if (fitem.kind == WASMTIME_COMPONENT_ITEM_COMPONENT_FUNC &&
+                   match_key(env, imports, iname, ilen, fname, flen, &module, &name)) {
           if (!li) {
             root = wasmtime_component_linker_root(le->clinker);
             e = wasmtime_component_linker_instance_add_instance(root, iname, ilen, &li);
           }
           if (!e) {
             e = add_host_func(le, li, fname, flen, module, name);
+            nfuncs++;
           } else {
             enif_free(module);
             enif_free(name);

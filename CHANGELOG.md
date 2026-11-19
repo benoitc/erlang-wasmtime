@@ -14,6 +14,9 @@ same on the other.
   the node. Loading the same bytes twice compiles once. `erlang_wasmtime`
   is now an application with a supervisor; the cache needs it started, the
   rest of the library does not.
+- Host resources for components: a `resource` in an interface you serve is
+  kept by `wasmtime_component` (`host_new/2`, `host_get/1`,
+  `host_update/2`, `host_drop/1`), and the guest holds handles to it.
 - `http => all` in the `wasi` options lets a component send HTTP requests
   through `wasi:http`. Off by default, and all or nothing: any server the
   node can reach. Not in runtime-only builds. `network => all` is refused:

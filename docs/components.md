@@ -99,6 +99,47 @@ Dropping runs the guest's destructor. `destroy/1` drops every handle the
 instance still holds. erlang_wasm's `drop_resource/3`, with the
 destructor's export name, is accepted.
 
+## Resources the host defines
+
+When the component imports an interface with a `resource`, the object is
+yours: the guest only holds handles. `wasmtime_component` keeps what stands
+behind each handle, with erlang_wasm's functions.
+
+```erlang
+Kv = ~"example:kv/store",
+Imports = #{
+    {Kv, ~"[constructor]bucket"} => fun(_Inst, [Name]) ->
+        {ok, [wasmtime_component:host_new(bucket, {Name, []})]}
+    end,
+    {Kv, ~"[method]bucket.put"} => fun(_Inst, [Handle, Item]) ->
+        {ok, {bucket, {Name, Items}}} = wasmtime_component:host_get(Handle),
+        ok = wasmtime_component:host_update(Handle, {Name, [Item | Items]}),
+        {ok, []}
+    end,
+    {Kv, ~"[method]bucket.count"} => fun(_Inst, [Handle]) ->
+        {ok, {bucket, {_, Items}}} = wasmtime_component:host_get(Handle),
+        {ok, [length(Items)]}
+    end
+},
+{ok, Inst} = wasmtime:instantiate(Mod, Imports, #{}).
+```
+
+A host function returns the handle where the interface says `own<bucket>`
+and receives it where it says `own<bucket>` or `borrow<bucket>`. When the
+guest drops its handle the entry is removed. To be told, add a fun under
+`{Interface, ~"[resource-drop]bucket"}`: it gets `[Handle]` and calls
+`host_drop/1` itself.
+
+- A resource is the host's when the import map has at least one key for its
+  interface.
+- The table belongs to the process that serves the host calls: the caller,
+  or the `host` process.
+- `destroy/1` on an instance that still holds handles tells nobody. Drop
+  what `host_live/0` lists, or let the process end.
+- A host function that takes an owned handle back (a `close`) calls
+  `host_drop/1` itself. A second drop of the same handle changes nothing.
+- One component may define 32 host resources.
+
 ## WASI 0.2
 
 With a `wasi` option the component gets WASI 0.2, configured by the same

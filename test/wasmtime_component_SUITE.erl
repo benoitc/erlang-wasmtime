@@ -21,6 +21,9 @@
     bad_values_are_refused/1,
     host_imports_raw/1,
     host_imports_typed/1,
+    host_resources/1,
+    host_resource_drop_hook/1,
+    host_resources_in_host_process/1,
     host_import_failures/1,
     missing_import/1,
     aggregate_import/1,
@@ -58,6 +61,9 @@ groups() ->
         {imports, [parallel], [
             host_imports_raw,
             host_imports_typed,
+            host_resources,
+            host_resource_drop_hook,
+            host_resources_in_host_process,
             host_import_failures,
             missing_import,
             aggregate_import
@@ -491,5 +497,135 @@ wasi_grants_refused(Config) ->
         Other -> ct:fail({accepted, Other})
     catch
         error:function_clause -> ok
+    end,
+    ok.
+
+%% ---------------------------------------------------------- host resources
+
+-define(KV, ~"example:kv/store").
+-define(HC, wasmtime_component).
+
+%% example:kv/store served from Erlang: a bucket is a host resource, a handle
+%% from host_new/2 with its items behind it.
+kv_imports() ->
+    New = fun(_Inst, [Name]) -> {ok, [?HC:host_new(bucket, {Name, []})]} end,
+    #{
+        {?KV, ~"[constructor]bucket"} => New,
+        {?KV, ~"open"} => New,
+        {?KV, ~"[method]bucket.put"} => fun(_Inst, [H, Item]) ->
+            {ok, {bucket, {Name, Items}}} = ?HC:host_get(H),
+            ok = ?HC:host_update(H, {Name, [Item | Items]}),
+            {ok, []}
+        end,
+        {?KV, ~"[method]bucket.count"} => fun(_Inst, [H]) ->
+            {ok, {bucket, {_, Items}}} = ?HC:host_get(H),
+            {ok, [length(Items)]}
+        end,
+        {?KV, ~"describe"} => fun(_Inst, [H]) ->
+            {ok, {bucket, {Name, Items}}} = ?HC:host_get(H),
+            {ok, [iolist_to_binary([Name, $:, lists:join($,, lists:reverse(Items))])]}
+        end,
+        %% the guest gives the handle back for good: the host drops it
+        {?KV, ~"close"} => fun(_Inst, [H]) ->
+            {ok, {bucket, {_, Items}}} = ?HC:host_get(H),
+            ok = ?HC:host_drop(H),
+            {ok, [length(Items)]}
+        end
+    }.
+
+host_resources(Config) ->
+    [] = ?HC:host_live(),
+    Inst = instance(Config, "hostres", #{imports => kv_imports(), wasi => #{}}),
+    %% made, used through own and borrow, dropped by the guest: nothing left
+    {ok, ~"fruit:apple,pear 2"} = wasmtime:call(Inst, ~"fill", [~"fruit", [~"apple", ~"pear"]]),
+    [] = ?HC:host_live(),
+    {ok, ~"empty: 0"} = wasmtime:call(Inst, ~"fill", [~"empty", []]),
+    %% an owned handle handed back to a host function
+    {ok, 1} = wasmtime:call(Inst, ~"fill-and-close", [~"tmp"]),
+    [] = ?HC:host_live(),
+    %% kept by the guest across calls
+    {ok, undefined} = wasmtime:call(Inst, ~"keep", [~"long"]),
+    [Kept] = ?HC:host_live(),
+    {ok, {bucket, {~"long", [~"kept"]}}} = ?HC:host_get(Kept),
+    {ok, 1} = wasmtime:call(Inst, ~"kept", []),
+    %% the host changes what stands behind the handle
+    ok = ?HC:host_update(Kept, {~"long", [~"a", ~"b", ~"c"]}),
+    {ok, 3} = wasmtime:call(Inst, ~"kept", []),
+    {ok, undefined} = wasmtime:call(Inst, ~"forget", []),
+    [] = ?HC:host_live(),
+    {ok, 0} = wasmtime:call(Inst, ~"kept", []),
+    %% handles are not reused, and the table functions take a miss
+    H = ?HC:host_new(other, x, origin),
+    true = H > Kept,
+    error = ?HC:host_get(Kept),
+    ok = ?HC:host_update(Kept, y),
+    ok = ?HC:host_drop(Kept),
+    ok = ?HC:host_drop(H),
+    [] = ?HC:host_live(),
+    ok.
+
+%% A fun under "[resource-drop]<name>" is told instead of the default drop.
+host_resource_drop_hook(Config) ->
+    Self = self(),
+    Imports = (kv_imports())#{
+        {?KV, ~"[resource-drop]bucket"} => fun(_Inst, [H]) ->
+            Self ! {dropped, ?HC:host_get(H)},
+            ok = ?HC:host_drop(H),
+            {ok, []}
+        end
+    },
+    Inst = instance(Config, "hostres", #{imports => Imports, wasi => #{}}),
+    {ok, ~"x:y 1"} = wasmtime:call(Inst, ~"fill", [~"x", [~"y"]]),
+    receive
+        {dropped, {ok, {bucket, {~"x", [~"y"]}}}} -> ok
+    after 1000 -> ct:fail(no_drop)
+    end,
+    [] = ?HC:host_live(),
+    %% a handle the host never made is a host error, not a crash
+    Bad = (kv_imports())#{{?KV, ~"open"} => fun(_Inst, [_]) -> {ok, [not_a_handle]} end},
+    Inst2 = instance(Config, "hostres", #{imports => Bad, wasi => #{}}),
+    {error, #{class := host}} = wasmtime:call(Inst2, ~"fill-and-close", [~"x"]),
+    %% destroying an instance that still holds a handle tells nobody: the
+    %% entry stays for the host to drop
+    Inst3 = instance(Config, "hostres", #{imports => kv_imports(), wasi => #{}}),
+    {ok, undefined} = wasmtime:call(Inst3, ~"keep", [~"left"]),
+    [Left] = ?HC:host_live(),
+    ok = wasmtime:destroy(Inst3),
+    [Left] = ?HC:host_live(),
+    ok = ?HC:host_drop(Left),
+    ok.
+
+%% The table belongs to the process that serves the host calls.
+host_resources_in_host_process(Config) ->
+    Self = self(),
+    Host = spawn_link(fun Loop() ->
+        receive
+            {wasmtime_host_call, _, _, _, _} = Call ->
+                ok = wasmtime:handle_host_call(get(inst), Call),
+                Loop();
+            {set, Inst} ->
+                put(inst, Inst),
+                Self ! ready,
+                Loop();
+            {live, From} ->
+                From ! {live, ?HC:host_live()},
+                Loop()
+        end
+    end),
+    Inst = instance(Config, "hostres", #{imports => kv_imports(), wasi => #{}, host => Host}),
+    Host ! {set, Inst},
+    receive
+        ready -> ok
+    end,
+    {ok, undefined} = wasmtime:call(Inst, ~"keep", [~"k"]),
+    [] = ?HC:host_live(),
+    Host ! {live, self()},
+    receive
+        {live, [_]} -> ok
+    end,
+    {ok, undefined} = wasmtime:call(Inst, ~"forget", []),
+    Host ! {live, self()},
+    receive
+        {live, []} -> ok
     end,
     ok.

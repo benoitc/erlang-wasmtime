@@ -239,4 +239,5 @@ After the release:
   `ignore` list with its reason. `elvis.config`, the erlfmt file list and
   `AGENTS.md` now follow erlang_quic's layout, adapted. Done on
   `docs-review`.
-- Open: the CHANGELOG date, and questions 2 to 5.
+- CHANGELOG: 0.3.0 is marked unreleased until the publish day.
+- Open: questions 2 to 5.

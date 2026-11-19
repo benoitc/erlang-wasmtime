@@ -14,6 +14,9 @@ same on the other.
   the node. Loading the same bytes twice compiles once. `erlang_wasmtime`
   is now an application with a supervisor; the cache needs it started, the
   rest of the library does not.
+- `wasmtime_instance_worker`: one instance in a process, one request at a
+  time, a deadline on each, and a fresh instance per request unless you
+  ask to reuse it. A deadline interrupts the guest and the worker lives on.
 - `exports/1` also takes an instance. `pin/2`, `release/2`, `release_all/1`
   and the `profile` option are accepted and do nothing: references stay
   alive as long as you hold them, and Wasmtime has one compile tier.

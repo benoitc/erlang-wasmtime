@@ -443,6 +443,7 @@ Decisions and their reasons:
 | 100,000 pooled core instances and tables | `POOL_MAX_SLOTS` in `nif_engine.c`, the same in `wasmtime_options.erl` | a component takes several core instances and tables per instance; a slot costs about 1 MB and 160 KB of address space | aborts in `Engine::new` if the C and Erlang checks drift |
 | 16 MB always-dense span | `?ALWAYS_DENSE` in `wasmtime_preinit.erl` | Wasmtime's `memory_guaranteed_dense_image_size` default | whether a snapshot is mapped or copied at each instantiation |
 | 256 cached modules | `?DEFAULT_MAX_RESIDENT` in `wasmtime_module_cache.erl`, `max_resident_modules` in the application environment | compiled code stays mapped while the cache holds it; a bound turns a loader that never unloads into an error | `cache_full` sooner or later |
+| 5 s worker timeout, 1 s kill grace | `?DEFAULT_TIMEOUT`, `?KILL_GRACE` in `wasmtime_instance_worker.erl` | erlang_wasm's default; the grace is how long a caller waits past the deadline for a worker stuck in its own host function before killing it | when a request without a deadline of its own is interrupted |
 | 32 engines | `MAX_ENGINES` | engines are never freed; a bound turns a leak into an error | `too_many_configurations` sooner or later |
 | 32 values | `MAX_VALS` | stack arrays for arguments and results | signatures wider than this are `unsupported_type` |
 | 30 s host timeout | `DEFAULT_HOST_TIMEOUT` | a guest parked forever behind a dead handler would pin its thread | how long a slow host fun may take before the guest traps |

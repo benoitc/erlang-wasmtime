@@ -88,6 +88,7 @@ The order the code enforces, with one file per step:
    | `wasmtime_ref_SUITE` | references: funcref, externref, GC values |
    | `wasmtime_component_SUITE` | components: WIT values, host imports, resources, WASI 0.2 |
    | `wasmtime_preinit_SUITE` | pre-initialization, the pooling allocator |
+   | `wasmtime_worker_SUITE` | `wasmtime_instance_worker`: deadlines, isolation, worker death |
    | `wasmtime_runtime_only_SUITE` | the runtime-only build against precompiled fixtures |
 7. `make check`, then ASan if the C changed.
 

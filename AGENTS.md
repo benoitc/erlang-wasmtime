@@ -109,7 +109,7 @@ scripts/build-component-fixtures.sh              # rebuild test components from 
 
 **Public API:** `src/wasmtime.erl` (the whole API: defaults, option validation, waiting for results, serving host calls in the caller)
 
-**Erlang support:** `src/wasmtime_options.erl` (compile options to the engine key the NIF reads), `src/wasmtime_limits.erl` (limit presets, erlang_wasm's `wasm_limits` API), `src/wasmtime_preinit.erl` (pre-initialization: parse, instrument and rewrite a module), `src/wasmtime_nif.erl` (the NIF stub table, nothing else), `src/wasmtime_module_cache.erl` (the node's cache of compiled modules, the only process; `wasmtime_app` and `wasmtime_sup` start it)
+**Erlang support:** `src/wasmtime_options.erl` (compile options to the engine key the NIF reads), `src/wasmtime_limits.erl` (limit presets, erlang_wasm's `wasm_limits` API), `src/wasmtime_instance_worker.erl` (one instance in a process, erlang_wasm's `wasm_instance_worker` API), `src/wasmtime_preinit.erl` (pre-initialization: parse, instrument and rewrite a module), `src/wasmtime_nif.erl` (the NIF stub table, nothing else), `src/wasmtime_module_cache.erl` (the node's cache of compiled modules, the only process; `wasmtime_app` and `wasmtime_sup` start it)
 
 **Instance lifetime (C):** `nif_instance.c` (request queue, worker thread, destructors), `nif_instantiate.c` (options, WASI, import binding, the linker cache), `nif_call.c` (calling the guest)
 

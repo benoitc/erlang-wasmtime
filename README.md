@@ -71,6 +71,7 @@ Requires OTP 27 or later.
 - [Host functions](docs/host-functions.md)
 - [WASI](docs/wasi.md)
 - [Streams](docs/streams.md): talk to a guest while it runs
+- [Workers](docs/worker.md): one instance in a process, a deadline per request
 - [References](docs/references.md): funcref, externref and GC values as terms
 - [Precompiled modules](docs/precompiled.md): compile once, load in milliseconds
 - [Components](docs/components.md): WIT values as terms, imports, resources, WASI 0.2

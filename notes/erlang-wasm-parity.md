@@ -83,4 +83,7 @@ the page budget (`wasm_engine`), the compiled tier's caches.
   `wasmtime_sup` and `wasmtime_module_cache`), `exports/1` on an instance,
   `pin/2`, `release/2`, `release_all/1` as no-ops, `profile` accepted.
   `load/1,2` compiles: it does not take a `.cwasm`.
-- Next: phase 2, `wasmtime_instance_worker`.
+- 2026-11-19, phase 2 done: `wasmtime_instance_worker` with
+  `wasmtime_worker_SUITE` and `docs/worker.md`. A deadline interrupts the
+  guest; the worker is not killed as erlang_wasm's is.
+- Next: phase 3, snapshots.

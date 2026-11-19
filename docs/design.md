@@ -285,7 +285,7 @@ made with. Wasmtime accepts it when:
 Consequences: `deserialize/1` tries the default engine then the fuel one;
 `deserialize/2` picks by options; a module compiled with proposals off
 loads anywhere; the full and runtime-only libraries share `make_config`
-so they accept the same files; the stdin shim shipped in `priv/shims`
+so they accept the same files; the WASI shim shipped in `priv/shims` (for the streamed stdout rule under "Streams")
 must be compiled with the same settings, which is why
 `scripts/precompile-shims.sh` mirrors `make_config` flag by flag and
 `shim_files_load` in the tests fails when they drift.

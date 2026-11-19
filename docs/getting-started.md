@@ -8,7 +8,7 @@ the build.
 
 ```erlang
 %% rebar.config
-{deps, [{erlang_wasmtime, "0.2.0"}]}.
+{deps, [{erlang_wasmtime, "0.3.0"}]}.
 ```
 
 Run `rebar3 compile`. The first build downloads the Wasmtime C API and builds

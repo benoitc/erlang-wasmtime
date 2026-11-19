@@ -52,7 +52,7 @@ all come back as `{error, #{class => ..., kind => ..., message => ...}}`.
 ## Install
 
 ```erlang
-{deps, [{erlang_wasmtime, "0.2.0"}]}.
+{deps, [{erlang_wasmtime, "0.3.0"}]}.
 ```
 
 The first `rebar3 compile` downloads the pinned Wasmtime C API release for your

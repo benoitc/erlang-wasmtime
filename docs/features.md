@@ -45,8 +45,12 @@ feature is missing the runtime says so with an error; it does not approximate.
   at a time.
 - The calling process waits in `receive`; it is never blocked inside a NIF
   while the guest runs, so schedulers are not held.
-- Host functions run in the calling process.
-- One shared engine compiles every module; instances share nothing else.
+- Host functions run in the calling process (or the `host` process).
+- One engine per distinct compile option set. Instances of a module share
+  its compiled code, its memory image and a linker per import shape;
+  nothing they can change.
+- Core modules and components run the same way: same queue, same host
+  calls, same `timeout`, `interrupt/1` and `destroy/1`.
 - Erlang holds a handle; the instance itself is owned jointly by that handle
   and its thread. Dropping the handle tells the thread to stop and never
   blocks a scheduler. A caller that dies has its running call interrupted and
@@ -54,6 +58,8 @@ feature is missing the runtime says so with an error; it does not approximate.
 - `timeout` cancels the request by id: its result is dropped in the NIF, so
   nothing lands in the mailbox afterwards. A result that arrived just as the
   timeout fired is returned as the answer.
+- Stopping an instance (`timeout`, `interrupt/1`, `destroy/1`) ends its
+  streamed stdin: a read blocked inside Wasmtime can only be woken that way.
 
 ## Refused explicitly
 

@@ -160,8 +160,8 @@ Linux. The macOS archives stay Wasmtime's: the reset is Linux-only.
 ## Upgrade Wasmtime
 
 See [RELEASING.md](../RELEASING.md): the pinned version ties together the
-upstream archives, this repo's runtime archives, the CLI that compiles the
-stdin shims and the precompiled fixtures.
+upstream archives, this repo's archives, the CLI that compiles the WASI
+shims and the precompiled fixtures.
 
 ## Sanitizers
 

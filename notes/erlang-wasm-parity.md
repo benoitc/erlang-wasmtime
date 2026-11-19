@@ -4,7 +4,8 @@ Goal: everything a user of erlang_wasm (0.10.2) can call has an equivalent
 here with the same name, or is refused and listed under "Deferred" in
 `docs/features.md` with the reason. Decided 2026-11-19: scope is everything
 feasible, a name that differs is deprecated in favour of erlang_wasm's, and
-the workers keep erlang_wasm's module names.
+modules keep erlang_wasm's API under a `wasmtime_` prefix so both
+applications fit in one release.
 
 This file is the plan. Update it as phases land.
 
@@ -25,17 +26,15 @@ This file is the plan. Update it as phases land.
 | `acquire/1`, `release/1` (snapshots) | none | phase 3 | |
 | `extern/2`, `extern_sibling/2`, `call_func/3` | none | instances cannot share a store | refuse, list under Deferred |
 
-## Phase 2: `wasm_instance_worker`
+## Phase 2: `wasmtime_instance_worker`
 
 One instance in a process: `start_link/1,2`, `call/3,4`, `stop/1`,
 `info/1`, isolation policy, limits nested under `limits`. Erlang only, on
 `call/4`, `timeout` and `destroy/1`.
 
-Blocking question: hornbeam depends on erlang_wasm (application `wasm`). Two
-applications that both ship a module named `wasm_instance_worker` cannot be
-in one release. Same names means a node runs one runtime or the other, never
-both. If hornbeam must be able to load both, the modules need a prefix here
-and a behaviour or a configuration key to pick one.
+Decided 2026-11-19: no module here may collide with erlang_wasm's, since
+hornbeam loads both. Same API, `wasmtime_` prefix: `wasmtime_instance_worker`,
+`wasmtime_script_worker`, `wasmtime_limits`, `wasmtime_component`.
 
 ## Phase 3: snapshots
 

@@ -59,6 +59,17 @@ to look up here. Build problems show up as `rebar3 compile` output.
 | `stdout => stream` answers `unavailable` on a runtime-only build | no `priv/shims/<platform>-*.cwasm` for the platform | run `scripts/precompile-shims.sh` on a machine with that architecture |
 | `send/2` answers `kind => closed` after a timeout | stopping a guest ends its stdin (a blocked read can only be woken by end of file) | instantiate a new instance; keep reads bounded by the protocol rather than by `timeout` |
 
+## Components
+
+| `kind` or symptom | Meaning | Do |
+|---|---|---|
+| `class => link` naming a `wasi:*` interface | the component imports it without a version, or WASI was not granted | build with a toolchain that writes the version; give `wasi => #{}` |
+| `badarg` on a call | a value does not fit the WIT type (bad UTF-8, an unknown case or flag, a missing field, a number out of range), or a resource handle is dropped or unknown | check `exports/1` and the mapping in [components](components.md) |
+| `component` or `no_memory` | a core-module function (globals, tables, memory) used on a component instance | call the component's exports instead |
+| `class => call` on every call after a trap | the Component Model forbids re-entering an instance that trapped | instantiate a new one |
+| `clock_refused` | the guest read the wall clock under `clocks => monotonic` | drop the option, or keep the guest off the wall clock |
+| streamed stdout arrives late or in one piece | a component's stdout is never a terminal, so its C library buffers it | flush in the guest |
+
 ## Reading a trap
 
 ```erlang

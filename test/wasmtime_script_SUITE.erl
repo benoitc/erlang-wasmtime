@@ -162,15 +162,15 @@ await_rules(_) ->
     W = start(#{limits => #{timeout => infinity}}),
     {error, #{kind := unknown_ref}} = ?W:await(W, make_ref(), 100),
     {ok, Ref} = ?W:submit(W, #{call => {~"spin", []}}),
-    Self = self(),
-    Waiter = spawn_link(fun() -> Self ! {first, ?W:await(W, Ref, infinity)} end),
-    timer:sleep(50),
+    %% The first waiter's request is sent from this process, so it reaches
+    %% the worker before the second: no sleep decides who holds the slot.
+    Token = make_ref(),
+    First = gen_server:send_request(W, {await, Ref, Token}),
     {error, #{kind := already_awaited}} = ?W:await(W, Ref, 100),
     ok = ?W:cancel(W, Ref),
-    receive
-        {first, {error, #{kind := cancelled}}} -> ok
-    end,
-    false = is_process_alive(Waiter) andalso undefined,
+    {reply, {outcome, {error, #{kind := cancelled}}}} = gen_server:receive_response(First, 5000),
+    %% what await/3 does once it has the outcome
+    ok = gen_server:cast(W, {consumed, Ref, Token}),
     %% an outcome is given once
     {error, #{kind := unknown_ref}} = ?W:await(W, Ref, 100),
     %% a finite await that gave up leaves the slot free

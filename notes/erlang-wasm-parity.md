@@ -117,8 +117,8 @@ the page budget (`wasm_engine`), the compiled tier's caches.
 - 2026-11-19, host resources done (phase 5): `wasmtime_component` and the
   `hostres` fixture. Async stays deferred.
 - Sockets: left refused (maintainer, option 1); no Wasmtime release up to
-  main has a C API call to enable TCP and UDP. An upstream issue is drafted,
-  not filed.
+  main has a C API call to enable TCP and UDP. Reported upstream as
+  bytecodealliance/wasmtime#15388.
 - 2026-11-19, phase 6 first cut: `wasmtime_script_worker`,
   `wasmtime_worker_adapter`, `wasmtime_script_v1`, `wasmtime_worker_error`,
   the JavaScript and Python command adapters, `docs/scripting.md`. Not

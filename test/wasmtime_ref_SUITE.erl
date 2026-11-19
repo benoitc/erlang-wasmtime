@@ -62,16 +62,16 @@ ref_externref_roundtrip(_) ->
 
 ref_externref_global(_) ->
     Inst = refs_inst(),
-    {ok, null} = wasmtime:global_get(Inst, ~"g"),
+    {ok, [null]} = wasmtime:get_global(Inst, ~"g"),
     {ok, Ref} = wasmtime:externref(Inst, hello),
     {ok, []} = wasmtime:call(Inst, ~"set_g", [Ref]),
-    {ok, G} = wasmtime:global_get(Inst, ~"g"),
+    {ok, [G]} = wasmtime:get_global(Inst, ~"g"),
     {ok, hello} = wasmtime:externref_data(G),
     ok = wasmtime:global_set(Inst, ~"g", null),
-    {ok, null} = wasmtime:global_get(Inst, ~"g"),
+    {ok, [null]} = wasmtime:get_global(Inst, ~"g"),
     {ok, Other} = wasmtime:externref(Inst, other),
     ok = wasmtime:global_set(Inst, ~"g", Other),
-    {ok, G2} = wasmtime:global_get(Inst, ~"g"),
+    {ok, [G2]} = wasmtime:get_global(Inst, ~"g"),
     {ok, other} = wasmtime:externref_data(G2),
     %% the externref table too
     ok = wasmtime:table_set(Inst, ~"e", 1, Other),

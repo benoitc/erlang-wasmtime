@@ -40,6 +40,10 @@ module is loaded. See [pre-initialization](preinit.md).
 
 ## Keep a cache
 
+For modules compiled in the node, `wasmtime:load/1,2` is the cache: the
+same bytes loaded twice compile once. What follows is for precompiled
+files on disk.
+
 ```erlang
 load(WasmPath) ->
     Cache = WasmPath ++ ".cwasm",

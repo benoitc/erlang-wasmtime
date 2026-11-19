@@ -390,7 +390,7 @@ destroy_idle(_) ->
     {ok, [1]} = wasmtime:call(Inst, ~"one", []),
     ok = wasmtime:destroy(Inst),
     {error, #{kind := stopped}} = wasmtime:call(Inst, ~"one", []),
-    {error, #{kind := no_such_export}} = wasmtime:global_get(Inst, ~"g"),
+    {error, #{kind := no_such_export}} = wasmtime:get_global(Inst, ~"g"),
     {error, #{kind := no_memory}} = wasmtime:read_memory(Inst, 0, 1),
     ok.
 

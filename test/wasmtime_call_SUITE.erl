@@ -35,8 +35,15 @@
     fuel_precompiled/1,
     trap_trace/1,
     globals_get_set/1,
+    global_get_deprecated/1,
+    instantiate_with_imports/1,
+    format_error_one_line/1,
+    limits_at_instantiate/1,
     tables_size_grow/1
 ]).
+
+%% global_get/2 is deprecated; global_get_deprecated checks it still answers.
+-compile({nowarn_deprecated_function, [{wasmtime, global_get, 2}]}).
 
 all() ->
     [{group, G} || {G, _, _} <- groups()].
@@ -78,6 +85,10 @@ groups() ->
             fuel_precompiled,
             trap_trace,
             globals_get_set,
+            global_get_deprecated,
+            instantiate_with_imports,
+            format_error_one_line,
+            limits_at_instantiate,
             tables_size_grow
         ]}
     ].
@@ -430,25 +441,27 @@ globals_get_set(_) ->
           (func (export "get") (result i32) global.get $m32))
         """
     ),
-    {ok, 7} = wasmtime:global_get(Inst, ~"c"),
+    {ok, [7]} = wasmtime:get_global(Inst, ~"c"),
     {error, #{class := global, kind := immutable}} = wasmtime:global_set(Inst, ~"c", 8),
-    {ok, 1} = wasmtime:global_get(Inst, ~"m32"),
+    {ok, [1]} = wasmtime:get_global(Inst, ~"m32"),
     ok = wasmtime:global_set(Inst, ~"m32", 41),
     {ok, []} = wasmtime:call(Inst, ~"bump", []),
     {ok, [42]} = wasmtime:call(Inst, ~"get", []),
-    {ok, 42} = wasmtime:global_get(Inst, ~"m32"),
+    {ok, [42]} = wasmtime:get_global(Inst, ~"m32"),
     ok = wasmtime:global_set(Inst, ~"m64", 1 bsl 40),
-    {ok, 1099511627776} = wasmtime:global_get(Inst, ~"m64"),
-    {ok, 1.5} = wasmtime:global_get(Inst, ~"f"),
+    {ok, [1099511627776]} = wasmtime:get_global(Inst, ~"m64"),
+    {ok, [1.5]} = wasmtime:get_global(Inst, ~"f"),
     ok = wasmtime:global_set(Inst, ~"f", nan),
-    {ok, nan} = wasmtime:global_get(Inst, ~"f"),
-    {ok, <<1:32/little, 2:32/little, 3:32/little, 4:32/little>>} = wasmtime:global_get(Inst, ~"v"),
+    {ok, [nan]} = wasmtime:get_global(Inst, ~"f"),
+    {ok, [<<1:32/little, 2:32/little, 3:32/little, 4:32/little>>]} = wasmtime:get_global(
+        Inst, ~"v"
+    ),
     ok = wasmtime:global_set(Inst, ~"v", <<0:128>>),
-    {ok, <<0:128>>} = wasmtime:global_get(Inst, ~"v"),
+    {ok, [<<0:128>>]} = wasmtime:get_global(Inst, ~"v"),
     {error, #{class := global, kind := badarg}} = wasmtime:global_set(Inst, ~"m32", 1.5),
     {error, #{class := global, kind := badarg}} = wasmtime:global_set(Inst, ~"m32", 1 bsl 40),
-    {error, #{class := global, kind := no_such_export}} = wasmtime:global_get(Inst, ~"nope"),
-    {error, #{class := global, kind := no_such_export}} = wasmtime:global_get(Inst, ~"bump"),
+    {error, #{class := global, kind := no_such_export}} = wasmtime:get_global(Inst, ~"nope"),
+    {error, #{class := global, kind := no_such_export}} = wasmtime:get_global(Inst, ~"bump"),
     ok.
 
 tables_size_grow(_) ->
@@ -472,3 +485,99 @@ tables_size_grow(_) ->
     ok.
 
 %% --------------------------------------------------------- engine options
+
+global_get_deprecated(_) ->
+    Inst = instance(~"(module (global (export \"c\") i32 (i32.const 7)))"),
+    {ok, 7} = wasmtime:global_get(Inst, ~"c"),
+    {ok, [7]} = wasmtime:get_global(Inst, ~"c"),
+    ok.
+
+%% erlang_wasm's forms: the imports are an argument. instantiate/2 takes the
+%% import map or the options map.
+instantiate_with_imports(_) ->
+    Mod = wasmtime_test:compile(
+        ~"""
+        (module
+          (import "env" "twice" (func $twice (param i32) (result i32)))
+          (func (export "run") (param i32) (result i32) local.get 0 call $twice))
+        """
+    ),
+    Imports = #{{~"env", ~"twice"} => fun(_Ctx, [N]) -> {ok, [N * 2]} end},
+    {ok, A} = wasmtime:instantiate(Mod, Imports, #{memory_limit => 1 bsl 20}),
+    {ok, [42]} = wasmtime:call(A, ~"run", [21]),
+    {ok, B} = wasmtime:instantiate(Mod, Imports),
+    {ok, [42]} = wasmtime:call(B, ~"run", [21]),
+    {ok, C} = wasmtime:instantiate(Mod, #{imports => Imports}),
+    {ok, [42]} = wasmtime:call(C, ~"run", [21]),
+    %% the argument wins over a stale option
+    {ok, D} = wasmtime:instantiate(Mod, Imports, #{imports => #{}}),
+    {ok, [42]} = wasmtime:call(D, ~"run", [21]),
+    {error, #{class := link}} = wasmtime:instantiate(Mod, #{}, #{}),
+    ok.
+
+format_error_one_line(_) ->
+    Inst = instance(~"(module (func (export \"boom\") unreachable))"),
+    {error, #{class := trap, kind := unreachable} = E} = wasmtime:call(Inst, ~"boom", []),
+    Line = iolist_to_binary(wasmtime:format_error(E)),
+    Line = iolist_to_binary(wasmtime:format_error({error, E})),
+    nomatch = binary:match(Line, ~"\n"),
+    {0, _} = binary:match(Line, ~"trap: "),
+    {_, _} = binary:match(Line, ~"(unreachable)"),
+    {error, L} = wasmtime:instantiate(
+        wasmtime_test:compile(
+            ~"(module (import \"a\" \"b\" (func)))"
+        )
+    ),
+    {0, _} = binary:match(iolist_to_binary(wasmtime:format_error(L)), ~"link: "),
+    ok.
+
+%% wasmtime_limits: timeout and fuel given at instantiate bound every call,
+%% max_memory_pages caps the memory, erlang_wasm's other limits are refused.
+limits_at_instantiate(_) ->
+    Wat =
+        ~"""
+        (module
+          (memory (export "memory") 1)
+          (func (export "spin") (loop br 0))
+          (func (export "one") (result i32) i32.const 1)
+          (func (export "grow") (param i32) (result i32) local.get 0 memory.grow))
+        """,
+    #{timeout := 1000, max_memory_pages := 256} = wasmtime_limits:untrusted(),
+    #{timeout := infinity} = wasmtime_limits:trusted(),
+    true = wasmtime_limits:default() =:= wasmtime_limits:untrusted(),
+    ok = wasmtime_limits:validate(wasmtime_limits:untrusted()),
+    {error, {invalid_limits, [timeout]}} = wasmtime_limits:validate(#{timeout => lots}),
+    Mod = wasmtime_test:compile(Wat),
+    Opts = wasmtime_limits:merge(wasmtime_limits:untrusted(), #{
+        timeout => 50, max_memory_pages => 2
+    }),
+    {ok, A} = wasmtime:instantiate(Mod, #{}, Opts),
+    {error, #{kind := timeout}} = wasmtime:call(A, ~"spin", []),
+    {ok, [1]} = wasmtime:call(A, ~"one", []),
+    %% the call's own option wins
+    {ok, [1]} = wasmtime:call(A, ~"one", [], #{timeout => infinity}),
+    {ok, [1]} = wasmtime:call(A, ~"grow", [1]),
+    {ok, [-1]} = wasmtime:call(A, ~"grow", [1]),
+    %% an explicit byte limit wins over the page limit
+    {ok, B} = wasmtime:instantiate(Mod, #{}, #{max_memory_pages => 1, memory_limit => 4 * 65536}),
+    {ok, [1]} = wasmtime:call(B, ~"grow", [3]),
+    {ok, Metered} = wasmtime:compile({wat, Wat}, #{fuel => true}),
+    {ok, C} = wasmtime:instantiate(Metered, #{}, #{fuel => 1000}),
+    {error, #{kind := out_of_fuel}} = wasmtime:call(C, ~"spin", []),
+    {ok, [1]} = wasmtime:call(C, ~"one", []),
+    {ok, Ref} = wasmtime:call_async(C, ~"spin", []),
+    {error, #{kind := out_of_fuel}} = wasmtime:await(C, Ref),
+    {ok, D} = wasmtime:instantiate(Mod, #{}, wasmtime_limits:trusted()),
+    {ok, [1]} = wasmtime:call(D, ~"one", []),
+    [
+        {error, #{class := link, kind := invalid_limits}} = wasmtime:instantiate(Mod, #{}, Bad)
+     || Bad <- [
+            #{max_depth => 256},
+            #{max_heap_words => 1024},
+            #{max_host_calls => 10},
+            #{timeout => 0},
+            #{fuel => lots},
+            #{max_memory_pages => -1}
+        ]
+    ],
+    ok.

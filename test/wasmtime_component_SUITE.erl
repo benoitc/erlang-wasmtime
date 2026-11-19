@@ -21,6 +21,9 @@
     bad_values_are_refused/1,
     host_imports_raw/1,
     host_imports_typed/1,
+    host_resources/1,
+    host_resource_drop_hook/1,
+    host_resources_in_host_process/1,
     host_import_failures/1,
     missing_import/1,
     aggregate_import/1,
@@ -31,6 +34,9 @@
     wasi_stdin_stream/1,
     wasi_versioned_import/1,
     wasi_clocks_component/1,
+    wasi_network_grant/1,
+    wasi_http_grant/1,
+    wasi_grants_refused/1,
     core_accessors_refused/1,
     pooled_components/1
 ]).
@@ -55,13 +61,23 @@ groups() ->
         {imports, [parallel], [
             host_imports_raw,
             host_imports_typed,
+            host_resources,
+            host_resource_drop_hook,
+            host_resources_in_host_process,
             host_import_failures,
             missing_import,
             aggregate_import
         ]},
         {resources, [parallel], [resources, destroy_drops_resources]},
         {wasi, [parallel], [
-            wasi_command, wasi_exit, wasi_stdin_stream, wasi_versioned_import, wasi_clocks_component
+            wasi_command,
+            wasi_exit,
+            wasi_stdin_stream,
+            wasi_versioned_import,
+            wasi_clocks_component,
+            wasi_network_grant,
+            wasi_http_grant,
+            wasi_grants_refused
         ]},
         {pool, [], [pooled_components]}
     ].
@@ -131,7 +147,7 @@ precompiled(Config) ->
 
 core_accessors_refused(Config) ->
     Inst = instance(Config, "vectors"),
-    {error, #{kind := component}} = wasmtime:global_get(Inst, ~"g"),
+    {error, #{kind := component}} = wasmtime:get_global(Inst, ~"g"),
     {error, #{kind := component}} = wasmtime:table_size(Inst, ~"t"),
     {error, #{kind := no_memory}} = wasmtime:read_memory(Inst, 0, 1),
     ok.
@@ -388,4 +404,228 @@ pooled_components(Config) ->
         end
      || _ <- lists:seq(1, 200)
     ],
+    ok.
+
+%% ------------------------------------------------------- network and http
+
+%% A listener on the loopback that answers each connection with `Reply`.
+serve(Reply) ->
+    {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}, {ip, {127, 0, 0, 1}}]),
+    {ok, Port} = inet:port(L),
+    Pid = spawn(fun() -> accept_loop(L, Reply) end),
+    ok = gen_tcp:controlling_process(L, Pid),
+    {Pid, integer_to_list(Port)}.
+
+accept_loop(L, Reply) ->
+    case gen_tcp:accept(L) of
+        {ok, S} ->
+            _ = gen_tcp:recv(S, 0, 2000),
+            _ = gen_tcp:send(S, Reply),
+            _ = gen_tcp:close(S),
+            accept_loop(L, Reply);
+        {error, _} ->
+            ok
+    end.
+
+net(Config, Args, Grants) -> command(Config, "net", Args, Grants).
+
+command(Config, Name, Args, Grants) ->
+    Inst = instance(Config, Name, #{wasi => Grants#{args => [Name | Args], stdout => capture}}),
+    Result = wasmtime:run(Inst),
+    {ok, {Out, _, _}} = wasmtime:read_output(Inst),
+    {Result, Out}.
+
+%% Sockets stay denied: the C API cannot enable TCP and UDP, so the grant
+%% is refused instead of being accepted and doing nothing.
+wasi_network_grant(Config) ->
+    {Server, Port} = serve(~"pong\n"),
+    Addr = "127.0.0.1:" ++ Port,
+    {{error, #{class := exit, status := 1}}, <<"refused: ", _/binary>>} = net(
+        Config, ["tcp", Addr], #{}
+    ),
+    {{error, #{class := exit}}, <<"refused: ", _/binary>>} =
+        net(Config, ["tcp", Addr], #{network => none}),
+    {{error, #{class := exit}}, <<"refused: ", _/binary>>} = net(
+        Config, ["resolve", "localhost"], #{}
+    ),
+    {error, #{class := wasi, kind := unavailable}} = wasmtime:instantiate(
+        component(Config, "net"), #{
+            wasi => #{network => all}
+        }
+    ),
+    exit(Server, kill),
+    ok.
+
+%% `wasi:http` is not linked unless `http => all`, and does not need the
+%% network grant: Wasmtime makes the request, not the guest's sockets.
+wasi_http_grant(Config) ->
+    case wasmtime:features() of
+        #{wasi_http := true} ->
+            {Server, Port} = serve(~"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n"),
+            Args = ["127.0.0.1:" ++ Port, "/"],
+            {error, #{class := link}} = wasmtime:instantiate(component(Config, "httpget"), #{
+                wasi => #{args => ["httpget" | Args]}
+            }),
+            {ok, ~"204\n"} = command(Config, "httpget", Args, #{http => all}),
+            {ok, ~"idle\n"} = command(Config, "httpget", [], #{http => all}),
+            exit(Server, kill),
+            ok;
+        _ ->
+            {error, #{class := wasi, kind := unavailable}} = wasmtime:instantiate(
+                component(Config, "httpget"), #{wasi => #{http => all}}
+            ),
+            ok
+    end.
+
+wasi_grants_refused(Config) ->
+    %% a core module has no WASI 0.2 to grant http on
+    {ok, Core} = wasmtime:compile({wat, ~"(module)"}),
+    case wasmtime:features() of
+        #{wasi_http := true} ->
+            {error, #{class := wasi, kind := unsupported}} =
+                wasmtime:instantiate(Core, #{wasi => #{http => all}});
+        _ ->
+            ok
+    end,
+    {error, #{class := wasi, kind := unavailable}} =
+        wasmtime:instantiate(Core, #{wasi => #{network => all}}),
+    {ok, _} = wasmtime:instantiate(Core, #{wasi => #{network => none, http => none}}),
+    %% no grant by address
+    try
+        wasmtime:instantiate(component(Config, "net"), #{wasi => #{network => [{~"127.0.0.1", 80}]}})
+    of
+        Other -> ct:fail({accepted, Other})
+    catch
+        error:function_clause -> ok
+    end,
+    ok.
+
+%% ---------------------------------------------------------- host resources
+
+-define(KV, ~"example:kv/store").
+-define(HC, wasmtime_component).
+
+%% example:kv/store served from Erlang: a bucket is a host resource, a handle
+%% from host_new/2 with its items behind it.
+kv_imports() ->
+    New = fun(_Inst, [Name]) -> {ok, [?HC:host_new(bucket, {Name, []})]} end,
+    #{
+        {?KV, ~"[constructor]bucket"} => New,
+        {?KV, ~"open"} => New,
+        {?KV, ~"[method]bucket.put"} => fun(_Inst, [H, Item]) ->
+            {ok, {bucket, {Name, Items}}} = ?HC:host_get(H),
+            ok = ?HC:host_update(H, {Name, [Item | Items]}),
+            {ok, []}
+        end,
+        {?KV, ~"[method]bucket.count"} => fun(_Inst, [H]) ->
+            {ok, {bucket, {_, Items}}} = ?HC:host_get(H),
+            {ok, [length(Items)]}
+        end,
+        {?KV, ~"describe"} => fun(_Inst, [H]) ->
+            {ok, {bucket, {Name, Items}}} = ?HC:host_get(H),
+            {ok, [iolist_to_binary([Name, $:, lists:join($,, lists:reverse(Items))])]}
+        end,
+        %% the guest gives the handle back for good: the host drops it
+        {?KV, ~"close"} => fun(_Inst, [H]) ->
+            {ok, {bucket, {_, Items}}} = ?HC:host_get(H),
+            ok = ?HC:host_drop(H),
+            {ok, [length(Items)]}
+        end
+    }.
+
+host_resources(Config) ->
+    [] = ?HC:host_live(),
+    Inst = instance(Config, "hostres", #{imports => kv_imports(), wasi => #{}}),
+    %% made, used through own and borrow, dropped by the guest: nothing left
+    {ok, ~"fruit:apple,pear 2"} = wasmtime:call(Inst, ~"fill", [~"fruit", [~"apple", ~"pear"]]),
+    [] = ?HC:host_live(),
+    {ok, ~"empty: 0"} = wasmtime:call(Inst, ~"fill", [~"empty", []]),
+    %% an owned handle handed back to a host function
+    {ok, 1} = wasmtime:call(Inst, ~"fill-and-close", [~"tmp"]),
+    [] = ?HC:host_live(),
+    %% kept by the guest across calls
+    {ok, undefined} = wasmtime:call(Inst, ~"keep", [~"long"]),
+    [Kept] = ?HC:host_live(),
+    {ok, {bucket, {~"long", [~"kept"]}}} = ?HC:host_get(Kept),
+    {ok, 1} = wasmtime:call(Inst, ~"kept", []),
+    %% the host changes what stands behind the handle
+    ok = ?HC:host_update(Kept, {~"long", [~"a", ~"b", ~"c"]}),
+    {ok, 3} = wasmtime:call(Inst, ~"kept", []),
+    {ok, undefined} = wasmtime:call(Inst, ~"forget", []),
+    [] = ?HC:host_live(),
+    {ok, 0} = wasmtime:call(Inst, ~"kept", []),
+    %% handles are not reused, and the table functions take a miss
+    H = ?HC:host_new(other, x, origin),
+    true = H > Kept,
+    error = ?HC:host_get(Kept),
+    ok = ?HC:host_update(Kept, y),
+    ok = ?HC:host_drop(Kept),
+    ok = ?HC:host_drop(H),
+    [] = ?HC:host_live(),
+    ok.
+
+%% A fun under "[resource-drop]<name>" is told instead of the default drop.
+host_resource_drop_hook(Config) ->
+    Self = self(),
+    Imports = (kv_imports())#{
+        {?KV, ~"[resource-drop]bucket"} => fun(_Inst, [H]) ->
+            Self ! {dropped, ?HC:host_get(H)},
+            ok = ?HC:host_drop(H),
+            {ok, []}
+        end
+    },
+    Inst = instance(Config, "hostres", #{imports => Imports, wasi => #{}}),
+    {ok, ~"x:y 1"} = wasmtime:call(Inst, ~"fill", [~"x", [~"y"]]),
+    receive
+        {dropped, {ok, {bucket, {~"x", [~"y"]}}}} -> ok
+    after 1000 -> ct:fail(no_drop)
+    end,
+    [] = ?HC:host_live(),
+    %% a handle the host never made is a host error, not a crash
+    Bad = (kv_imports())#{{?KV, ~"open"} => fun(_Inst, [_]) -> {ok, [not_a_handle]} end},
+    Inst2 = instance(Config, "hostres", #{imports => Bad, wasi => #{}}),
+    {error, #{class := host}} = wasmtime:call(Inst2, ~"fill-and-close", [~"x"]),
+    %% destroying an instance that still holds a handle tells nobody: the
+    %% entry stays for the host to drop
+    Inst3 = instance(Config, "hostres", #{imports => kv_imports(), wasi => #{}}),
+    {ok, undefined} = wasmtime:call(Inst3, ~"keep", [~"left"]),
+    [Left] = ?HC:host_live(),
+    ok = wasmtime:destroy(Inst3),
+    [Left] = ?HC:host_live(),
+    ok = ?HC:host_drop(Left),
+    ok.
+
+%% The table belongs to the process that serves the host calls.
+host_resources_in_host_process(Config) ->
+    Self = self(),
+    Host = spawn_link(fun Loop() ->
+        receive
+            {wasmtime_host_call, _, _, _, _} = Call ->
+                ok = wasmtime:handle_host_call(get(inst), Call),
+                Loop();
+            {set, Inst} ->
+                put(inst, Inst),
+                Self ! ready,
+                Loop();
+            {live, From} ->
+                From ! {live, ?HC:host_live()},
+                Loop()
+        end
+    end),
+    Inst = instance(Config, "hostres", #{imports => kv_imports(), wasi => #{}, host => Host}),
+    Host ! {set, Inst},
+    receive
+        ready -> ok
+    end,
+    {ok, undefined} = wasmtime:call(Inst, ~"keep", [~"k"]),
+    [] = ?HC:host_live(),
+    Host ! {live, self()},
+    receive
+        {live, [_]} -> ok
+    end,
+    {ok, undefined} = wasmtime:call(Inst, ~"forget", []),
+    Host ! {live, self()},
+    receive
+        {live, []} -> ok
+    end,
     ok.

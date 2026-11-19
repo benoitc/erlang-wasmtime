@@ -82,6 +82,22 @@ static wasmtime_component_val_t *boxed(wasmtime_component_val_t *v) {
 
 /* ------------------------------------------------------- resource table */
 
+/* The id of the host resource type behind an own or borrow type, or -1 for
+ * a resource the guest defines. Host types are numbered per linker entry
+ * (add_host_resource in nif_component.c). */
+static int host_resource_id(instance_t *inst, const wasmtime_component_valtype_t *ty) {
+  const wasmtime_component_resource_type_t *rt =
+      ty->kind == WASMTIME_COMPONENT_VALTYPE_OWN ? ty->of.own : ty->of.borrow;
+  uint32_t n = inst->wasm.entry ? inst->wasm.entry->nhostres : 0;
+  for (uint32_t i = 0; i < n; i++) {
+    wasmtime_component_resource_type_t *host = wasmtime_component_resource_type_new_host(i);
+    int same = wasmtime_component_resource_type_equal(rt, host);
+    wasmtime_component_resource_type_delete(host);
+    if (same) return (int)i;
+  }
+  return -1;
+}
+
 static ERL_NIF_TERM put_resource(ErlNifEnv *env, instance_t *inst,
                                  wasmtime_component_resource_any_t *r) {
   uint32_t i;
@@ -395,6 +411,23 @@ const char *term_to_cval(ErlNifEnv *env, instance_t *inst, ERL_NIF_TERM t,
   }
   case WASMTIME_COMPONENT_VALTYPE_OWN:
   case WASMTIME_COMPONENT_VALTYPE_BORROW: {
+    int owned = ty->kind == WASMTIME_COMPONENT_VALTYPE_OWN, host = host_resource_id(inst, ty);
+    if (host >= 0) {
+      /* a host resource: the term is the rep the host chose (host_new/2) */
+      unsigned rep;
+      if (!enif_get_uint(env, t, &rep)) return "a host resource handle is a non-negative integer";
+      wasmtime_component_resource_host_t *hr =
+          wasmtime_component_resource_host_new(owned, rep, (uint32_t)host);
+      wasmtime_error_t *e =
+          wasmtime_component_resource_host_to_any(inst->wasm.ctx, hr, &out->of.resource);
+      wasmtime_component_resource_host_delete(hr);
+      if (e) {
+        wasmtime_error_delete(e);
+        return "the host resource handle could not be given to the guest";
+      }
+      out->kind = WASMTIME_COMPONENT_RESOURCE;
+      return NULL;
+    }
     wasmtime_component_resource_any_t *r = get_resource(env, inst, t);
     if (!r) return "not a live resource handle of this instance";
     out->kind = WASMTIME_COMPONENT_RESOURCE;
@@ -575,8 +608,19 @@ ERL_NIF_TERM cval_to_term(ErlNifEnv *env, instance_t *inst, const wasmtime_compo
     }
     return map;
   }
-  case WASMTIME_COMPONENT_RESOURCE:
+  case WASMTIME_COMPONENT_RESOURCE: {
+    /* a host resource crosses as its rep, a guest one as a table handle */
+    wasmtime_component_resource_host_t *hr = NULL;
+    wasmtime_error_t *e =
+        wasmtime_component_resource_any_to_host(inst->wasm.ctx, v->of.resource, &hr);
+    if (!e && hr) {
+      ERL_NIF_TERM rep = enif_make_uint(env, wasmtime_component_resource_host_rep(hr));
+      wasmtime_component_resource_host_delete(hr);
+      return rep;
+    }
+    if (e) wasmtime_error_delete(e);
     return put_resource(env, inst, wasmtime_component_resource_any_clone(v->of.resource));
+  }
   default: return atom_undefined;
   }
 }

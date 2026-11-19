@@ -234,6 +234,14 @@ worker thread, the same queue, host calls through `host_exchange`,
   (`{drop, Handle}`) run on the worker.
 - A component instance that trapped cannot be entered again (Component
   Model); calls answer Wasmtime's error.
+- A resource declared by an interface the import map serves is defined as a
+  host resource (`add_host_resource`): its type id is its rank in the
+  linker entry, and `host_resource_id` in `nif_cvalues.c` compares a value's
+  type with those ids to tell a host handle, which crosses as its rep, from
+  a guest one, which crosses as a table handle. The guest's drop reaches
+  Erlang through `host_exchange` under `{Interface, "[resource-drop]Name"}`,
+  so it only ever runs inside a request. The table of host objects is
+  Erlang's (`wasmtime_component`, the serving process's dictionary).
 
 Rules for `nif_cvalues.c`, which a change must keep:
 
@@ -289,6 +297,44 @@ so they accept the same files; the WASI shim shipped in `priv/shims` (for the st
 must be compiled with the same settings, which is why
 `scripts/precompile-shims.sh` mirrors `make_config` flag by flag and
 `shim_files_load` in the tests fails when they drift.
+
+## The module cache
+
+`load/1,2` is the one part of the library with an Erlang process:
+`wasmtime_module_cache`, under `wasmtime_sup`. It maps the hash of the
+source and its engine key to a module reference, counts claims per loading
+process and gives them back when that process dies. Rules:
+
+- Compiling happens in the caller, never in the server: the server only
+  updates maps. A second loader of the same key waits for the first one's
+  result; if the first dies, the next waiter compiles.
+- The cache holds a reference, not the module: removing an entry frees
+  nothing while an instance or a term still refers to the module.
+- Nothing else may depend on the application being started. `compile/2`,
+  `instantiate/3` and the rest work without it (`cache_not_started` in the
+  tests).
+
+## Script workers
+
+`wasmtime_script_worker` is a gen_server holding at most one request. Each
+request runs in a runner process that owns the instance; the worker owns
+the deadline, the request's directory and the adapter's state. Rules:
+
+- Cleaning is the worker's, never the runner's: the runner may be killed
+  at any point, the worker outlives it. `finish/2` stops the runner and
+  waits for its `DOWN` before removing files, so nothing writes into a
+  directory being deleted. Killing the runner drops its instance handle,
+  which interrupts the guest.
+- The runner sends two messages, `prepared` (the adapter's state, so
+  `cleanup/1` can run if the runner dies) and `outcome`. A late one is
+  ignored: `ref` no longer names the request.
+- The kernel interprets no result: `classify/2` says what a call's answer
+  means. The one exception is a `timeout` error, which is the worker's to
+  name.
+- A path staged by an adapter is relative and made of plain names
+  (`safe_path/1`); the byte and file bounds are held in the stage function
+  as well as checked against `requirements/2`, which an adapter could get
+  wrong.
 
 ## Streams
 
@@ -364,6 +410,13 @@ and copies every segment at each instantiation otherwise. `?ALWAYS_DENSE`
 mirrors Wasmtime's default; if a Wasmtime upgrade changes the rule, change
 `dense/1` with it and check `sparse_memory_is_dense` in the tests.
 
+`snapshot/2` on a live instance is the same passes split in two
+(`prepare/2`, `capture/4` in `wasmtime_preinit.erl`): an instance made with
+`snapshotable => true` is an instance of the instrumented module, which the
+module cache keeps with the source bytes; the capture reads it and compiles
+the rewritten module. The table fingerprints are taken when the instance is
+made, so the rule is the same: tables as the element segments left them.
+
 Where the image comes from, and how a pool slot is reset, differs by
 platform; [preinit](preinit.md) has the table.
 
@@ -426,6 +479,9 @@ Decisions and their reasons:
 | 10,000 snapshot segments, merged across 4-byte gaps | `MAX_SEGMENTS`, `MERGE_GAP` in `nif_preinit.c` | Wizer's values: a segment costs about 4 bytes to encode, and Wasmtime handles tens of thousands slowly | the size of pre-initialized modules |
 | 100,000 pooled core instances and tables | `POOL_MAX_SLOTS` in `nif_engine.c`, the same in `wasmtime_options.erl` | a component takes several core instances and tables per instance; a slot costs about 1 MB and 160 KB of address space | aborts in `Engine::new` if the C and Erlang checks drift |
 | 16 MB always-dense span | `?ALWAYS_DENSE` in `wasmtime_preinit.erl` | Wasmtime's `memory_guaranteed_dense_image_size` default | whether a snapshot is mapped or copied at each instantiation |
+| 256 cached modules | `?DEFAULT_MAX_RESIDENT` in `wasmtime_module_cache.erl`, `max_resident_modules` in the application environment | compiled code stays mapped while the cache holds it; a bound turns a loader that never unloads into an error | `cache_full` sooner or later |
+| Script worker limits: 5 s, 1 MiB output and request, 8 MiB and 64 staged files; 500 ms kill grace | `?WORKER_LIMITS`, `?KILL_GRACE` in `wasmtime_script_worker.erl` | erlang_wasm's defaults, so a request sized for one runtime fits the other; the grace is how long the worker waits past the deadline for the runner, which interrupts the guest itself, before killing it | what a tenant's request may cost |
+| 5 s worker timeout, 1 s kill grace | `?DEFAULT_TIMEOUT`, `?KILL_GRACE` in `wasmtime_instance_worker.erl` | erlang_wasm's default; the grace is how long a caller waits past the deadline for a worker stuck in its own host function before killing it | when a request without a deadline of its own is interrupted |
 | 32 engines | `MAX_ENGINES` | engines are never freed; a bound turns a leak into an error | `too_many_configurations` sooner or later |
 | 32 values | `MAX_VALS` | stack arrays for arguments and results | signatures wider than this are `unsupported_type` |
 | 30 s host timeout | `DEFAULT_HOST_TIMEOUT` | a guest parked forever behind a dead handler would pin its thread | how long a slow host fun may take before the guest traps |

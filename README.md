@@ -13,7 +13,7 @@ call Erlang.
         local.get 0 call $log))
     """}),
 {ok, Inst} = wasmtime:instantiate(Mod, #{
-    imports => #{{~"env", ~"log"} => fun(_Ctx, [N]) -> logger:info("got ~p", [N]), {ok, [N * 2]} end}}),
+    {~"env", ~"log"} => fun(_Ctx, [N]) -> logger:info("got ~p", [N]), {ok, [N * 2]} end}),
 {ok, [84]} = wasmtime:call(Inst, ~"run", [42]).
 ```
 
@@ -71,10 +71,13 @@ Requires OTP 27 or later.
 - [Host functions](docs/host-functions.md)
 - [WASI](docs/wasi.md)
 - [Streams](docs/streams.md): talk to a guest while it runs
+- [Workers](docs/worker.md): one instance in a process, a deadline per request
+- [Hosting scripts](docs/scripting.md): run your users' JavaScript and Python, one sandbox per request
 - [References](docs/references.md): funcref, externref and GC values as terms
 - [Precompiled modules](docs/precompiled.md): compile once, load in milliseconds
 - [Components](docs/components.md): WIT values as terms, imports, resources, WASI 0.2
 - [Pre-initialization](docs/preinit.md): start the guest once, give every request a fresh copy
+- [Snapshots](docs/snapshots.md): capture a running instance, restore it per request
 - [Throughput](docs/throughput.md): what a pre-initialized CPython costs per request
 - [Building and shipping](docs/building.md)
 - [Troubleshooting](docs/troubleshooting.md)

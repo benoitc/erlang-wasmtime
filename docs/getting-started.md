@@ -77,6 +77,14 @@ Or from another process while it runs:
 ok = wasmtime:interrupt(Inst).
 ```
 
+To bound every call on an instance, give the limit when you create it.
+`wasmtime_limits:untrusted()` is one second per call and 16 MB of memory:
+
+```erlang
+{ok, Inst} = wasmtime:instantiate(Mod, #{}, wasmtime_limits:untrusted()),
+{error, #{kind := timeout}} = wasmtime:call(Inst, ~"loop", []).
+```
+
 ## Run a call without blocking
 
 ```erlang
@@ -140,10 +148,10 @@ byte offset, and names when the module carries a name section.
 ## Globals and tables
 
 ```erlang
-{ok, 7}    = wasmtime:global_get(Inst, ~"counter"),
-ok         = wasmtime:global_set(Inst, ~"counter", 8),
-{ok, 4}    = wasmtime:table_size(Inst, ~"handlers"),
-{ok, 4}    = wasmtime:table_grow(Inst, ~"handlers", 2).
+{ok, [7]} = wasmtime:get_global(Inst, ~"counter"),
+ok        = wasmtime:global_set(Inst, ~"counter", 8),
+{ok, 4}   = wasmtime:table_size(Inst, ~"handlers"),
+{ok, 4}   = wasmtime:table_grow(Inst, ~"handlers", 2).
 ```
 
 A constant global refuses `global_set`. Table elements and reference-typed

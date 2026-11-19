@@ -26,7 +26,8 @@
     wasi_stdin_stream_large/1,
     wasi_stdin_stream_destroy/1,
     wasi_stdout_stream/1,
-    wasi_stream_is_tty/1
+    wasi_stream_is_tty/1,
+    wasi_import_wins/1
 ]).
 
 all() ->
@@ -42,6 +43,7 @@ groups() ->
             wasi_write_dir,
             wasi_read_dir_refuses_write,
             wasi_no_wasi_no_imports,
+            wasi_import_wins,
             wasi_clocks_all,
             wasi_clocks_monotonic
         ]},
@@ -441,4 +443,25 @@ wasi_stdin_stream_destroy(_) ->
     ok = wasmtime:destroy(Inst),
     ?assert(erlang:monotonic_time(millisecond) - T0 < 100),
     {_, _} = wasmtime:await(Inst, R, 1000),
+    ok.
+
+%% An import the caller gives wins over the WASI function of that name.
+wasi_import_wins(_) ->
+    {ok, Mod} = wasmtime:compile(
+        {wat,
+            ~"""
+            (module
+              (import "wasi_snapshot_preview1" "sched_yield" (func $yield (result i32)))
+              (memory (export "memory") 1)
+              (func (export "yield") (result i32) call $yield))
+            """}
+    ),
+    {ok, Plain} = wasmtime:instantiate(Mod, #{}, #{wasi => #{}}),
+    {ok, [0]} = wasmtime:call(Plain, ~"yield", []),
+    Mine = #{{~"wasi_snapshot_preview1", ~"sched_yield"} => fun(_Inst, []) -> {ok, [52]} end},
+    {ok, Shadowed} = wasmtime:instantiate(Mod, Mine, #{wasi => #{}}),
+    {ok, [52]} = wasmtime:call(Shadowed, ~"yield", []),
+    %% the shadow belongs to that import map, not to the module
+    {ok, Again} = wasmtime:instantiate(Mod, #{}, #{wasi => #{}}),
+    {ok, [0]} = wasmtime:call(Again, ~"yield", []),
     ok.

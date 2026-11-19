@@ -19,6 +19,8 @@
 -moduledoc false.
 
 -export([run/3]).
+%% The same passes, apart, for wasmtime:snapshot/2 on a live instance.
+-export([prepare/2, fingerprint/2, capture/4]).
 
 -define(PREFIX, "__wasmtime_preinit_").
 
@@ -59,6 +61,48 @@ run(Wasm, Opts, Init) when is_binary(Wasm), is_map(Opts) ->
             {ok, _Changed} -> preinit_error(table_changed, "an init call changed a table");
             {error, _} = Error -> Error;
             Other -> preinit_error(init, io_lib:format("the init fun returned ~0p", [Other]))
+        end
+    catch
+        throw:{preinit, Kind, Msg} -> preinit_error(Kind, Msg)
+    end.
+
+%% The instrumented module of `Wasm`, compiled: what a snapshotable instance
+%% is made from, so its state can be read back later.
+-spec prepare(binary(), map()) -> {ok, map()} | wasmtime:error().
+prepare(Wasm, CompileOpts) when is_binary(Wasm) ->
+    try
+        M = parse(Wasm),
+        check(M),
+        {Instrumented, Names} = instrument(M),
+        case wasmtime:compile(Instrumented, CompileOpts) of
+            {ok, Mod} -> {ok, #{parsed => M, names => Names, module => Mod}};
+            {error, _} = Error -> Error
+        end
+    catch
+        throw:{preinit, Kind, Msg} -> preinit_error(Kind, Msg)
+    end.
+
+%% The tables of an instance of a prepared module, to compare at capture.
+-spec fingerprint(wasmtime:instance(), map()) -> {ok, term()} | wasmtime:error().
+fingerprint(Inst, #{names := Names}) -> tables(Inst, Names).
+
+%% The module that starts where the instance is now. `Before` is what
+%% fingerprint/2 answered when the instance was made: a snapshot does not
+%% carry tables, so they must not have changed.
+-spec capture(wasmtime:instance(), map(), term(), map()) -> {ok, binary()} | wasmtime:error().
+capture(Inst, #{parsed := M, names := Names}, Before, CompileOpts) ->
+    try
+        maybe
+            {ok, Before} ?= tables(Inst, Names),
+            {ok, Snapshot} ?= snapshot(Inst, Names),
+            Out = rewrite(M, Snapshot, []),
+            ok ?= wasmtime:validate(Out, maps:with([proposals], CompileOpts)),
+            {ok, Out}
+        else
+            {ok, _Changed} ->
+                preinit_error(table_changed, "a table changed since the instance was made");
+            {error, _} = Error ->
+                Error
         end
     catch
         throw:{preinit, Kind, Msg} -> preinit_error(Kind, Msg)

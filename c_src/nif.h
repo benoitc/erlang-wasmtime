@@ -173,6 +173,9 @@ typedef struct linker_entry {
 #endif
   hostfn_t *hostfns;
   size_t nhostfns;
+  /* host-defined resource types of a component: their ids are 0..nhostres-1
+   * (wasmtime_component_resource_type_new_host) */
+  uint32_t nhostres;
   struct linker_entry *next;
 } linker_entry_t;
 enum state { ST_IDLE, ST_RUNNING, ST_IN_HOST };

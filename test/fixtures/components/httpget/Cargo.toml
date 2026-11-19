@@ -1,0 +1,15 @@
+[package]
+name = "httpget"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "httpget"
+path = "src/main.rs"
+
+[dependencies]
+wasi = "0.14"
+
+[profile.release]
+opt-level = "s"
+strip = true

@@ -111,8 +111,29 @@ ok = wasmtime:run(Inst).
 | `stdin => stream`, `stdout => stream` | the same, through the same pipe and callback |
 | a streamed stdout reports itself a terminal | it does not: Wasmtime's custom stdout is no terminal for WASI 0.2, so a program's C library buffers it; flush in the guest |
 
-`wasi:sockets` is linked, but no address is ever granted and name lookup is
-off, so every network operation answers `access-denied`.
+### Let a component make HTTP requests
+
+```erlang
+{ok, Inst} = wasmtime:instantiate(Mod, #{wasi => #{http => all, stdout => capture}}),
+ok = wasmtime:run(Inst).
+```
+
+`http => all` gives the component `wasi:http/outgoing-handler`. It is off
+by default, and it is all or nothing: the component may send requests to
+any server the node can reach, and Wasmtime makes the request. There is no
+rule per address and no way to supply the transport, so grant it only to
+code you would let call any URL. Without the grant a component that imports
+`wasi:http` does not link. A runtime-only build has no `wasi:http`
+(`features/0`, `wasi_http`) and answers `kind => unavailable`.
+
+Serving requests (`wasi:http/incoming-handler`) is not available.
+
+### Sockets
+
+`wasi:sockets` is linked, but TCP, UDP and name lookup are denied: every
+network operation answers `access-denied`. `network => all` answers
+`kind => unavailable`, since the Wasmtime C API cannot turn TCP and UDP on
+for a guest.
 
 ## Notes
 

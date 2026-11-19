@@ -6,6 +6,50 @@ Components and WASI 0.2, with erlang_wasm's term mapping: a componentize-py
 agent per request in 0.75 ms on an M4 Pro, 1.27 ms on a 4-vCPU x86_64
 runner.
 
+The API now follows erlang_wasm's, so code written for one runtime reads
+the same on the other.
+
+- `instantiate/3` takes the import map as its second argument.
+  `instantiate/2` takes the import map or the options map. The `imports`
+  option still works and is deprecated.
+- `get_global/2` answers the value in a list, like a call result.
+  `global_get/2` is deprecated: calling it gives a compiler warning.
+- `load/1,2`, `load_file/1` and `unload/1`: a cache of compiled modules for
+  the node. Loading the same bytes twice compiles once. `erlang_wasmtime`
+  is now an application with a supervisor; the cache needs it started, the
+  rest of the library does not.
+- `wasmtime_script_worker` runs scripts through an adapter, one request at
+  a time, each in a fresh instance with its own directory, a deadline and
+  bounded output. `wasmtime_javascript_command` and
+  `wasmtime_python_command` ship; `wasmtime_worker_adapter` is the behaviour
+  for your own.
+- An import you give `instantiate/3` now wins over the WASI function of
+  the same name. It was a link error before.
+- Host resources for components: a `resource` in an interface you serve is
+  kept by `wasmtime_component` (`host_new/2`, `host_get/1`,
+  `host_update/2`, `host_drop/1`), and the guest holds handles to it.
+- `http => all` in the `wasi` options lets a component send HTTP requests
+  through `wasi:http`. Off by default, and all or nothing: any server the
+  node can reach. Not in runtime-only builds. `network => all` is refused:
+  this Wasmtime cannot open sockets to a guest.
+- Snapshots: `snapshot/1,2` captures an instance made with
+  `snapshotable => true`, `restore/3` starts new instances from that point,
+  `save_snapshot/2` and `load_snapshot/2` keep the image across restarts.
+  Core modules only; the image holds memories and globals.
+- `wasmtime_instance_worker`: one instance in a process, one request at a
+  time, a deadline on each, and a fresh instance per request unless you
+  ask to reuse it. A deadline interrupts the guest and the worker lives on.
+- `exports/1` also takes an instance. `pin/2`, `release/2`, `release_all/1`
+  and the `profile` option are accepted and do nothing: references stay
+  alive as long as you hold them, and Wasmtime has one compile tier.
+- `format_error/1` renders an error on one line for logs.
+- `func_types_of/1` and `func_type_of/2` give the types of a module's
+  function exports without instantiating it.
+- `wasmtime_limits` has the presets of erlang_wasm's `wasm_limits`.
+  `instantiate/3` takes `timeout`, `fuel` and `max_memory_pages`: the first
+  two apply to every call on the instance unless the call gives its own.
+  The limits this runtime cannot enforce (`max_depth`, `max_heap_words`,
+  `max_host_calls`) are refused, not ignored.
 - Pools sized for components: `pooling` takes `core_instances`, `memories`
   and `tables` (each `instances` by default); a component instance's store
   allows 100 core instances by default instead of 10.

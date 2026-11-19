@@ -9,7 +9,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 |---|---|
 | Compile from binary or `.wat` text | yes, dirty CPU scheduler |
 | WebAssembly proposals | Wasmtime 48 defaults, verified by compiling probe modules: bulk memory, reference types, multi-value, SIMD, relaxed SIMD, tail calls, extended const, multi-memory, memory64, exceptions, GC and typed function references, threads and shared memories |
-| Instantiate with host functions | yes, function imports only |
+| Instantiate with host functions | yes, function imports only; an import you give wins over the WASI function of the same name; `instantiate/3` takes the import map as erlang_wasm does, `instantiate/2` the import map or the options |
 | Call exports | yes, `i32`, `i64`, `f32`, `f64`, `v128` values |
 | Traps | reported with `class => trap` and a `kind` per Wasmtime trap code |
 | Interruption | `timeout` option and `interrupt/1`, epoch based: the epoch is bumped as they fire, so the guest stops at its next loop back-edge or call |
@@ -22,20 +22,28 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Explicit teardown | `destroy/1`: stops the instance and frees its store (and pool slot) before returning |
 | Text to binary | `wat2wasm/1` (core modules and components) |
 | Components | compiled, validated, precompiled, pooled like modules; `module_kind/1`; `call/3,4` by `Export` or `Interface#Function`, `{ok, Value}`; erlang_wasm's term mapping for every WIT value; host imports keyed `{Interface, Function}` (raw `{ok, [V]}` funs or erlang_wasm's typed `import_fun/2`); resources as integer handles, `drop_resource/2,3`; see [components](components.md) |
-| WASI 0.2 | for components with a `wasi` option: the same keys as preview 1, `run/1,2`, streamed stdin and stdout, `clocks => monotonic` traps the wall clock (`kind => clock_refused`) |
+| Host resources | a `resource` in an interface the import map serves is the host's: `wasmtime_component:host_new/2,3`, `host_get/1`, `host_update/2`, `host_drop/1`, `host_live/0`; the guest's drop removes the entry, or calls your `[resource-drop]<name>` fun |
+| WASI 0.2 | for components with a `wasi` option: the same keys as preview 1, `run/1,2`, streamed stdin and stdout, `clocks => monotonic` traps the wall clock (`kind => clock_refused`); `http => all` grants `wasi:http/outgoing-handler` to any server, on full builds |
 | Host functions in a dedicated process | `host => Pid` at instantiate, `handle_host_call/2` in that process |
 | Non-blocking calls | `call_async/3` and `await/2,3` |
 | Fuel metering | `compile(Bin, #{fuel => true})`, `call/4` with `fuel`, `fuel_remaining/1`; `kind => out_of_fuel` |
 | Structured traps | `trace` on trap errors: `[#{func_index, func_offset, func_name, module_name}]`, innermost first |
 | Validation without compiling | `validate/1`, `validate/2` with options |
 | Compile options | `compile/2`: `opt_level` (`none`, `speed`, `speed_and_size`), `proposals` on or off, `fuel`; `module_options/1`; `deserialize/2` to pick the engine |
-| Globals and tables from Erlang | `global_get/2`, `global_set/3`, `table_size/2`, `table_get/3`, `table_set/4`, `table_grow/3,4` |
+| Globals and tables from Erlang | `get_global/2` (the value in a list, as erlang_wasm; `global_get/2` is deprecated), `global_set/3`, `table_size/2`, `table_get/3`, `table_set/4`, `table_grow/3,4` |
 | References across the boundary | `funcref`, `externref` and GC values as `ref()` terms, `null`, `{i31, N}`: in calls, host signatures, globals and tables; `externref/2` wraps a term; `call_ref/3,4`; `struct_get/set`, `array_len/get/set`; `gc/1`; see [references](references.md) |
 | WASI stdio in memory | `stdin => {binary, _}`, `stdout`/`stderr => capture` with `read_output/1` and `output_limit`; `args`/`env => inherit` |
 | Streams | `send/2`, `close/1`, `inbox_limit`; `stdin`/`stdout`/`stderr => stream` (a streamed stdout looks like a terminal to the guest, so lines leave as written); the `erlang.send` and `erlang.recv` imports; `{wasmtime_stream, Ref, Kind, Bytes}` to the `stream` process; see [streams](streams.md) |
 | Runtime-only builds | `WASMTIME_RUNTIME_ONLY=1`: no compiler, 4 MB; `features/0` reports the linked library's capabilities; see [building](building.md) |
 | Source build fallback | a platform without a prebuilt archive compiles the C API itself |
 | WASI preview 1 | args, env, preopened dirs with read or write, stdio to file or inherited; `clocks => monotonic` refuses wall and CPU clocks with `ENOTCAPABLE` |
+| Snapshots | `snapshot/1,2` of an instance made with `snapshotable => true`, `restore/3`, `snapshot_info/1`, `save_snapshot/2`, `load_snapshot/2`, `compatibility_key`; core modules, memories and mutable globals; see [snapshots](snapshots.md) |
+| Script workers | `wasmtime_script_worker` (`run/2,3`, `submit/2,3`, `await/3`, `cancel/2`) over an adapter (`wasmtime_worker_adapter`); `wasmtime_javascript_command` and `wasmtime_python_command`; a directory, a deadline and bounded output per request; see [scripting](scripting.md) |
+| Instance worker | `wasmtime_instance_worker`: one instance in a process, a deadline per request, `fresh` or `reuse` between requests; see [workers](worker.md) |
+| Module cache | `load/1,2`, `load_file/1`, `unload/1`: one compiled module per source and option set for the node, a claim per load, given back by `unload/1` or when the loader dies; needs the application started |
+| Function types without an instance | `func_types_of/1`, `func_type_of/2`, on a module or on bytes |
+| Limit presets | `wasmtime_limits`: `untrusted/0`, `trusted/0`, `merge/2`, `validate/1`; `timeout`, `fuel` and `max_memory_pages` at instantiate, the first two as defaults of every call |
+| Errors on one line | `format_error/1`, for logs |
 | Caller death | the abandoned call is interrupted, queued calls proceed |
 | Host function timeout | `host_timeout`, default 30 s |
 
@@ -97,6 +105,12 @@ feature is missing the runtime says so with an error; it does not approximate.
 | A call, or a ref of the instance, after `destroy/1` | `kind => stopped` |
 | A value that does not fit a component type (bad UTF-8, surrogate char, out of range, unknown case or flag, missing field) | `kind => badarg` |
 | A dropped or unknown resource handle | `kind => badarg` |
+| `load/1,2` past `max_resident_modules` (256), or without the application | `class => compile`, `kind => cache_full` or `not_started` |
+| `snapshot/1,2` on an instance not made for it, or of a module not from `load/1,2`; an image restored or loaded under another key or module | `class => snapshot`, `kind => not_snapshotable`, `module_not_loaded` or `snapshot_incompatible` |
+| `wasi => #{network => all}`, or `http => all` on a build without `wasi:http` | `class => wasi, kind => unavailable` |
+| `http => all` for a core module | `class => wasi, kind => unsupported` |
+| A `profile` other than `plugin` or `script` | `class => link, kind => unknown_profile` |
+| erlang_wasm's `max_depth`, `max_heap_words`, `max_host_calls` limits, or a limit of the wrong type | `class => link, kind => invalid_limits` |
 | A core-module accessor on a component instance | `kind => component` |
 | A component instance called after it trapped | `class => call` (the Component Model forbids re-entering it) |
 | The WASI 0.2 wall clock under `clocks => monotonic` | `class => trap, kind => clock_refused` |
@@ -130,10 +144,30 @@ feature is missing the runtime says so with an error; it does not approximate.
 - **Component Model async and WASI 0.3.** `stream`, `future` and
   `error-context` values, and async exports and imports, are refused with
   `kind => badarg`. erlang_wasm supports part of it.
-- **Host-defined resources.** A host function cannot create a resource of
-  its own type for a component; guest resources cross as handles.
 - **`preinit/3` for components.** Core modules only; componentize-py
   pre-initializes what it builds.
+- **Snapshot adapters for script workers.** erlang_wasm's `wasm_javascript`,
+  `wasm_python` and `wasm_lua` start the interpreter once and restore a
+  snapshot per request. Here the command adapters start it for every
+  request: a snapshot does not carry what WASI holds for an instance, and
+  the reactor builds and their protocol are not ported.
+- **The reaper.** erlang_wasm journals every request so a restarted node
+  removes what a crashed one left, and bounds cleanup work. Here a
+  request's directory is removed by its worker when the request ends; a
+  node crash leaves it. `cleanup_stats/0` and `cleanup_requests/0` do not
+  exist.
+- **Other script worker options.** `restore_ahead`, `compiled`, the heap
+  floors, a result channel apart from stdout, and the conformance kit
+  module are erlang_wasm's and have no counterpart yet.
+- **Sockets for a guest.** Wasmtime 48 starts a WASI context with TCP and
+  UDP off, and its C API can open the address check
+  (`wasi_config_inherit_network`) but not turn them on. `network => all` is
+  refused instead of being accepted without effect. erlang_wasm grants
+  addresses one by one (`wasi_net`).
+- **Rules on outgoing HTTP, and serving HTTP.** `http => all` is the only
+  grant: the C API has no hook to allow or refuse a request or to supply
+  the transport, and no way to build an incoming request, so
+  `wasi:http/incoming-handler` cannot be called. erlang_wasm has both.
 - **Unversioned WASI imports.** A component importing `wasi:*` without a
   version (accepted by erlang_wasm) is a link error: Wasmtime links WASI
   by version.

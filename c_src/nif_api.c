@@ -318,6 +318,61 @@ static ERL_NIF_TERM nif_module_exports(ErlNifEnv *env, int argc, const ERL_NIF_T
   return list;
 }
 
+/* A value type as erlang_wasm spells it: i32 | i64 | f32 | f64 | v128 |
+ * {ref, null | nonull, Heap}. A concrete (indexed) heap type answers its
+ * abstract family: the C API does not give the module's type index. Read
+ * through wasmtime_valtype_t, never wasm_valtype_kind (it aborts on GC types). */
+static ERL_NIF_TERM valtype_term(ErlNifEnv *env, const wasm_valtype_t *vt) {
+  static const char *num[] = {"i32", "i64", "f32", "f64", "v128"};
+  static const char *heap[] = {"extern", "noextern", "func", "func",  "nofunc", "any",
+                               "none",   "eq",       "i31",  "array", "array",  "struct",
+                               "struct", "exn",      "exn",  "noexn"};
+  wasmtime_valtype_t w;
+  wasmtime_valtype_new(vt, &w);
+  ERL_NIF_TERM t;
+  if (w.kind != WASMTIME_VALTYPE_KIND_REF) {
+    t = mk_atom(env, w.kind < 5 ? num[w.kind] : "unknown");
+  } else {
+    unsigned h = w.reftype.heaptype.kind;
+    t = enif_make_tuple3(env, mk_atom(env, "ref"),
+                         mk_atom(env, w.reftype.nullable ? "null" : "nonull"),
+                         mk_atom(env, h < 16 ? heap[h] : "unknown"));
+  }
+  wasmtime_valtype_delete(&w);
+  return t;
+}
+
+static ERL_NIF_TERM valtypes_term(ErlNifEnv *env, const wasm_valtype_vec_t *v) {
+  ERL_NIF_TERM list = enif_make_list(env, 0);
+  for (size_t i = v->size; i > 0; i--)
+    list = enif_make_list_cell(env, valtype_term(env, v->data[i - 1]), list);
+  return list;
+}
+
+/* module_func_types(Module) -> [{Name, Params, Results}], one per function
+ * export of a core module, in export order; [] for a component. */
+static ERL_NIF_TERM nif_module_func_types(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  module_res_t *m;
+  if (!enif_get_resource(env, argv[0], module_type, (void **)&m)) return enif_make_badarg(env);
+  ERL_NIF_TERM list = enif_make_list(env, 0);
+  if (!m->mod) return list;
+  wasm_exporttype_vec_t v;
+  wasmtime_module_exports(m->mod, &v);
+  for (size_t i = v.size; i > 0; i--) {
+    const wasm_exporttype_t *et = v.data[i - 1];
+    const wasm_functype_t *ft = wasm_externtype_as_functype_const(wasm_exporttype_type(et));
+    if (!ft) continue;
+    const wasm_name_t *nn = wasm_exporttype_name(et);
+    list = enif_make_list_cell(env,
+                               enif_make_tuple3(env, mk_binary(env, nn->data, nn->size),
+                                                valtypes_term(env, wasm_functype_params(ft)),
+                                                valtypes_term(env, wasm_functype_results(ft))),
+                               list);
+  }
+  wasm_exporttype_vec_delete(&v);
+  return list;
+}
+
 /* instantiate(Module, Opts, Ref, Id) -> {ok, Handle}; result arrives as a message */
 static ERL_NIF_TERM nif_instantiate(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   module_res_t *m;
@@ -665,19 +720,25 @@ static ERL_NIF_TERM nif_read_output(ErlNifEnv *env, int argc, const ERL_NIF_TERM
   return enif_make_tuple2(env, atom_ok, enif_make_tuple3(env, out, err, dropped));
 }
 
-/* features() -> #{compiler => bool, wat => bool, wasi => bool} */
+/* features() -> #{compiler, wat, wasi, components, wasi_http => bool} */
 static ERL_NIF_TERM nif_features(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
   ERL_NIF_TERM components = atom_true;
 #else
   ERL_NIF_TERM components = atom_false;
 #endif
-  ERL_NIF_TERM keys[4] = {atom_compiler, atom_wat, atom_wasi, mk_atom(env, "components")};
-  ERL_NIF_TERM vals[4] = {NIF_HAVE_COMPILER ? atom_true : atom_false,
+#ifdef WASMTIME_FEATURE_WASI_HTTP
+  ERL_NIF_TERM http = NIF_HAVE_WASI ? atom_true : atom_false;
+#else
+  ERL_NIF_TERM http = atom_false;
+#endif
+  ERL_NIF_TERM keys[5] = {atom_compiler, atom_wat, atom_wasi, mk_atom(env, "components"),
+                          mk_atom(env, "wasi_http")};
+  ERL_NIF_TERM vals[5] = {NIF_HAVE_COMPILER ? atom_true : atom_false,
                           NIF_HAVE_WAT ? atom_true : atom_false,
-                          NIF_HAVE_WASI ? atom_true : atom_false, components};
+                          NIF_HAVE_WASI ? atom_true : atom_false, components, http};
   ERL_NIF_TERM map;
-  enif_make_map_from_arrays(env, keys, vals, 4, &map);
+  enif_make_map_from_arrays(env, keys, vals, 5, &map);
   return map;
 }
 
@@ -799,6 +860,7 @@ static ErlNifFunc funcs[] = {
     {"module_kind", 1, nif_module_kind, 0},
     {"module_imports", 1, nif_module_imports, 0},
     {"module_exports", 1, nif_module_exports, 0},
+    {"module_func_types", 1, nif_module_func_types, 0},
     {"serialize", 1, nif_serialize, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"deserialize", 2, nif_deserialize, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"instantiate", 4, nif_instantiate, 0},

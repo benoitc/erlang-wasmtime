@@ -77,7 +77,7 @@ whose parameter is a concrete type, so passing a struct where
 ## Globals and tables
 
 ```erlang
-{ok, null} = wasmtime:global_get(Inst, ~"current"),
+{ok, [null]} = wasmtime:get_global(Inst, ~"current"),
 ok = wasmtime:global_set(Inst, ~"current", Ref),
 ok = wasmtime:table_set(Inst, ~"handlers", 2, Handler),
 {ok, 4} = wasmtime:table_grow(Inst, ~"handlers", 2, Handler).

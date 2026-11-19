@@ -24,8 +24,11 @@ Lookup = fun(Ctx, [Ptr, Len]) ->
         [] -> {error, ~"unknown key"}
     end
 end,
-{ok, Inst} = wasmtime:instantiate(Mod, #{imports => #{{~"env", ~"lookup"} => Lookup}}).
+{ok, Inst} = wasmtime:instantiate(Mod, #{{~"env", ~"lookup"} => Lookup}).
 ```
+
+The import map is the second argument, keyed by `{Module, Name}`. Options
+go in a third: `wasmtime:instantiate(Mod, Imports, #{memory_limit => ...})`.
 
 The fun receives the instance as `Ctx` and the arguments as a list of values.
 Return `{ok, Results}` with exactly the values the import's type declares, or
@@ -70,7 +73,7 @@ Handler = spawn_link(fun Loop() ->
             Loop()
     end
 end),
-{ok, Inst} = wasmtime:instantiate(Mod, #{host => Handler, imports => Imports}),
+{ok, Inst} = wasmtime:instantiate(Mod, Imports, #{host => Handler}),
 Handler ! {set, Inst}.
 ```
 
@@ -85,7 +88,7 @@ gone"`.
 ## Bound the wait
 
 ```erlang
-{ok, Inst} = wasmtime:instantiate(Mod, #{host_timeout => 1000, imports => ...}).
+{ok, Inst} = wasmtime:instantiate(Mod, Imports, #{host_timeout => 1000}).
 ```
 
 If a host function has not returned after `host_timeout` milliseconds (default

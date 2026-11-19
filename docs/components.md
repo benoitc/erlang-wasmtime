@@ -67,9 +67,9 @@ interface's version, and answer as for a core import, with a list of zero
 or one result:
 
 ```erlang
-{ok, Inst} = wasmtime:instantiate(Mod, #{imports => #{
+{ok, Inst} = wasmtime:instantiate(Mod, #{
     {~"example:host/clock", ~"now"} => fun(_Inst, []) -> {ok, [erlang:system_time()]} end,
-    {~"example:host/clock", ~"add"} => fun(_Inst, [A, B]) -> {ok, [A + B]} end}}).
+    {~"example:host/clock", ~"add"} => fun(_Inst, [A, B]) -> {ok, [A + B]} end}).
 ```
 
 erlang_wasm's typed form works too: a one-argument fun gets the argument
@@ -77,7 +77,7 @@ list and returns the value itself; an exception traps the guest.
 
 ```erlang
 Shout = wasmtime:import_fun({[string], string}, fun([S]) -> string:uppercase(S) end),
-{ok, Inst} = wasmtime:instantiate(Mod, #{imports => #{{~"example:agg/host", ~"shout"} => Shout}}).
+{ok, Inst} = wasmtime:instantiate(Mod, #{{~"example:agg/host", ~"shout"} => Shout}).
 ```
 
 A function the component imports at its root, outside any interface, is
@@ -119,7 +119,7 @@ See [WASI](wasi.md), "WASI 0.2", for streams, clocks and exit statuses.
 - A component instance that trapped cannot be called again: the Component
   Model forbids entering it. Instantiate a new one.
 - Core-module functions do not apply to a component instance:
-  `global_get/2`, the table functions and the memory functions answer
+  `get_global/2`, the table functions and the memory functions answer
   `kind => component` or `no_memory`.
 - Precompiled components work as modules do: `serialize/1`,
   `deserialize/1,2`, `deserialize_file/1,2`.

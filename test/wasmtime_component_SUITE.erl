@@ -131,7 +131,7 @@ precompiled(Config) ->
 
 core_accessors_refused(Config) ->
     Inst = instance(Config, "vectors"),
-    {error, #{kind := component}} = wasmtime:global_get(Inst, ~"g"),
+    {error, #{kind := component}} = wasmtime:get_global(Inst, ~"g"),
     {error, #{kind := component}} = wasmtime:table_size(Inst, ~"t"),
     {error, #{kind := no_memory}} = wasmtime:read_memory(Inst, 0, 1),
     ok.

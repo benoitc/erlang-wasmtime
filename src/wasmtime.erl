@@ -30,7 +30,7 @@ on an instance at a time; concurrent callers are queued.
     deserialize/1, deserialize/2,
     deserialize_file/1, deserialize_file/2,
     preinit/3,
-    instantiate/1, instantiate/2,
+    instantiate/1, instantiate/2, instantiate/3,
     call/3, call/4,
     call_ref/3, call_ref/4,
     call_async/3,
@@ -41,6 +41,7 @@ on an instance at a time; concurrent callers are queued.
     import_fun/2,
     run/1, run/2,
     read_output/1,
+    get_global/2,
     global_get/2,
     global_set/3,
     table_size/2,
@@ -64,9 +65,12 @@ on an instance at a time; concurrent callers are queued.
     read_memory/3, read_memory/4,
     write_memory/3, write_memory/4,
     memory_size/1, memory_size/2,
+    format_error/1,
     features/0,
     version/0
 ]).
+
+-deprecated([{global_get, 2, "use get_global/2"}]).
 
 -export_type([
     module_ref/0,
@@ -77,6 +81,7 @@ on an instance at a time; concurrent callers are queued.
     error/0,
     frame/0,
     host_fun/0,
+    imports/0,
     options/0,
     compile_options/0,
     proposal/0,
@@ -264,8 +269,10 @@ WASI configuration. Nothing is granted by default.
     clocks => all | monotonic
 }.
 
+-type imports() :: #{{binary(), binary()} => host_fun()}.
+
 -type options() :: #{
-    imports => #{{binary(), binary()} => host_fun()},
+    imports => imports(),
     wasi => wasi_options(),
     memory_limit => pos_integer() | unlimited,
     max_tables => pos_integer() | unlimited,
@@ -519,8 +526,8 @@ Instantiate a module in its own store and thread.
 Nothing is granted by default: no host functions, no WASI, 256 MB of linear
 memory at most. Options:
 
-- `imports`: map from `{Module, Name}` to a host fun. An import the module
-  needs and the map does not provide fails with `class => link`.
+- `imports`: the import map, when you call `instantiate/2`. Deprecated:
+  pass it as the second argument of `instantiate/3`.
 - `wasi`: enable WASI preview 1. See `t:wasi_options/0`; without `dirs` the
   guest has no filesystem, without `stdout`/`stderr` its output is discarded.
   A build without WASI (see `features/0`) answers `kind => unavailable`.
@@ -539,9 +546,29 @@ The module's start section runs during instantiation and may call host
 functions; a trap there is reported as `class => trap`. A WASI `_start` is an
 ordinary export and is not run here: call it.
 """.
--spec instantiate(module_ref(), options()) -> {ok, instance()} | error().
-instantiate(Mod, Opts) when is_map(Opts) ->
-    Imports = maps:get(imports, Opts, #{}),
+-spec instantiate(module_ref(), options() | imports()) -> {ok, instance()} | error().
+instantiate(Mod, Map) when is_map(Map) ->
+    %% Import keys are `{Module, Name}` tuples and option keys are atoms, so
+    %% the two maps cannot be confused. An empty map is both.
+    case lists:all(fun is_tuple/1, maps:keys(Map)) of
+        true -> instantiate(Mod, Map, #{});
+        false -> instantiate(Mod, maps:get(imports, Map, #{}), Map)
+    end.
+
+-doc """
+Instantiate a module with its imports, as erlang_wasm's `wasm:instantiate/3`.
+
+`Imports` maps `{Module, Name}` to a host fun. An import the module needs
+and the map does not provide fails with `class => link`. `Opts` are the
+options of `instantiate/2`; an `imports` key in it is ignored.
+
+```erlang
+Log = fun(_Ctx, [N]) -> logger:info("got ~p", [N]), {ok, []} end,
+{ok, Inst} = wasmtime:instantiate(Mod, #{{~"env", ~"log"} => Log}, #{memory_limit => 16 bsl 20}).
+```
+""".
+-spec instantiate(module_ref(), imports(), options()) -> {ok, instance()} | error().
+instantiate(Mod, Imports, Opts) when is_map(Imports), is_map(Opts) ->
     Ref = make_ref(),
     Id = erlang:unique_integer([positive, monotonic]),
     case wasmtime_nif:instantiate(Mod, nif_options(Mod, Imports, Opts), Ref, Id) of
@@ -891,12 +918,59 @@ run_host(Imports, Key, #instance{kind = Kind} = Inst, Args) ->
             {error, format_reason({Class, Reason, Stack})}
     end.
 
+-doc """
+Render an error on one line, for your logs and test failures. Takes the map
+or the whole `{error, Map}`.
+
+```erlang
+{error, E} = wasmtime:call(Inst, ~"run", []),
+logger:error("~ts", [wasmtime:format_error(E)]).
+%% trap: wasm trap: wasm `unreachable` instruction executed (unreachable)
+```
+""".
+-spec format_error(error() | map()) -> iolist().
+format_error({error, Map}) when is_map(Map) -> format_error(Map);
+format_error(#{class := Class, kind := Kind, message := Message} = Map) ->
+    [
+        atom_to_binary(Class),
+        ": ",
+        first_line(Message),
+        " (",
+        atom_to_binary(Kind),
+        ")",
+        format_extra(maps:with([status, trace], Map))
+    ].
+
+first_line(Message) -> hd(binary:split(Message, ~"\n")).
+
+format_extra(#{status := Status}) ->
+    [" status ", integer_to_binary(Status)];
+format_extra(#{trace := [#{func_index := Index, func_name := Name} | _]}) ->
+    [" in ", frame_name(Name, Index)];
+format_extra(_) ->
+    [].
+
+frame_name(undefined, Index) -> ["func ", integer_to_binary(Index)];
+frame_name(Name, _Index) -> Name.
+
 format_reason(Bin) when is_binary(Bin) -> Bin;
 format_reason(Term) -> unicode:characters_to_binary(io_lib:format("~0p", [Term])).
 
 %% ------------------------------------------------------------------- memory
 
--doc "Read an exported global; a reference-typed one gives a `ref()`, `null` or `{i31, N}`.".
+-doc """
+Read an exported global, as erlang_wasm's `wasm:get_global/2`: the value comes
+in a list, like a call result. A reference-typed global gives a `ref()`,
+`null` or `{i31, N}`.
+""".
+-spec get_global(instance(), iodata()) -> {ok, [value()]} | error().
+get_global(#instance{handle = H}, Name) ->
+    case wasmtime_nif:global_get(H, Name) of
+        {ok, Value} -> {ok, [Value]};
+        {error, _} = Error -> Error
+    end.
+
+-doc "Deprecated: use `get_global/2`. Answers the bare value, `{ok, Value}`.".
 -spec global_get(instance(), iodata()) -> {ok, value()} | error().
 global_get(#instance{handle = H}, Name) -> wasmtime_nif:global_get(H, Name).
 

@@ -13,7 +13,7 @@ call Erlang.
         local.get 0 call $log))
     """}),
 {ok, Inst} = wasmtime:instantiate(Mod, #{
-    imports => #{{~"env", ~"log"} => fun(_Ctx, [N]) -> logger:info("got ~p", [N]), {ok, [N * 2]} end}}),
+    {~"env", ~"log"} => fun(_Ctx, [N]) -> logger:info("got ~p", [N]), {ok, [N * 2]} end}),
 {ok, [84]} = wasmtime:call(Inst, ~"run", [42]).
 ```
 

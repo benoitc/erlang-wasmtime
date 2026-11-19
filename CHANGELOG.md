@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+Names shared with erlang_wasm, so code written for one runtime reads the
+same on the other.
+
+- `instantiate/3` takes the import map as its second argument.
+  `instantiate/2` takes the import map or the options map. The `imports`
+  option still works and is deprecated.
+- `get_global/2` answers the value in a list, like a call result.
+  `global_get/2` is deprecated: calling it gives a compiler warning.
+- `format_error/1` renders an error on one line for logs.
+
 ## 0.3.0 (unreleased)
 
 Components and WASI 0.2, with erlang_wasm's term mapping: a componentize-py

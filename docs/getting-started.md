@@ -140,10 +140,10 @@ byte offset, and names when the module carries a name section.
 ## Globals and tables
 
 ```erlang
-{ok, 7}    = wasmtime:global_get(Inst, ~"counter"),
-ok         = wasmtime:global_set(Inst, ~"counter", 8),
-{ok, 4}    = wasmtime:table_size(Inst, ~"handlers"),
-{ok, 4}    = wasmtime:table_grow(Inst, ~"handlers", 2).
+{ok, [7]} = wasmtime:get_global(Inst, ~"counter"),
+ok        = wasmtime:global_set(Inst, ~"counter", 8),
+{ok, 4}   = wasmtime:table_size(Inst, ~"handlers"),
+{ok, 4}   = wasmtime:table_grow(Inst, ~"handlers", 2).
 ```
 
 A constant global refuses `global_set`. Table elements and reference-typed

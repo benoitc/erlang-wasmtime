@@ -10,6 +10,13 @@ same on the other.
   option still works and is deprecated.
 - `get_global/2` answers the value in a list, like a call result.
   `global_get/2` is deprecated: calling it gives a compiler warning.
+- `load/1,2`, `load_file/1` and `unload/1`: a cache of compiled modules for
+  the node. Loading the same bytes twice compiles once. `erlang_wasmtime`
+  is now an application with a supervisor; the cache needs it started, the
+  rest of the library does not.
+- `exports/1` also takes an instance. `pin/2`, `release/2`, `release_all/1`
+  and the `profile` option are accepted and do nothing: references stay
+  alive as long as you hold them, and Wasmtime has one compile tier.
 - `format_error/1` renders an error on one line for logs.
 - `func_types_of/1` and `func_type_of/2` give the types of a module's
   function exports without instantiating it.

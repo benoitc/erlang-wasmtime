@@ -36,6 +36,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Runtime-only builds | `WASMTIME_RUNTIME_ONLY=1`: no compiler, 4 MB; `features/0` reports the linked library's capabilities; see [building](building.md) |
 | Source build fallback | a platform without a prebuilt archive compiles the C API itself |
 | WASI preview 1 | args, env, preopened dirs with read or write, stdio to file or inherited; `clocks => monotonic` refuses wall and CPU clocks with `ENOTCAPABLE` |
+| Module cache | `load/1,2`, `load_file/1`, `unload/1`: one compiled module per source and option set for the node, a claim per load, given back by `unload/1` or when the loader dies; needs the application started |
 | Function types without an instance | `func_types_of/1`, `func_type_of/2`, on a module or on bytes |
 | Limit presets | `wasmtime_limits`: `untrusted/0`, `trusted/0`, `merge/2`, `validate/1`; `timeout`, `fuel` and `max_memory_pages` at instantiate, the first two as defaults of every call |
 | Errors on one line | `format_error/1`, for logs |
@@ -100,6 +101,8 @@ feature is missing the runtime says so with an error; it does not approximate.
 | A call, or a ref of the instance, after `destroy/1` | `kind => stopped` |
 | A value that does not fit a component type (bad UTF-8, surrogate char, out of range, unknown case or flag, missing field) | `kind => badarg` |
 | A dropped or unknown resource handle | `kind => badarg` |
+| `load/1,2` past `max_resident_modules` (256), or without the application | `class => compile`, `kind => cache_full` or `not_started` |
+| A `profile` other than `plugin` or `script` | `class => link, kind => unknown_profile` |
 | erlang_wasm's `max_depth`, `max_heap_words`, `max_host_calls` limits, or a limit of the wrong type | `class => link, kind => invalid_limits` |
 | A core-module accessor on a component instance | `kind => component` |
 | A component instance called after it trapped | `class => call` (the Component Model forbids re-entering it) |

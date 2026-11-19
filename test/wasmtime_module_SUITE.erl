@@ -29,7 +29,14 @@
     deserialize_file/1,
     engine_cap/1,
     validate_module/1,
-    module_func_types/1
+    module_func_types/1,
+    cache_shares_a_module/1,
+    cache_claims_follow_the_process/1,
+    cache_one_compile_for_concurrent_loads/1,
+    cache_load_file/1,
+    cache_full/1,
+    cache_not_started/1,
+    names_for_erlang_wasm/1
 ]).
 
 all() ->
@@ -67,6 +74,16 @@ groups() ->
         ]},
         {validate, [parallel], [
             validate_module
+        ]},
+        %% one cache for the node: these run alone
+        {cache, [], [
+            cache_shares_a_module,
+            cache_claims_follow_the_process,
+            cache_one_compile_for_concurrent_loads,
+            cache_load_file,
+            cache_full,
+            cache_not_started,
+            names_for_erlang_wasm
         ]}
     ].
 
@@ -432,4 +449,175 @@ module_func_types(_) ->
     {error, #{class := link, kind := not_a_func_export}} = wasmtime:func_type_of(Mod, ~"memory"),
     {error, #{class := link, kind := not_a_func_export}} = wasmtime:func_type_of(Mod, ~"nope"),
     {error, #{class := compile}} = wasmtime:func_types_of(~"not wasm"),
+    ok.
+
+%% ------------------------------------------------------------------- cache
+
+started() ->
+    {ok, _} = application:ensure_all_started(erlang_wasmtime),
+    ok.
+
+wat(N) ->
+    {wat, [~"(module (func (export \"f\") (result i32) i32.const ", integer_to_binary(N), ~"))"]}.
+
+cache_shares_a_module(_) ->
+    ok = started(),
+    Before = wasmtime_module_cache:resident(),
+    {ok, Mod} = wasmtime:load(wat(1)),
+    {ok, Mod} = wasmtime:load(wat(1)),
+    %% other options, another module
+    {ok, Metered} = wasmtime:load(wat(1), #{fuel => true}),
+    true = Metered =/= Mod,
+    {ok, Other} = wasmtime:load(wat(2)),
+    true = Other =/= Mod,
+    Before = wasmtime_module_cache:resident() - 3,
+    {ok, Inst} = wasmtime:instantiate(Mod),
+    ok = wasmtime:unload(Mod),
+    Before = wasmtime_module_cache:resident() - 3,
+    ok = wasmtime:unload(Mod),
+    Before = wasmtime_module_cache:resident() - 2,
+    %% no claim left: a further unload changes nothing, and the term still works
+    ok = wasmtime:unload(Mod),
+    {ok, [1]} = wasmtime:call(Inst, ~"f", []),
+    {ok, _} = wasmtime:instantiate(Mod),
+    ok = wasmtime:unload(Metered),
+    ok = wasmtime:unload(Other),
+    Before = wasmtime_module_cache:resident(),
+    %% a module that was compiled, not loaded
+    ok = wasmtime:unload(compile(~"(module)")),
+    {error, #{class := compile}} = wasmtime:load(~"not wasm"),
+    Before = wasmtime_module_cache:resident(),
+    ok.
+
+cache_claims_follow_the_process(_) ->
+    ok = started(),
+    Before = wasmtime_module_cache:resident(),
+    Self = self(),
+    {Pid, Mon} = spawn_monitor(fun() ->
+        {ok, M} = wasmtime:load(wat(3)),
+        {ok, M} = wasmtime:load(wat(3)),
+        Self ! {loaded, M},
+        receive
+            stop -> ok
+        end
+    end),
+    Mod =
+        receive
+            {loaded, M} -> M
+        end,
+    2 = wasmtime_module_cache:claims(Pid),
+    %% another process cannot give back a claim it does not hold
+    ok = wasmtime:unload(Mod),
+    2 = wasmtime_module_cache:claims(Pid),
+    Before = wasmtime_module_cache:resident() - 1,
+    Pid ! stop,
+    receive
+        {'DOWN', Mon, process, Pid, _} -> ok
+    end,
+    0 = wasmtime_module_cache:claims(Pid),
+    Before = wasmtime_module_cache:resident(),
+    ok.
+
+cache_one_compile_for_concurrent_loads(_) ->
+    ok = started(),
+    Before = wasmtime_module_cache:resident(),
+    Self = self(),
+    Pids = [
+        spawn_link(fun() ->
+            Self ! {self(), wasmtime:load(wat(4))},
+            receive
+                stop -> ok
+            end
+        end)
+     || _ <- lists:seq(1, 8)
+    ],
+    [Mod] = lists:usort([
+        receive
+            {P, {ok, M}} -> M
+        end
+     || P <- Pids
+    ]),
+    Before = wasmtime_module_cache:resident() - 1,
+    [1 = wasmtime_module_cache:claims(P) || P <- Pids],
+    {ok, _} = wasmtime:instantiate(Mod),
+    [
+        begin
+            unlink(P),
+            Mon = monitor(process, P),
+            P ! stop,
+            receive
+                {'DOWN', Mon, process, P, _} -> ok
+            end
+        end
+     || P <- Pids
+    ],
+    Before = wasmtime_module_cache:resident(),
+    ok.
+
+cache_load_file(Config) ->
+    ok = started(),
+    Dir = proplists:get_value(priv_dir, Config),
+    {wat, Text} = wat(5),
+    {ok, Bin} = wasmtime:wat2wasm(Text),
+    Wasm = filename:join(Dir, "five.wasm"),
+    Wat = filename:join(Dir, "five.wat"),
+    ok = file:write_file(Wasm, Bin),
+    ok = file:write_file(Wat, Text),
+    {ok, Mod} = wasmtime:load_file(Wasm),
+    {ok, Mod} = wasmtime:load(Bin),
+    {ok, FromText} = wasmtime:load_file(Wat),
+    {ok, Inst} = wasmtime:instantiate(FromText),
+    {ok, [5]} = wasmtime:call(Inst, ~"f", []),
+    {error, #{class := compile, kind := file_error}} =
+        wasmtime:load_file(filename:join(Dir, "missing.wasm")),
+    ok = wasmtime:unload(Mod),
+    ok = wasmtime:unload(Mod),
+    ok = wasmtime:unload(FromText),
+    ok.
+
+cache_full(_) ->
+    ok = application:stop(erlang_wasmtime),
+    ok = application:set_env(erlang_wasmtime, max_resident_modules, 2),
+    ok = started(),
+    try
+        {ok, A} = wasmtime:load(wat(6)),
+        {ok, B} = wasmtime:load(wat(7)),
+        {error, #{class := compile, kind := cache_full}} = wasmtime:load(wat(8)),
+        %% a resident module is still found
+        {ok, A} = wasmtime:load(wat(6)),
+        ok = wasmtime:unload(B),
+        {ok, _} = wasmtime:load(wat(8))
+    after
+        ok = application:stop(erlang_wasmtime),
+        ok = application:unset_env(erlang_wasmtime, max_resident_modules),
+        ok = started()
+    end,
+    ok.
+
+cache_not_started(_) ->
+    ok = application:stop(erlang_wasmtime),
+    try
+        {error, #{class := compile, kind := not_started}} = wasmtime:load(wat(9)),
+        ok = wasmtime:unload(compile(~"(module)")),
+        %% everything that is not the cache works without the application
+        {ok, Inst} = wasmtime:instantiate(compile(~"(module (func (export \"f\")))")),
+        {ok, []} = wasmtime:call(Inst, ~"f", [])
+    after
+        ok = started()
+    end,
+    ok.
+
+%% exports/1 on an instance, the pin functions and the profile option: there
+%% so code written for erlang_wasm runs.
+names_for_erlang_wasm(_) ->
+    Mod = compile(~"(module (func (export \"f\")) (memory (export \"m\") 1))"),
+    {ok, Inst} = wasmtime:instantiate(Mod, #{}, #{profile => plugin}),
+    {ok, _} = wasmtime:instantiate(Mod, #{}, #{profile => script}),
+    {error, #{class := link, kind := unknown_profile}} =
+        wasmtime:instantiate(Mod, #{}, #{profile => fast}),
+    [{~"f", func}, {~"m", memory}] = wasmtime:exports(Inst),
+    true = wasmtime:exports(Inst) =:= wasmtime:exports(Mod),
+    ok = wasmtime:pin(Inst, some_ref),
+    ok = wasmtime:release(Inst, some_ref),
+    ok = wasmtime:release_all(Inst),
     ok.

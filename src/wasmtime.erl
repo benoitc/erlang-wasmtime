@@ -19,6 +19,9 @@ on an instance at a time; concurrent callers are queued.
 """.
 
 -export([
+    load/1, load/2,
+    load_file/1,
+    unload/1,
     compile/1, compile/2,
     wat2wasm/1,
     validate/1, validate/2,
@@ -67,6 +70,9 @@ on an instance at a time; concurrent callers are queued.
     read_memory/3, read_memory/4,
     write_memory/3, write_memory/4,
     memory_size/1, memory_size/2,
+    pin/2,
+    release/2,
+    release_all/1,
     format_error/1,
     features/0,
     version/0
@@ -106,6 +112,8 @@ on an instance at a time; concurrent callers are queued.
     ref :: reference(),
     imports :: #{{binary(), binary()} => host_fun()},
     kind = module :: module | component,
+    %% for exports/1 on an instance
+    module :: reference() | undefined,
     %% `timeout` and `fuel` given at instantiate: the defaults of every call
     defaults = #{} :: #{timeout => timeout(), fuel => non_neg_integer()}
 }).
@@ -298,6 +306,7 @@ A value type, spelled as erlang_wasm does. A reference to a concrete
     timeout => timeout(),
     fuel => pos_integer() | infinity,
     max_memory_pages => non_neg_integer() | infinity,
+    profile => plugin | script,
     host_timeout => timeout(),
     host => pid(),
     stream => pid(),
@@ -324,6 +333,57 @@ compile({wat, Text}, Opts) ->
     with_key(Opts, fun(Key) -> wasmtime_nif:compile(iolist_to_binary(Text), true, Key) end);
 compile(Bin, Opts) when is_binary(Bin) ->
     with_key(Opts, fun(Key) -> wasmtime_nif:compile(Bin, false, Key) end).
+
+-doc #{equiv => load(Source, #{})}.
+-spec load(binary() | {wat, iodata()}) -> {ok, module_ref()} | error().
+load(Source) -> load(Source, #{}).
+
+-doc """
+Compile a module and keep it in the node's cache, as erlang_wasm's
+`wasm:load/1,2`.
+
+Use it instead of `compile/2` when several parts of a system load the same
+bytes: the second load finds the module compiled and only takes a claim on
+it. The key is the source and the compile options, so the same bytes under
+other options are another module. What you get is an ordinary module:
+everything that takes one takes it.
+
+Each load is a claim held by the calling process. `unload/1` gives one
+back, and a process that dies gives back all of its own. The module leaves
+the cache with its last claim. The cache holds 256 modules unless
+`max_resident_modules` in the application environment says otherwise; past
+that, `load/2` answers `kind => cache_full`.
+
+The `erlang_wasmtime` application must be started: without it the answer is
+`kind => not_started`.
+""".
+-spec load(binary() | {wat, iodata()}, compile_options()) -> {ok, module_ref()} | error().
+load(Source, Opts) when is_map(Opts) -> wasmtime_module_cache:load(Source, Opts).
+
+-doc "Read a `.wasm` or `.wat` file and `load/1` it; `kind => file_error` when it cannot be read.".
+-spec load_file(file:name_all()) -> {ok, module_ref()} | error().
+load_file(Path) ->
+    case file:read_file(Path) of
+        {ok, Bin} ->
+            case filename:extension(iolist_to_binary(Path)) of
+                ~".wat" -> load({wat, Bin});
+                _ -> load(Bin)
+            end;
+        {error, Reason} ->
+            {error, #{
+                class => compile,
+                kind => file_error,
+                message => format_reason({Path, Reason})
+            }}
+    end.
+
+-doc """
+Give back one claim on a cached module. The module stays in the cache until
+every holder has done so, and stays usable for as long as you hold the term.
+A module that did not come from `load/1,2` is left alone.
+""".
+-spec unload(module_ref()) -> ok.
+unload(Mod) when is_reference(Mod) -> wasmtime_module_cache:unload(Mod).
 
 -doc """
 Translate the text format into the binary form, without compiling.
@@ -530,8 +590,9 @@ handle(#instance{handle = H}) -> H.
 -spec imports(module_ref()) -> [{binary(), binary(), func | global | table | memory | tag}].
 imports(Mod) -> wasmtime_nif:module_imports(Mod).
 
--doc "List what the module exports, as `{Name, Kind}`.".
--spec exports(module_ref()) -> [{binary(), func | global | table | memory | tag}].
+-doc "List what a module, or the module of an instance, exports, as `{Name, Kind}`.".
+-spec exports(module_ref() | instance()) -> [{binary(), func | global | table | memory | tag}].
+exports(#instance{module = Mod}) -> wasmtime_nif:module_exports(Mod);
 exports(Mod) -> wasmtime_nif:module_exports(Mod).
 
 -doc """
@@ -600,6 +661,8 @@ memory at most. Options:
   for a component, which holds several.
 - `timeout`, `fuel`, `max_memory_pages`: the limits of `wasmtime_limits`.
   `timeout` and `fuel` become the defaults of every call on the instance.
+- `profile`: `plugin` or `script`, erlang_wasm's compile tiers. Accepted and
+  without effect: Wasmtime has one tier.
 - `host_timeout`: how long a host function may run before the guest traps
   (default 30 s).
 - `host`: a process that serves host calls instead of the caller. It receives
@@ -634,9 +697,15 @@ Log = fun(_Ctx, [N]) -> logger:info("got ~p", [N]), {ok, []} end,
 """.
 -spec instantiate(module_ref(), imports(), options()) -> {ok, instance()} | error().
 instantiate(Mod, Imports, Opts) when is_map(Imports), is_map(Opts) ->
-    case wasmtime_limits:validate(Opts) of
+    case check_options(Opts) of
         ok ->
             do_instantiate(Mod, Imports, page_limit(Opts));
+        {error, {unknown_profile, Profile}} ->
+            {error, #{
+                class => link,
+                kind => unknown_profile,
+                message => format_reason({unknown_profile, Profile})
+            }};
         {error, {invalid_limits, Bad}} ->
             {error, #{
                 class => link,
@@ -644,6 +713,13 @@ instantiate(Mod, Imports, Opts) when is_map(Imports), is_map(Opts) ->
                 message => format_reason({invalid_limits, Bad})
             }}
     end.
+
+%% erlang_wasm's `profile` picks its compile tier. There is one tier here, so
+%% a known profile is accepted and changes nothing.
+check_options(#{profile := Profile}) when Profile =/= plugin, Profile =/= script ->
+    {error, {unknown_profile, Profile}};
+check_options(Opts) ->
+    wasmtime_limits:validate(Opts).
 
 %% `max_memory_pages` is `memory_limit` in pages; an explicit byte limit wins.
 page_limit(#{memory_limit := _} = Opts) -> Opts;
@@ -661,6 +737,7 @@ do_instantiate(Mod, Imports, Opts) ->
                 ref = Ref,
                 imports = Imports,
                 kind = module_kind(Mod),
+                module = Mod,
                 defaults = call_defaults(Opts)
             },
             case wait_result(Inst, Id, infinity) of
@@ -1011,6 +1088,23 @@ run_host(Imports, Key, #instance{kind = Kind} = Inst, Args) ->
         Class:Reason:Stack ->
             {error, format_reason({Class, Reason, Stack})}
     end.
+
+-doc """
+Keep a reference alive, as erlang_wasm's `wasm:pin/2`. Nothing to do here:
+a `ref()` term keeps its object alive for as long as the term exists.
+`pin/2`, `release/2` and `release_all/1` answer `ok` so code written for
+erlang_wasm runs unchanged.
+""".
+-spec pin(instance(), term()) -> ok.
+pin(#instance{}, _Ref) -> ok.
+
+-doc #{equiv => pin(Inst, Ref)}.
+-spec release(instance(), term()) -> ok.
+release(#instance{}, _Ref) -> ok.
+
+-doc #{equiv => pin(Inst, Ref)}.
+-spec release_all(instance()) -> ok.
+release_all(#instance{}) -> ok.
 
 -doc """
 Render an error on one line, for your logs and test failures. Takes the map

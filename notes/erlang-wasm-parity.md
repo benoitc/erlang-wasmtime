@@ -78,5 +78,9 @@ the page budget (`wasm_engine`), the compiled tier's caches.
   `get_global/2` (`global_get/2` deprecated), `format_error/1`,
   `func_types_of/1`, `func_type_of/2`, `wasmtime_limits` with `timeout`,
   `fuel` and `max_memory_pages` at instantiate.
-- Phase 1, left: the module cache (`load/1,2`, `load_file/1`, `unload/1`),
-  `exports/1` on an instance, `pin/2` and `release/2`, the `profile` option.
+- 2026-11-19, phase 1 complete on `wasm-parity`: the module cache
+  (`load/1,2`, `load_file/1`, `unload/1`, with `wasmtime_app`,
+  `wasmtime_sup` and `wasmtime_module_cache`), `exports/1` on an instance,
+  `pin/2`, `release/2`, `release_all/1` as no-ops, `profile` accepted.
+  `load/1,2` compiles: it does not take a `.cwasm`.
+- Next: phase 2, `wasmtime_instance_worker`.

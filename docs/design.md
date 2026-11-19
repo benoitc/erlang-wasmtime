@@ -290,6 +290,22 @@ must be compiled with the same settings, which is why
 `scripts/precompile-shims.sh` mirrors `make_config` flag by flag and
 `shim_files_load` in the tests fails when they drift.
 
+## The module cache
+
+`load/1,2` is the one part of the library with an Erlang process:
+`wasmtime_module_cache`, under `wasmtime_sup`. It maps the hash of the
+source and its engine key to a module reference, counts claims per loading
+process and gives them back when that process dies. Rules:
+
+- Compiling happens in the caller, never in the server: the server only
+  updates maps. A second loader of the same key waits for the first one's
+  result; if the first dies, the next waiter compiles.
+- The cache holds a reference, not the module: removing an entry frees
+  nothing while an instance or a term still refers to the module.
+- Nothing else may depend on the application being started. `compile/2`,
+  `instantiate/3` and the rest work without it (`cache_not_started` in the
+  tests).
+
 ## Streams
 
 Every instance has one inbox (a list of byte chunks under `mu`).
@@ -426,6 +442,7 @@ Decisions and their reasons:
 | 10,000 snapshot segments, merged across 4-byte gaps | `MAX_SEGMENTS`, `MERGE_GAP` in `nif_preinit.c` | Wizer's values: a segment costs about 4 bytes to encode, and Wasmtime handles tens of thousands slowly | the size of pre-initialized modules |
 | 100,000 pooled core instances and tables | `POOL_MAX_SLOTS` in `nif_engine.c`, the same in `wasmtime_options.erl` | a component takes several core instances and tables per instance; a slot costs about 1 MB and 160 KB of address space | aborts in `Engine::new` if the C and Erlang checks drift |
 | 16 MB always-dense span | `?ALWAYS_DENSE` in `wasmtime_preinit.erl` | Wasmtime's `memory_guaranteed_dense_image_size` default | whether a snapshot is mapped or copied at each instantiation |
+| 256 cached modules | `?DEFAULT_MAX_RESIDENT` in `wasmtime_module_cache.erl`, `max_resident_modules` in the application environment | compiled code stays mapped while the cache holds it; a bound turns a loader that never unloads into an error | `cache_full` sooner or later |
 | 32 engines | `MAX_ENGINES` | engines are never freed; a bound turns a leak into an error | `too_many_configurations` sooner or later |
 | 32 values | `MAX_VALS` | stack arrays for arguments and results | signatures wider than this are `unsupported_type` |
 | 30 s host timeout | `DEFAULT_HOST_TIMEOUT` | a guest parked forever behind a dead handler would pin its thread | how long a slow host fun may take before the guest traps |

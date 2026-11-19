@@ -380,6 +380,13 @@ and copies every segment at each instantiation otherwise. `?ALWAYS_DENSE`
 mirrors Wasmtime's default; if a Wasmtime upgrade changes the rule, change
 `dense/1` with it and check `sparse_memory_is_dense` in the tests.
 
+`snapshot/2` on a live instance is the same passes split in two
+(`prepare/2`, `capture/4` in `wasmtime_preinit.erl`): an instance made with
+`snapshotable => true` is an instance of the instrumented module, which the
+module cache keeps with the source bytes; the capture reads it and compiles
+the rewritten module. The table fingerprints are taken when the instance is
+made, so the rule is the same: tables as the element segments left them.
+
 Where the image comes from, and how a pool slot is reset, differs by
 platform; [preinit](preinit.md) has the table.
 

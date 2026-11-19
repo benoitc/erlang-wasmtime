@@ -14,6 +14,10 @@ same on the other.
   the node. Loading the same bytes twice compiles once. `erlang_wasmtime`
   is now an application with a supervisor; the cache needs it started, the
   rest of the library does not.
+- Snapshots: `snapshot/1,2` captures an instance made with
+  `snapshotable => true`, `restore/3` starts new instances from that point,
+  `save_snapshot/2` and `load_snapshot/2` keep the image across restarts.
+  Core modules only; the image holds memories and globals.
 - `wasmtime_instance_worker`: one instance in a process, one request at a
   time, a deadline on each, and a fresh instance per request unless you
   ask to reuse it. A deadline interrupts the guest and the worker lives on.

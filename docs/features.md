@@ -36,6 +36,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Runtime-only builds | `WASMTIME_RUNTIME_ONLY=1`: no compiler, 4 MB; `features/0` reports the linked library's capabilities; see [building](building.md) |
 | Source build fallback | a platform without a prebuilt archive compiles the C API itself |
 | WASI preview 1 | args, env, preopened dirs with read or write, stdio to file or inherited; `clocks => monotonic` refuses wall and CPU clocks with `ENOTCAPABLE` |
+| Snapshots | `snapshot/1,2` of an instance made with `snapshotable => true`, `restore/3`, `snapshot_info/1`, `save_snapshot/2`, `load_snapshot/2`, `compatibility_key`; core modules, memories and mutable globals; see [snapshots](snapshots.md) |
 | Instance worker | `wasmtime_instance_worker`: one instance in a process, a deadline per request, `fresh` or `reuse` between requests; see [workers](worker.md) |
 | Module cache | `load/1,2`, `load_file/1`, `unload/1`: one compiled module per source and option set for the node, a claim per load, given back by `unload/1` or when the loader dies; needs the application started |
 | Function types without an instance | `func_types_of/1`, `func_type_of/2`, on a module or on bytes |
@@ -103,6 +104,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | A value that does not fit a component type (bad UTF-8, surrogate char, out of range, unknown case or flag, missing field) | `kind => badarg` |
 | A dropped or unknown resource handle | `kind => badarg` |
 | `load/1,2` past `max_resident_modules` (256), or without the application | `class => compile`, `kind => cache_full` or `not_started` |
+| `snapshot/1,2` on an instance not made for it, or of a module not from `load/1,2`; an image restored or loaded under another key or module | `class => snapshot`, `kind => not_snapshotable`, `module_not_loaded` or `snapshot_incompatible` |
 | A `profile` other than `plugin` or `script` | `class => link, kind => unknown_profile` |
 | erlang_wasm's `max_depth`, `max_heap_words`, `max_host_calls` limits, or a limit of the wrong type | `class => link, kind => invalid_limits` |
 | A core-module accessor on a component instance | `kind => component` |

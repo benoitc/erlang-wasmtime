@@ -86,4 +86,8 @@ the page budget (`wasm_engine`), the compiled tier's caches.
 - 2026-11-19, phase 2 done: `wasmtime_instance_worker` with
   `wasmtime_worker_SUITE` and `docs/worker.md`. A deadline interrupts the
   guest; the worker is not killed as erlang_wasm's is.
-- Next: phase 3, snapshots.
+- 2026-11-19, phase 3 done: `snapshot/1,2`, `restore/3`, `snapshot_info/1`,
+  `save_snapshot/2`, `load_snapshot/2`, `acquire/1`, `release/1`, with
+  `wasmtime_snapshot_SUITE` and `docs/snapshots.md`. Not done: components,
+  capturing a restored instance again, erlang_wasm's on-disk format.
+- Next: phase 4, a spike on `wasi:http` and network grants in the C API.

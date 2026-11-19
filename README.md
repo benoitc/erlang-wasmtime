@@ -76,6 +76,7 @@ Requires OTP 27 or later.
 - [Precompiled modules](docs/precompiled.md): compile once, load in milliseconds
 - [Components](docs/components.md): WIT values as terms, imports, resources, WASI 0.2
 - [Pre-initialization](docs/preinit.md): start the guest once, give every request a fresh copy
+- [Snapshots](docs/snapshots.md): capture a running instance, restore it per request
 - [Throughput](docs/throughput.md): what a pre-initialized CPython costs per request
 - [Building and shipping](docs/building.md)
 - [Troubleshooting](docs/troubleshooting.md)

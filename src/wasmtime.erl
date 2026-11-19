@@ -70,6 +70,13 @@ on an instance at a time; concurrent callers are queued.
     read_memory/3, read_memory/4,
     write_memory/3, write_memory/4,
     memory_size/1, memory_size/2,
+    snapshot/1, snapshot/2,
+    restore/3,
+    snapshot_info/1,
+    save_snapshot/2,
+    load_snapshot/2,
+    acquire/1,
+    release/1,
     pin/2,
     release/2,
     release_all/1,
@@ -90,6 +97,7 @@ on an instance at a time; concurrent callers are queued.
     frame/0,
     host_fun/0,
     imports/0,
+    snapshot/0,
     valtype/0,
     options/0,
     compile_options/0,
@@ -115,11 +123,26 @@ on an instance at a time; concurrent callers are queued.
     %% for exports/1 on an instance
     module :: reference() | undefined,
     %% `timeout` and `fuel` given at instantiate: the defaults of every call
-    defaults = #{} :: #{timeout => timeout(), fuel => non_neg_integer()}
+    defaults = #{} :: #{timeout => timeout(), fuel => non_neg_integer()},
+    %% made with `snapshotable => true`: what snapshot/2 needs
+    snap :: undefined | map()
+}).
+
+-record(snapshot, {
+    %% the module that starts in the captured state, compiled
+    module :: reference(),
+    %% its binary form, for save_snapshot/2
+    wasm :: binary(),
+    %% sha256 of the bytes of the module it was captured from
+    source :: binary(),
+    version :: term(),
+    key :: term()
 }).
 
 -opaque module_ref() :: reference().
 -opaque instance() :: #instance{}.
+-doc "An image of an initialized instance, from `snapshot/1,2` or `load_snapshot/2`.".
+-opaque snapshot() :: #snapshot{}.
 -opaque call_ref() :: {call_ref, pos_integer()}.
 
 -doc """
@@ -153,7 +176,18 @@ innermost first.
 -type error() ::
     {error, #{
         class :=
-            compile | link | call | trap | host | wasi | memory | global | table | exit | preinit,
+            compile
+            | link
+            | call
+            | trap
+            | host
+            | wasi
+            | memory
+            | global
+            | table
+            | exit
+            | preinit
+            | snapshot,
         kind := atom(),
         message := binary(),
         status => integer(),
@@ -307,6 +341,7 @@ A value type, spelled as erlang_wasm does. A reference to a concrete
     fuel => pos_integer() | infinity,
     max_memory_pages => non_neg_integer() | infinity,
     profile => plugin | script,
+    snapshotable => boolean(),
     host_timeout => timeout(),
     host => pid(),
     stream => pid(),
@@ -663,6 +698,8 @@ memory at most. Options:
   `timeout` and `fuel` become the defaults of every call on the instance.
 - `profile`: `plugin` or `script`, erlang_wasm's compile tiers. Accepted and
   without effect: Wasmtime has one tier.
+- `snapshotable`: `true` to allow `snapshot/1,2` on the instance. The module
+  must come from `load/1,2`.
 - `host_timeout`: how long a host function may run before the guest traps
   (default 30 s).
 - `host`: a process that serves host calls instead of the caller. It receives
@@ -699,7 +736,7 @@ Log = fun(_Ctx, [N]) -> logger:info("got ~p", [N]), {ok, []} end,
 instantiate(Mod, Imports, Opts) when is_map(Imports), is_map(Opts) ->
     case check_options(Opts) of
         ok ->
-            do_instantiate(Mod, Imports, page_limit(Opts));
+            maybe_snapshotable(Mod, Imports, page_limit(Opts));
         {error, {unknown_profile, Profile}} ->
             {error, #{
                 class => link,
@@ -726,6 +763,34 @@ page_limit(#{memory_limit := _} = Opts) -> Opts;
 page_limit(#{max_memory_pages := infinity} = Opts) -> Opts#{memory_limit => unlimited};
 page_limit(#{max_memory_pages := Pages} = Opts) -> Opts#{memory_limit => max(Pages * 65536, 1)};
 page_limit(Opts) -> Opts.
+
+%% A snapshotable instance is made from the module's instrumented form,
+%% which exports its memories, globals and tables so they can be read back.
+maybe_snapshotable(Mod, Imports, #{snapshotable := true} = Opts) ->
+    maybe
+        {ok, Prepared, Wasm, CompileOpts} ?= wasmtime_module_cache:prepared(Mod),
+        {ok, Inst} ?= do_instantiate(maps:get(module, Prepared), Imports, Opts),
+        {ok, Tables} ?= wasmtime_preinit:fingerprint(Inst, Prepared),
+        Snap = #{
+            prepared => Prepared,
+            tables => Tables,
+            source => crypto:hash(sha256, Wasm),
+            compile => CompileOpts
+        },
+        {ok, Inst#instance{module = Mod, snap = Snap}}
+    else
+        error ->
+            snapshot_error(
+                module_not_loaded, ~"a snapshotable instance needs a module from load/1,2"
+            );
+        {error, _} = Error ->
+            Error
+    end;
+maybe_snapshotable(Mod, Imports, Opts) ->
+    do_instantiate(Mod, Imports, Opts).
+
+snapshot_error(Kind, Message) ->
+    {error, #{class => snapshot, kind => Kind, message => Message}}.
 
 do_instantiate(Mod, Imports, Opts) ->
     Ref = make_ref(),
@@ -1088,6 +1153,156 @@ run_host(Imports, Key, #instance{kind = Kind} = Inst, Args) ->
         Class:Reason:Stack ->
             {error, format_reason({Class, Reason, Stack})}
     end.
+
+-doc #{equiv => snapshot(Inst, #{})}.
+-spec snapshot(instance()) -> {ok, snapshot()} | error().
+snapshot(Inst) -> snapshot(Inst, #{}).
+
+-doc """
+Capture an initialized instance, so later ones start where it is now, as
+erlang_wasm's `wasm:snapshot/1,2`.
+
+```erlang
+{ok, Mod} = wasmtime:load(Bytes),
+{ok, Init} = wasmtime:instantiate(Mod, Imports, #{snapshotable => true}),
+{ok, _} = wasmtime:call(Init, ~"init", []),
+{ok, Image} = wasmtime:snapshot(Init),
+ok = wasmtime:destroy(Init),
+
+{ok, Fresh} = wasmtime:restore(Image, Imports, #{}),
+{ok, _} = wasmtime:call(Fresh, ~"handle", []).
+```
+
+The image is a module compiled to start in the captured state: memories and
+mutable globals. Taking it costs a compile; restoring from it is an
+ordinary instantiation. `Opts` takes a `version`, given back by
+`snapshot_info/1`, and a `compatibility_key` that `restore/3` must repeat.
+
+Refused: an instance made without `snapshotable => true` (`kind =>
+not_snapshotable`), one with a call running (`busy`), a component, and what
+`preinit/3` refuses: imported memories, tables or globals, GC types, a table
+changed since the instance was made (`class => preinit`). See
+[snapshots](snapshots.md).
+""".
+-spec snapshot(instance(), #{version => term(), compatibility_key => term()}) ->
+    {ok, snapshot()} | error().
+snapshot(#instance{snap = undefined}, Opts) when is_map(Opts) ->
+    snapshot_error(not_snapshotable, ~"instantiate with `snapshotable => true` to capture");
+snapshot(#instance{snap = Snap} = Inst, Opts) when is_map(Opts) ->
+    #{prepared := Prepared, tables := Tables, source := Source, compile := CompileOpts} = Snap,
+    maybe
+        {ok, Wasm} ?= wasmtime_preinit:capture(Inst, Prepared, Tables, CompileOpts),
+        {ok, Mod} ?= compile(Wasm, CompileOpts),
+        {ok, #snapshot{
+            module = Mod,
+            wasm = Wasm,
+            source = Source,
+            version = maps:get(version, Opts, undefined),
+            key = maps:get(compatibility_key, Opts, undefined)
+        }}
+    end.
+
+-doc """
+Make a fresh instance at a captured point, as erlang_wasm's `wasm:restore/3`.
+
+The imports are yours to give again: the image carries the guest's state,
+not what the host held for it. The module's start section does not run; it
+ran before the capture. `Opts` are `instantiate/3`'s, plus the
+`compatibility_key` the image was captured with, when it had one
+(`kind => snapshot_incompatible` otherwise).
+""".
+-spec restore(snapshot(), imports(), options()) -> {ok, instance()} | error().
+restore(#snapshot{key = Key}, _Imports, #{compatibility_key := Other}) when Other =/= Key ->
+    snapshot_error(snapshot_incompatible, ~"the image was captured with another compatibility key");
+restore(#snapshot{key = Key}, _Imports, Opts) when
+    Key =/= undefined, not is_map_key(compatibility_key, Opts)
+->
+    snapshot_error(snapshot_incompatible, ~"the image was captured with a compatibility key");
+restore(#snapshot{}, _Imports, #{snapshotable := true}) ->
+    snapshot_error(
+        not_snapshotable, ~"an instance restored from an image cannot be captured again"
+    );
+restore(#snapshot{module = Mod}, Imports, Opts) when is_map(Imports), is_map(Opts) ->
+    instantiate(Mod, Imports, Opts).
+
+-doc "What an image holds: `bytes` (its module's size), `module` and `version`.".
+-spec snapshot_info(snapshot()) ->
+    #{bytes := non_neg_integer(), module := module_ref(), version := term()}.
+snapshot_info(#snapshot{module = Mod, wasm = Wasm, version = Version}) ->
+    #{bytes => byte_size(Wasm), module => Mod, version => Version}.
+
+-doc """
+Write an image to a file, so a later node need not run the initialization
+again. Written to a temporary name and renamed, so a reader never sees half
+a file. The directory is as trusted as your release: whoever can write the
+file chooses what a restored instance starts with.
+""".
+-spec save_snapshot(snapshot(), file:name_all()) -> ok | error().
+save_snapshot(#snapshot{wasm = Wasm, source = Source, version = Version, key = Key}, Path) ->
+    Bin = term_to_binary({wasmtime_snapshot, 1, Source, Version, Key, Wasm}, [{compressed, 1}]),
+    Tmp = [Path, ".tmp-", integer_to_list(erlang:unique_integer([positive]))],
+    maybe
+        ok ?= file:write_file(Tmp, Bin),
+        ok ?= file:rename(Tmp, Path)
+    else
+        {error, Reason} ->
+            _ = file:delete(Tmp),
+            snapshot_error(snapshot_not_written, format_reason({Path, Reason}))
+    end.
+
+-doc """
+Read an image back, for a module you name: one from `load/1,2` with the bytes
+the image was captured from. An image of another module is refused with
+`kind => snapshot_incompatible`. The image's module is compiled here, with
+the options `Mod` was loaded with.
+""".
+-spec load_snapshot(file:name_all(), module_ref()) -> {ok, snapshot()} | error().
+load_snapshot(Path, Mod) ->
+    maybe
+        {ok, Bin} ?= file:read_file(Path),
+        {ok, Bytes, CompileOpts} ?= wasmtime_module_cache:source(Mod),
+        {wasmtime_snapshot, 1, Source, Version, Key, Wasm} ?= decode_snapshot(Bin),
+        true ?= Source =:= crypto:hash(sha256, Bytes),
+        {ok, Image} ?= compile(Wasm, CompileOpts),
+        {ok, #snapshot{module = Image, wasm = Wasm, source = Source, version = Version, key = Key}}
+    else
+        {error, #{}} = Error ->
+            Error;
+        {error, Reason} ->
+            snapshot_error(snapshot_not_read, format_reason({Path, Reason}));
+        error ->
+            snapshot_error(module_not_loaded, ~"load_snapshot/2 needs a module from load/1,2");
+        false ->
+            snapshot_error(snapshot_incompatible, ~"the image was captured from another module");
+        _ ->
+            snapshot_error(snapshot_not_read, ~"not a snapshot file")
+    end.
+
+%% Decoded with `safe`: a file cannot create atoms or funs. What it holds is
+%% checked by shape here and compiled, so validated, by Wasmtime.
+decode_snapshot(Bin) ->
+    try binary_to_term(Bin, [safe]) of
+        {wasmtime_snapshot, 1, Source, _Version, _Key, Wasm} = Term when
+            is_binary(Source), is_binary(Wasm)
+        ->
+            Term;
+        _ ->
+            invalid
+    catch
+        error:badarg -> invalid
+    end.
+
+-doc """
+Keep an image alive, as erlang_wasm's `wasm:acquire/1`. Nothing to do here:
+an image lives as long as a process holds the term. `acquire/1` and
+`release/1` answer `ok` so code written for erlang_wasm runs unchanged.
+""".
+-spec acquire(snapshot()) -> ok.
+acquire(#snapshot{}) -> ok.
+
+-doc #{equiv => acquire(Snapshot)}.
+-spec release(snapshot()) -> ok.
+release(#snapshot{}) -> ok.
 
 -doc """
 Keep a reference alive, as erlang_wasm's `wasm:pin/2`. Nothing to do here:

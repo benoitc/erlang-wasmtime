@@ -14,6 +14,10 @@ same on the other.
   the node. Loading the same bytes twice compiles once. `erlang_wasmtime`
   is now an application with a supervisor; the cache needs it started, the
   rest of the library does not.
+- `http => all` in the `wasi` options lets a component send HTTP requests
+  through `wasi:http`. Off by default, and all or nothing: any server the
+  node can reach. Not in runtime-only builds. `network => all` is refused:
+  this Wasmtime cannot open sockets to a guest.
 - Snapshots: `snapshot/1,2` captures an instance made with
   `snapshotable => true`, `restore/3` starts new instances from that point,
   `save_snapshot/2` and `load_snapshot/2` keep the image across restarts.

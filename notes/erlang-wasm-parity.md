@@ -62,10 +62,12 @@ Spike done 2026-11-19 on the Wasmtime 48 C API headers:
 - The full archives have `WASMTIME_FEATURE_WASI_HTTP`; the runtime-only
   archives are built without it and would need a new revision.
 
-Proposal, waiting for the maintainer: two explicit opt-ins in the `wasi`
-options, off by default, `network => all` and `http => all`. erlang_wasm's
-grants by address (`wasi_net`), its transports and its listener are
-refused and listed under Deferred.
+Done 2026-11-19 (maintainer: explicit opt-in): `http => all`, off by
+default, proven with the `httpget` fixture. `network => all` turned out not
+to work: Wasmtime 48's `WasiCtxBuilder` derives `Default`, so TCP and UDP
+start off, and the C API has `wasi_config_inherit_network` but no
+`allow_tcp`. It is refused with `kind => unavailable` and listed under
+Deferred; RELEASING.md says to look again at a Wasmtime bump.
 
 ## Phase 5: host resources, component async, WASI 0.3
 
@@ -111,4 +113,5 @@ the page budget (`wasm_engine`), the compiled tier's caches.
   `wasmtime_snapshot_SUITE` and `docs/snapshots.md`. Not done: components,
   capturing a restored instance again, erlang_wasm's on-disk format.
 - 2026-11-19: spikes for phases 4 and 5 done, findings above.
-- Next: host resources (phase 5); phase 4 waits for a decision.
+- 2026-11-19, phase 4 done as far as the C API goes: `http => all`.
+- Next: host resources (phase 5), then script workers.

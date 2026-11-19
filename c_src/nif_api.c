@@ -720,19 +720,25 @@ static ERL_NIF_TERM nif_read_output(ErlNifEnv *env, int argc, const ERL_NIF_TERM
   return enif_make_tuple2(env, atom_ok, enif_make_tuple3(env, out, err, dropped));
 }
 
-/* features() -> #{compiler => bool, wat => bool, wasi => bool} */
+/* features() -> #{compiler, wat, wasi, components, wasi_http => bool} */
 static ERL_NIF_TERM nif_features(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
   ERL_NIF_TERM components = atom_true;
 #else
   ERL_NIF_TERM components = atom_false;
 #endif
-  ERL_NIF_TERM keys[4] = {atom_compiler, atom_wat, atom_wasi, mk_atom(env, "components")};
-  ERL_NIF_TERM vals[4] = {NIF_HAVE_COMPILER ? atom_true : atom_false,
+#ifdef WASMTIME_FEATURE_WASI_HTTP
+  ERL_NIF_TERM http = NIF_HAVE_WASI ? atom_true : atom_false;
+#else
+  ERL_NIF_TERM http = atom_false;
+#endif
+  ERL_NIF_TERM keys[5] = {atom_compiler, atom_wat, atom_wasi, mk_atom(env, "components"),
+                          mk_atom(env, "wasi_http")};
+  ERL_NIF_TERM vals[5] = {NIF_HAVE_COMPILER ? atom_true : atom_false,
                           NIF_HAVE_WAT ? atom_true : atom_false,
-                          NIF_HAVE_WASI ? atom_true : atom_false, components};
+                          NIF_HAVE_WASI ? atom_true : atom_false, components, http};
   ERL_NIF_TERM map;
-  enif_make_map_from_arrays(env, keys, vals, 4, &map);
+  enif_make_map_from_arrays(env, keys, vals, 5, &map);
   return map;
 }
 

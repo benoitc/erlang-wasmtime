@@ -31,6 +31,9 @@
     wasi_stdin_stream/1,
     wasi_versioned_import/1,
     wasi_clocks_component/1,
+    wasi_network_grant/1,
+    wasi_http_grant/1,
+    wasi_grants_refused/1,
     core_accessors_refused/1,
     pooled_components/1
 ]).
@@ -61,7 +64,14 @@ groups() ->
         ]},
         {resources, [parallel], [resources, destroy_drops_resources]},
         {wasi, [parallel], [
-            wasi_command, wasi_exit, wasi_stdin_stream, wasi_versioned_import, wasi_clocks_component
+            wasi_command,
+            wasi_exit,
+            wasi_stdin_stream,
+            wasi_versioned_import,
+            wasi_clocks_component,
+            wasi_network_grant,
+            wasi_http_grant,
+            wasi_grants_refused
         ]},
         {pool, [], [pooled_components]}
     ].
@@ -388,4 +398,98 @@ pooled_components(Config) ->
         end
      || _ <- lists:seq(1, 200)
     ],
+    ok.
+
+%% ------------------------------------------------------- network and http
+
+%% A listener on the loopback that answers each connection with `Reply`.
+serve(Reply) ->
+    {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}, {ip, {127, 0, 0, 1}}]),
+    {ok, Port} = inet:port(L),
+    Pid = spawn(fun() -> accept_loop(L, Reply) end),
+    ok = gen_tcp:controlling_process(L, Pid),
+    {Pid, integer_to_list(Port)}.
+
+accept_loop(L, Reply) ->
+    case gen_tcp:accept(L) of
+        {ok, S} ->
+            _ = gen_tcp:recv(S, 0, 2000),
+            _ = gen_tcp:send(S, Reply),
+            _ = gen_tcp:close(S),
+            accept_loop(L, Reply);
+        {error, _} ->
+            ok
+    end.
+
+net(Config, Args, Grants) -> command(Config, "net", Args, Grants).
+
+command(Config, Name, Args, Grants) ->
+    Inst = instance(Config, Name, #{wasi => Grants#{args => [Name | Args], stdout => capture}}),
+    Result = wasmtime:run(Inst),
+    {ok, {Out, _, _}} = wasmtime:read_output(Inst),
+    {Result, Out}.
+
+%% Sockets stay denied: the C API cannot enable TCP and UDP, so the grant
+%% is refused instead of being accepted and doing nothing.
+wasi_network_grant(Config) ->
+    {Server, Port} = serve(~"pong\n"),
+    Addr = "127.0.0.1:" ++ Port,
+    {{error, #{class := exit, status := 1}}, <<"refused: ", _/binary>>} = net(
+        Config, ["tcp", Addr], #{}
+    ),
+    {{error, #{class := exit}}, <<"refused: ", _/binary>>} =
+        net(Config, ["tcp", Addr], #{network => none}),
+    {{error, #{class := exit}}, <<"refused: ", _/binary>>} = net(
+        Config, ["resolve", "localhost"], #{}
+    ),
+    {error, #{class := wasi, kind := unavailable}} = wasmtime:instantiate(
+        component(Config, "net"), #{
+            wasi => #{network => all}
+        }
+    ),
+    exit(Server, kill),
+    ok.
+
+%% `wasi:http` is not linked unless `http => all`, and does not need the
+%% network grant: Wasmtime makes the request, not the guest's sockets.
+wasi_http_grant(Config) ->
+    case wasmtime:features() of
+        #{wasi_http := true} ->
+            {Server, Port} = serve(~"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n"),
+            Args = ["127.0.0.1:" ++ Port, "/"],
+            {error, #{class := link}} = wasmtime:instantiate(component(Config, "httpget"), #{
+                wasi => #{args => ["httpget" | Args]}
+            }),
+            {ok, ~"204\n"} = command(Config, "httpget", Args, #{http => all}),
+            {ok, ~"idle\n"} = command(Config, "httpget", [], #{http => all}),
+            exit(Server, kill),
+            ok;
+        _ ->
+            {error, #{class := wasi, kind := unavailable}} = wasmtime:instantiate(
+                component(Config, "httpget"), #{wasi => #{http => all}}
+            ),
+            ok
+    end.
+
+wasi_grants_refused(Config) ->
+    %% a core module has no WASI 0.2 to grant http on
+    {ok, Core} = wasmtime:compile({wat, ~"(module)"}),
+    case wasmtime:features() of
+        #{wasi_http := true} ->
+            {error, #{class := wasi, kind := unsupported}} =
+                wasmtime:instantiate(Core, #{wasi => #{http => all}});
+        _ ->
+            ok
+    end,
+    {error, #{class := wasi, kind := unavailable}} =
+        wasmtime:instantiate(Core, #{wasi => #{network => all}}),
+    {ok, _} = wasmtime:instantiate(Core, #{wasi => #{network => none, http => none}}),
+    %% no grant by address
+    try
+        wasmtime:instantiate(component(Config, "net"), #{wasi => #{network => [{~"127.0.0.1", 80}]}})
+    of
+        Other -> ct:fail({accepted, Other})
+    catch
+        error:function_clause -> ok
+    end,
     ok.

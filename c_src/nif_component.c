@@ -162,6 +162,11 @@ static linker_entry_t *build_centry(module_res_t *m, ErlNifEnv *env, ERL_NIF_TER
 #if NIF_HAVE_WASI
     e = wasmtime_component_linker_add_wasip2(le->clinker);
     if (!e && monotonic) e = refuse_wall_clock(le->clinker);
+#ifdef WASMTIME_FEATURE_WASI_HTTP
+    /* bit 1 of `wasi`: `http => all` was given (WASI_GRANT_HTTP in
+     * nif_instantiate.c, which refuses it on a build without wasi:http) */
+    if (!e && (wasi & 2)) e = wasmtime_component_linker_add_wasi_http(le->clinker);
+#endif
     if (e) *err = error_to_term(out, e, "wasi");
 #else
     (void)monotonic;
@@ -183,9 +188,8 @@ static linker_entry_t *build_centry(module_res_t *m, ErlNifEnv *env, ERL_NIF_TER
 ERL_NIF_TERM component_instantiate(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM imports, int wasi,
                                    int monotonic, ErlNifEnv *out) {
   module_res_t *m = inst->wasm.mod;
-  ERL_NIF_TERM key =
-      enif_make_tuple4(env, mk_atom(env, "component"), imports, wasi ? atom_true : atom_false,
-                       monotonic ? atom_true : atom_false);
+  ERL_NIF_TERM key = enif_make_tuple4(env, mk_atom(env, "component"), imports,
+                                      enif_make_int(env, wasi), monotonic ? atom_true : atom_false);
   ERL_NIF_TERM err = 0;
   pthread_mutex_lock(&m->mu);
   linker_entry_t *le = m->linkers;

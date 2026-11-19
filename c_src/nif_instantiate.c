@@ -19,15 +19,31 @@ static char *bin_to_cstr(ErlNifEnv *env, ERL_NIF_TERM t) {
  * clocks and the shadowed stdio functions, goes to *monotonic and the
  * inbox flags; the WASI functions themselves are in the shared linker.
  *
- * Wasi :: none | #{args, env, dirs, stdin, stdout, stderr, output_limit, clocks}
+ * Wasi :: none | #{args, env, dirs, stdin, stdout, stderr, output_limit, clocks,
+ *                  network, http}
  * (wasi_options/1 in wasmtime.erl fills every key)
  * args  :: inherit | [binary()]     env :: inherit | [{binary(), binary()}]
  * stdin :: none | inherit | stream | {file, Path} | {binary, Bytes}
  * stdout, stderr :: none | inherit | stream | {file, Path} | capture
  * dirs  :: [{GuestPath, HostPath, read | write}]
- * clocks :: all | monotonic */
+ * clocks :: all | monotonic
+ * network, http :: none | all. `http` is an explicit grant and all or
+ * nothing: the C API has no hook on an outgoing request. `network => all`
+ * is refused: Wasmtime 48's WasiCtxBuilder starts with TCP and UDP off
+ * (its derived Default, against its own documentation) and the C API has
+ * wasi_config_inherit_network, which only opens the address check, but no
+ * allow_tcp or allow_udp. A Wasmtime bump must look again (RELEASING.md).
+ * *grants gets WASI_GRANT_HTTP. */
+#define WASI_GRANT_HTTP 2
+static int grant_of(ErlNifEnv *env, ERL_NIF_TERM wasi, const char *key, int *granted) {
+  ERL_NIF_TERM v;
+  if (!enif_get_map_value(env, wasi, mk_atom(env, key), &v)) return 0;
+  *granted = enif_is_identical(v, atom_all);
+  return *granted || enif_is_identical(v, atom_none);
+}
+
 static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *out,
-                                   ERL_NIF_TERM wasi, int *monotonic) {
+                                   ERL_NIF_TERM wasi, int *monotonic, int *grants) {
   ERL_NIF_TERM t[8];
   const ERL_NIF_TERM keys[8] = {atom_args,   atom_env,    atom_dirs,         atom_stdin,
                                 atom_stdout, atom_stderr, atom_output_limit, atom_clocks};
@@ -35,9 +51,20 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
   for (int i = 0; i < 8; i++)
     if (!enif_get_map_value(env, wasi, keys[i], &t[i]))
       return mk_error_s(out, "wasi", "config", "wasi option is malformed");
+  int network = 0, http = 0;
+  if (!grant_of(env, wasi, "network", &network) || !grant_of(env, wasi, "http", &http))
+    return mk_error_s(out, "wasi", "config", "wasi network and http must be none or all");
 #if !NIF_HAVE_WASI
   return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
 #else
+#ifndef WASMTIME_FEATURE_WASI_HTTP
+  if (http)
+    return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no wasi:http");
+#endif
+  if (network)
+    return mk_error_s(out, "wasi", "unavailable",
+                      "the Wasmtime C API cannot enable TCP and UDP for a guest");
+  *grants = http ? WASI_GRANT_HTTP : 0;
 
   wasi_config_t *cfg = wasi_config_new();
   const char *err = NULL;
@@ -195,6 +222,9 @@ done:
     wasmtime_error_delete(werr);
     return mk_error_s(out, "wasi", "config", "wasi could not be configured");
   }
+#ifdef WASMTIME_FEATURE_WASI_HTTP
+  if (http) wasmtime_context_set_wasi_http(inst->wasm.ctx);
+#endif
   return 0;
 #endif
 }
@@ -487,19 +517,26 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
   ERL_NIF_TERM err;
   if ((err = parse_options(inst, env, req->opts, &o, out))) return err;
   configure_store(inst, &o);
-  int monotonic = 0, wasi = !enif_is_identical(o.wasi, atom_none);
-  if ((err = configure_wasi(inst, env, out, o.wasi, &monotonic))) return err;
+  int monotonic = 0, grants = 0, wasi = !enif_is_identical(o.wasi, atom_none);
+  if ((err = configure_wasi(inst, env, out, o.wasi, &monotonic, &grants))) return err;
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
   if (inst->wasm.mod->comp) {
     /* WASI 0.2 reads the same context; the preview 1 stdout terminal rule
      * has no counterpart there (docs/design.md, "Streams") */
     inst->wasm.component = 1;
+    /* `wasi` carries WASI_GRANT_HTTP to the linker: wasi:http is linked only
+     * when it was granted, so the linker cache keys on it */
+    wasi |= grants & WASI_GRANT_HTTP;
     if ((err = component_instantiate(inst, env, o.imports, wasi, monotonic, out))) return err;
     stdin_pump_start(inst);
     inst->wasm.instantiated = 1;
     return atom_ok;
   }
 #endif
+  /* preview 1 has no wasi:http */
+  if (grants)
+    return mk_error_s(out, "wasi", "unsupported",
+                      "http is for components (WASI 0.2), not core modules");
   if ((err = link_entry(inst, env, o.imports, wasi, monotonic, out))) return err;
   if ((err = instantiate_module(inst, out))) return err;
   cache_memory(inst);

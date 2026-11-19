@@ -47,7 +47,10 @@ that compiles the shims, the precompiled fixtures.
    machine; commit the 14 files in `priv/shims/`. The flags in the script
    must match `make_config()` in `c_src/nif_engine.c`; `shim_files_load`
    in the tests fails when they drift.
-6. Check the C API for changes that matter here: `wasmtime/conf.h`
+6. Look for `wasi_config_allow_tcp` or an equivalent in `wasi.h`: when the
+   C API can turn TCP and UDP on, `network => all` can stop being refused
+   (`configure_wasi` in `c_src/nif_instantiate.c`).
+   Check the C API for changes that matter here: `wasmtime/conf.h`
    feature macros, the `wasmtime_val_t` layout, the reference API
    (`*_unroot` signatures), `wasi.h` stdio hooks, the component value
    conversions (which strings and chars they unwrap). `docs/design.md`

@@ -2,8 +2,9 @@
 
 Built binaries, so the suite needs no Rust toolchain.
 
-- `clocks.component.wasm`: from `test/fixtures/components/clocks`, built by
-  `scripts/build-component-fixtures.sh`.
+- `clocks`, `net` and `httpget`: from `test/fixtures/components/<name>`,
+  built by `scripts/build-component-fixtures.sh`. `net` opens a TCP socket
+  or resolves a name, `httpget` sends a GET through `wasi:http`.
 - The others come from erlang_wasm (`test/fixtures/component/<name>`, built
   by its `scripts/build-component-fixture.sh`, commit 0332a17), so both
   runtimes are tested against the same guests and the same expected terms:

@@ -209,7 +209,11 @@ may have no `wat` or `wasi`; `components` says whether it can load
 components. See building.md, "Runtime-only builds".
 """.
 -type features() :: #{
-    compiler := boolean(), wat := boolean(), wasi := boolean(), components := boolean()
+    compiler := boolean(),
+    wat := boolean(),
+    wasi := boolean(),
+    components := boolean(),
+    wasi_http := boolean()
 }.
 
 -doc """
@@ -304,6 +308,14 @@ WASI configuration. Nothing is granted by default.
   reads the host's monotonic clock and every other clock (wall time,
   process and thread CPU time) answers `ENOTCAPABLE`, so it cannot learn the
   date or time of day.
+- `http`: `none` (the default) or `all`. With `all` a component gets
+  `wasi:http/outgoing-handler` and may send requests to any server;
+  Wasmtime makes the request, and there is no rule per address. Full builds
+  only (`features/0`, `wasi_http`). A core module answers `kind =>
+  unsupported`.
+- `network`: `none`. Sockets cannot be granted: `all` answers `kind =>
+  unavailable`, because the Wasmtime C API has no way to enable TCP and UDP
+  for a guest.
 """.
 -type wasi_options() :: #{
     args => inherit | [iodata()],
@@ -313,7 +325,9 @@ WASI configuration. Nothing is granted by default.
     stdout => none | inherit | stream | {file, iodata()} | capture,
     stderr => none | inherit | stream | {file, iodata()} | capture,
     output_limit => pos_integer(),
-    clocks => all | monotonic
+    clocks => all | monotonic,
+    network => none | all,
+    http => none | all
 }.
 
 -doc """
@@ -930,8 +944,14 @@ wasi_options(Wasi) when is_map(Wasi) ->
         stdout => stdio(maps:get(stdout, Wasi, none)),
         stderr => stdio(maps:get(stderr, Wasi, none)),
         output_limit => maps:get(output_limit, Wasi, ?DEFAULT_OUTPUT_LIMIT),
-        clocks => clocks(maps:get(clocks, Wasi, all))
+        clocks => clocks(maps:get(clocks, Wasi, all)),
+        network => grant(maps:get(network, Wasi, none)),
+        http => grant(maps:get(http, Wasi, none))
     }.
+
+%% Grants are all or nothing: see `t:wasi_options/0`.
+grant(none) -> none;
+grant(all) -> all.
 
 clocks(all) -> all;
 clocks(monotonic) -> monotonic.

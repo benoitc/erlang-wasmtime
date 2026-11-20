@@ -124,8 +124,8 @@ An adapter is a module with the `wasmtime_worker_adapter` behaviour: it
 loads what it runs (`artifact/1`), says what a request needs
 (`requirements/2`), stages files and names the calls to make (`prepare/3`),
 says what each call's result means (`classify/2`) and turns what happened
-into an answer (`decode/2`). `src/wasmtime_javascript_command.erl` is 150
-lines and a good start; `test/wasmtime_test_adapter.erl` runs plain exports
+into an answer (`decode/2`). `src/wasmtime_javascript_command.erl` is short
+and a good start; `test/wasmtime_test_adapter.erl` runs plain exports
 without a script.
 
 What differs from an erlang_wasm adapter: WASI is an instantiate option
@@ -134,6 +134,9 @@ spec, without `stdout` and `stderr`, which the worker captures.
 
 ## Notes
 
+- A request that returns a constant takes about 7 ms with wasmedge-quickjs
+  on an M4 Pro (20 requests in a row, one worker): the engine starts for
+  each one.
 - Each request runs the interpreter from its start. The adapters that start
   it once and restore a snapshot per request (erlang_wasm's `wasm_javascript`,
   `wasm_python`, `wasm_lua`) are not here yet; see [features](features.md),

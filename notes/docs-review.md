@@ -312,3 +312,14 @@ Before publishing 0.3.0, documentation only:
 After the release: `design.md` navigation rows, `features.md` split,
 `concepts.md`, the `nif.h` comment with the next C change, and the
 `wasmtime_snapshot` move if wanted.
+
+### Decisions (2026-11-20)
+
+The maintainer asked for the doc fixes and the release in one pull request.
+Done on `docs-review-0.3.0`: the README summary and application note, the
+note in `getting-started.md`, the cross-links (javascript and python to
+scripting, preinit to snapshots), the new error tables in
+`troubleshooting.md`. The snippets of `scripting.md` were run against
+wasmedge-quickjs and CPython and pass; the 0.1 ms claim in `worker.md` is
+removed. CHANGELOG dated 2026-11-20. The items listed "after the release"
+stay open.

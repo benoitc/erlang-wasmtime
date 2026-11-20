@@ -8,6 +8,10 @@ of the 124 ms it takes CPython to start. You need it when every request must
 run in a fresh instance (nothing leaks between requests) and the guest has an
 expensive start: an interpreter, a large runtime, imports to load.
 
+`preinit/3` works from a module's bytes, at build time. To capture an
+instance that is already running in the node, use
+[snapshots](snapshots.md), which are built on the same mechanism.
+
 ## Capture the started guest, once
 
 ```erlang

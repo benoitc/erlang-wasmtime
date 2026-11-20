@@ -5,6 +5,12 @@ the sandbox: no filesystem, no network, no host access unless you grant it,
 and a time and memory limit per run. You need it when logic has to change
 without a deploy and the people writing it will write JavaScript, not Erlang.
 
+This page drives the engine yourself: you choose its arguments, keep it
+running and talk to it over streams. If you only need "run this source with
+this context and give me the result", one sandbox per request,
+[`wasmtime_script_worker`](scripting.md) does it for you; it uses another
+QuickJS build than the one below.
+
 ## Get the engine
 
 quickjs-ng publishes a WASI build with every release:

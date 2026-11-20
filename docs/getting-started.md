@@ -14,6 +14,15 @@ the build.
 Run `rebar3 compile`. The first build downloads the Wasmtime C API and builds
 `priv/wasmtime_nif.so`.
 
+Everything on this page works without starting the application. The module
+cache (`load/1,2`), [snapshots](snapshots.md) and the
+[script adapters](scripting.md) need it started; without it they answer
+`kind => not_started`:
+
+```erlang
+{ok, _} = application:ensure_all_started(erlang_wasmtime).
+```
+
 ## Compile a module
 
 From a binary:

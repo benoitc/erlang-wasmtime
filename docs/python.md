@@ -5,6 +5,10 @@ the standard library, no filesystem beyond what you grant, no network, and a
 time and memory cap per run. You need it when the logic arrives as Python and
 must not be able to reach the host.
 
+This page drives the interpreter yourself. If you only need "run this
+source with this context and give me the result", one sandbox per request,
+[`wasmtime_script_worker`](scripting.md) does it for you.
+
 This is not Pyodide. Pyodide is CPython built with Emscripten for browsers
 and Node: its runtime is JavaScript, so it needs a JavaScript host and cannot
 load into Wasmtime. The build below is CPython's own `wasm32-wasi` target,

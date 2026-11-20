@@ -45,6 +45,18 @@ all come back as `{error, #{class => ..., kind => ..., message => ...}}`.
 - Runtime-only builds: `WASMTIME_RUNTIME_ONLY=1` gives a 4 MB NIF without the
   compiler for nodes that only load precompiled modules.
 - Host functions served by the caller or by a dedicated process.
+- erlang_wasm's API: `instantiate/3`, `get_global/2`, `load/1,2`,
+  `wasmtime_limits`, so code written for one runtime reads the same on the
+  other.
+- A cache of compiled modules for the node: `load/1,2` compiles the same
+  bytes once.
+- Workers: `wasmtime_instance_worker` runs one instance in a process with a
+  deadline per request and a fresh instance each time.
+- Snapshots: capture a running instance, restore it per request, keep the
+  image on disk.
+- Script hosting: `wasmtime_script_worker` runs your users' JavaScript and
+  Python, one sandbox, one directory and one deadline per request.
+- Host resources and outgoing HTTP for components.
 - Streams: a long-running guest reads what `send/2` queues and its writes
   arrive as messages, through stdin/stdout for stock WASI programs or the
   `erlang` imports for modules you build.
@@ -62,6 +74,11 @@ from source with `git`, `cmake` and Rust. See [docs/building.md](docs/building.m
 for offline builds, runtime-only builds and supported platforms.
 
 Requires OTP 27 or later.
+
+`erlang_wasmtime` is an application. Compiling, instantiating and calling
+work without it started. `load/1,2`, snapshots and the script adapters need
+it: a release starts it for you, a shell needs
+`application:ensure_all_started(erlang_wasmtime)`.
 
 ## Documentation
 

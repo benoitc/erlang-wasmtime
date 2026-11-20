@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-11-20)
 
 Components and WASI 0.2, with erlang_wasm's term mapping: a componentize-py
 agent per request in 0.75 ms on an M4 Pro, 1.27 ms on a 4-vCPU x86_64

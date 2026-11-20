@@ -241,3 +241,85 @@ After the release:
   `docs-review`.
 - CHANGELOG: 0.3.0 is marked unreleased until the publish day.
 - Open: questions 2 to 5.
+
+## Update for the 0.3.0 release (2026-11-20)
+
+Reviewed: `main` at 7d4a353, after the erlang_wasm parity work (PR #12).
+What changed since the first review: twelve new modules in `src/` (4,500
+lines against 1,970), four new guides (`worker.md`, `snapshots.md`,
+`scripting.md`, sections in `wasi.md` and `components.md`), an application
+and a supervisor, three new suites (14 in all, all listed in CONTRIBUTING).
+
+### Fixed since the first review
+
+The stale statements of section 14 step 1, except the `nif.h` header
+comment. The component entries in `troubleshooting.md`. `AGENTS.md` follows
+erlang_quic's layout and lists every module by layer.
+
+### New findings
+
+| Where | Problem | Kind |
+|---|---|---|
+| `README.md`, "What you get" | Nothing about the module cache, workers, snapshots, script hosting, host resources or the erlang_wasm names: the main additions of 0.3.0. The documentation list has them, the summary does not. | documentation |
+| `README.md`, `docs/getting-started.md` | Neither says that `erlang_wasmtime` is now an application, nor which functions need it started (`load/1,2`, snapshots, the script adapters). A reader meets `kind => not_started` first. | documentation |
+| `docs/javascript.md`, `docs/python.md` against `docs/scripting.md` | Two ways to run a script and no page says which to pick. The recipes use quickjs-ng's `qjs-wasi.wasm` and a streamed long-lived guest; the script worker uses wasmedge-quickjs and one instance per request. Each needs one sentence pointing at the other. | navigation |
+| `docs/preinit.md` against `docs/snapshots.md` | Same question, answered only in `snapshots.md`. `preinit.md` should point back. | navigation |
+| `docs/design.md`, "Where things are" | No row for the Erlang modules added: module cache, limits, instance worker, script worker and adapters, snapshots, host resources. The table is still C-first. | navigation |
+| `docs/scripting.md` | Says the JavaScript adapter is 150 lines; it is 170. Its snippets were not run against the code. | documentation |
+| `docs/worker.md`, last notes | "about 0.1 ms" for a fresh instance per request with a pool and a pre-initialized module is taken from the instantiate figure in `throughput.md`, not measured through the worker. | documentation |
+| `docs/features.md` | 176 lines, one table of 40 rows whose cells run to 300 characters. It was a status page; it is now the only place several functions are listed. Split "Implemented" by area (modules, instances, components, WASI, workers) or cut cells to one line with a link. | documentation |
+| `c_src/nif.h` header | Still calls itself `wasmtime_nif.c`. Left from the first review. | documentation |
+| `docs/troubleshooting.md` | No entries for the new error classes: `snapshot`, the worker errors (`class => worker / adapter / runtime`), `cache_full`, `not_started`, `invalid_limits`. | documentation |
+
+Still open from the first review, unchanged: `docs/concepts.md` (now more
+needed: "worker", "runner", "adapter", "image", "claim", "host resource"
+joined the vocabulary), the "Follow one call" diagram, the "If you want
+to" entries in CONTRIBUTING.
+
+### Size and responsibilities
+
+| Module | Lines | Exports | Reading |
+|---|---|---|---|
+| `src/wasmtime.erl` | 1,566 (was 1,062) | 82 (was 62) | Still one responsibility, the public API, and more than half is `-doc`. It now also holds the snapshot record and its file format, about 150 lines that are a mechanism and not a wrapper. Candidate to move to a `wasmtime_snapshot` module behind the same exported functions. Primary problem: module organisation, mild. |
+| `src/wasmtime_script_worker.erl` | 593 | 12 | Two things in one file: the gen_server (state, await rules) and the runner (admit, stage, instantiate, invoke). The split is marked by a banner and stated in the design note. Fine for now; the runner is the part that will grow. |
+| `src/wasmtime_preinit.erl` | 669 | 4 | Unchanged in shape; two passes exported for snapshots. Fine. |
+| `src/wasmtime_module_cache.erl` | 272 | 7 | One responsibility. It also keeps sources and the prepared form for snapshots, which the header does not say. |
+
+No function is over 50 lines. Counts come from pattern matches.
+
+### Questions for the maintainer
+
+1. `RELEASING.md` step 4 tags `v<version>` and step 5 publishes to Hex.
+   Who does each for 0.3.0?
+2. The release ships script workers without the snapshot adapters and the
+   reaper (accepted for PR #12). Should the README say "first version" for
+   script hosting, or is the "Deferred" list enough?
+3. `wasmtime.erl`: move the snapshot record and file format out now, or
+   leave it?
+
+### Suggested order
+
+Before publishing 0.3.0, documentation only:
+
+1. README: "What you get" for 0.3.0, and the application note with the
+   three things that need it started. Same note in `getting-started.md`.
+2. The four cross-links: javascript and python to scripting, preinit to
+   snapshots.
+3. `troubleshooting.md`: the new error classes.
+4. `scripting.md`: run its snippets, fix the line count. `worker.md`: drop
+   or measure the 0.1 ms.
+
+After the release: `design.md` navigation rows, `features.md` split,
+`concepts.md`, the `nif.h` comment with the next C change, and the
+`wasmtime_snapshot` move if wanted.
+
+### Decisions (2026-11-20)
+
+The maintainer asked for the doc fixes and the release in one pull request.
+Done on `docs-review-0.3.0`: the README summary and application note, the
+note in `getting-started.md`, the cross-links (javascript and python to
+scripting, preinit to snapshots), the new error tables in
+`troubleshooting.md`. The snippets of `scripting.md` were run against
+wasmedge-quickjs and CPython and pass; the 0.1 ms claim in `worker.md` is
+removed. CHANGELOG dated 2026-11-20. The items listed "after the release"
+stay open.

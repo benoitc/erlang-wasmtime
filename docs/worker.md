@@ -81,8 +81,8 @@ Workers = [element(2, wasmtime_instance_worker:start_link(Mod, Opts)) || _ <- li
   request, `kind => worker_died`. Neither raises.
 - A module whose start section fails, or limits that are not valid, stop
   the worker with `{instantiate_failed, Error}`.
-- `fresh` costs one `destroy/1` and one instantiation per request. With a
-  pooled engine and a pre-initialized module that is about 0.1 ms; see
-  [pre-initialization](preinit.md).
+- `fresh` costs one `destroy/1` and one instantiation per request. A pooled
+  engine and a pre-initialized module keep that small; see
+  [pre-initialization](preinit.md) and [throughput](throughput.md).
 - `info/1` answers `#{served, isolation, name}`. `name` is a label and the
   process label in `observer`; the process is not registered under it.

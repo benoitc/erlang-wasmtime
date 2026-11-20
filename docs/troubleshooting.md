@@ -71,6 +71,31 @@ to look up here. Build problems show up as `rebar3 compile` output.
 | `clock_refused` | the guest read the wall clock under `clocks => monotonic` | drop the option, or keep the guest off the wall clock |
 | streamed stdout arrives late or in one piece | a component's stdout is never a terminal, so its C library buffers it | flush in the guest |
 
+## Module cache, limits and snapshots
+
+| `kind` | Meaning | Do |
+|---|---|---|
+| `not_started` on `load/1,2` | the application is not started | `application:ensure_all_started(erlang_wasmtime)` |
+| `cache_full` | 256 modules are loaded and none was unloaded | `unload/1` what you no longer use, or raise `max_resident_modules` |
+| `invalid_limits` | a limit of the wrong type, or one this runtime cannot enforce (`max_depth`, `max_heap_words`, `max_host_calls`) | use the keys of `wasmtime_limits` |
+| `not_snapshotable` | the instance was made without `snapshotable => true`, or restored from an image | instantiate again with the option |
+| `module_not_loaded` on `snapshotable => true` or `load_snapshot/2` | the module came from `compile/1,2` | use `load/1,2` |
+| `snapshot_incompatible` | another `compatibility_key`, or an image file of another module | restore with the key it was captured with; load the image for the module it came from |
+| `class => preinit, kind => table_changed` on `snapshot/1,2` | a table changed since the instance was made | a snapshot carries memories and globals only |
+
+## Workers
+
+| `kind` | Meaning | Do |
+|---|---|---|
+| `no_worker`, `worker_died` | the worker process is gone, or died during the request | restart it; a supervisor does |
+| `timeout` | the request ran past its deadline and the guest was interrupted | raise `timeout` in the worker's `limits`, or the deadline of `call/4` |
+| `busy` | a script worker runs one request at a time | wait, or run a pool |
+| `insufficient_limit` | the request needs more than the worker's limits; `ctx.limit` names which | raise that limit; CPython needs `timeout` and `max_memory_pages` raised |
+| `output_limit` | the script wrote more than `max_output_bytes` | raise it, or print less |
+| `adapter_failure` with `ctx.code` `exception` | the script raised | the message is the script's |
+| `runtime_failure` | a trap or a link error; `ctx.error` is the runtime's error | look that error up on this page |
+| `{artifact_failed, Error}` from `start_link/2` | the adapter could not load its engine | check `path`; start the application |
+
 ## Reading a trap
 
 ```erlang

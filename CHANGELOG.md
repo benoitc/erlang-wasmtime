@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Wasmtime 51.0.0. Modules and components precompiled with an earlier
+  version are refused: precompile them again.
+- Modules using the wide arithmetic proposal (128-bit integer operations)
+  now compile.
+
 ## 0.3.0 (2026-11-20)
 
 Components and WASI 0.2, with erlang_wasm's term mapping: a componentize-py

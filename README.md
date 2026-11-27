@@ -22,7 +22,7 @@ all come back as `{error, #{class => ..., kind => ..., message => ...}}`.
 
 ## What you get
 
-- Native execution: Wasmtime 48, statically linked into one NIF.
+- Native execution: Wasmtime 51, statically linked into one NIF.
 - Host functions: an import backed by an Erlang fun, run in the calling process.
 - Isolation by default: no WASI, no filesystem, no host functions and a 256 MB
   memory cap unless you grant more. Each instance has its own store, memory and

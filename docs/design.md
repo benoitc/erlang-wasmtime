@@ -225,7 +225,7 @@ worker thread, the same queue, host calls through `host_exchange`,
   `{<<>>, Function}` at the root. The key sent to Erlang is the one the
   caller wrote.
 - `clocks => monotonic` puts two functions in front of Wasmtime's
-  `WALL_CLOCK` (`wasi:clocks/wall-clock@0.2.12`, the version Wasmtime 48
+  `WALL_CLOCK` (`wasi:clocks/wall-clock@0.2.12`, the version Wasmtime 51
   defines); they set `clock_refused` and fail the call. A Wasmtime bump
   must check the constant (RELEASING.md).
 - Resources are integer handles into `wasm.res`, owned clones of
@@ -428,7 +428,7 @@ A NIF runs in the VM's address space. What remains after the guards above:
 |---|---|
 | A panic in Wasmtime | the C API is built with `panic = abort`; a Rust panic cannot unwind into C |
 | Host memory exhausted inside Wasmtime (compiling a large module, creating a store) | Rust aborts on a failed allocation |
-| A C API call that aborts on an input it does not support | `wasm_valtype_kind` is the known one and is never called; new calls must be checked for the same |
+| A C API call that aborts on an input it does not support | `wasm_valtype_kind` is never called, and a GC reference from another instance is refused before the call (Wasmtime aborts on it); new calls must be checked for the same |
 | A memory-safety bug in the NIF | the ASan run (CONTRIBUTING.md) is the guard |
 | The pool's address space taken by something else between `pool_fits` and `Engine::new` | the probe and the reservation are two calls |
 

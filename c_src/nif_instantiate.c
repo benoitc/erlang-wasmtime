@@ -29,7 +29,7 @@ static char *bin_to_cstr(ErlNifEnv *env, ERL_NIF_TERM t) {
  * clocks :: all | monotonic
  * network, http :: none | all. `http` is an explicit grant and all or
  * nothing: the C API has no hook on an outgoing request. `network => all`
- * is refused: Wasmtime 48's WasiCtxBuilder starts with TCP and UDP off
+ * is refused: Wasmtime 51's WasiCtxBuilder starts with TCP and UDP off
  * (its derived Default, against its own documentation) and the C API has
  * wasi_config_inherit_network, which only opens the address check, but no
  * allow_tcp or allow_udp. A Wasmtime bump must look again (RELEASING.md).

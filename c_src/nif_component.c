@@ -9,6 +9,38 @@
 
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
 
+/* The C API hands out an import or export as an extern, which borrows the
+ * type it came from. These take the item's own type and drop the extern at
+ * once; the name keeps pointing into the parent type. */
+static bool take_item(bool found, wasmtime_component_extern_t *x, wasmtime_component_item_t *item) {
+  if (!found) return false;
+  wasmtime_component_extern_type(x, item);
+  wasmtime_component_extern_delete(x);
+  return true;
+}
+
+static bool import_nth(const wasmtime_component_type_t *ct, const wasm_engine_t *engine, size_t i,
+                       const char **name, size_t *len, wasmtime_component_item_t *item) {
+  wasmtime_component_extern_t *x = NULL;
+  bool found = wasmtime_component_type_import_nth(ct, engine, i, name, len, &x);
+  return take_item(found, x, item);
+}
+
+static bool export_nth(const wasmtime_component_type_t *ct, const wasm_engine_t *engine, size_t i,
+                       const char **name, size_t *len, wasmtime_component_item_t *item) {
+  wasmtime_component_extern_t *x = NULL;
+  bool found = wasmtime_component_type_export_nth(ct, engine, i, name, len, &x);
+  return take_item(found, x, item);
+}
+
+static bool instance_export_nth(const wasmtime_component_instance_type_t *it,
+                                const wasm_engine_t *engine, size_t i, const char **name,
+                                size_t *len, wasmtime_component_item_t *item) {
+  wasmtime_component_extern_t *x = NULL;
+  bool found = wasmtime_component_instance_type_export_nth(it, engine, i, name, len, &x);
+  return take_item(found, x, item);
+}
+
 /* The WASI 0.2 wall clock Wasmtime defines, which `clocks => monotonic`
  * replaces. Tied to the Wasmtime version: a bump must check it
  * (RELEASING.md, "Bump Wasmtime"); wasi_clocks_component in the tests
@@ -188,7 +220,7 @@ static ERL_NIF_TERM bind_component_imports(linker_entry_t *le, module_res_t *m, 
     const char *iname;
     size_t ilen;
     wasmtime_component_item_t item;
-    if (!wasmtime_component_type_import_nth(ct, engine, i, &iname, &ilen, &item)) continue;
+    if (!import_nth(ct, engine, i, &iname, &ilen, &item)) continue;
     char *module, *name;
     if (item.kind == WASMTIME_COMPONENT_ITEM_COMPONENT_FUNC) {
       if (match_key(env, imports, "", 0, iname, ilen, &module, &name)) {
@@ -205,8 +237,7 @@ static ERL_NIF_TERM bind_component_imports(linker_entry_t *le, module_res_t *m, 
         const char *fname;
         size_t flen;
         wasmtime_component_item_t fitem;
-        if (!wasmtime_component_instance_type_export_nth(it, engine, j, &fname, &flen, &fitem))
-          continue;
+        if (!instance_export_nth(it, engine, j, &fname, &flen, &fitem)) continue;
         /* A resource the interface declares is the host's to define when
          * the caller serves that interface: an import map key names it. */
         if (fitem.kind == WASMTIME_COMPONENT_ITEM_RESOURCE &&
@@ -331,7 +362,7 @@ static wasmtime_component_export_index_t *find_export(instance_t *inst, const ch
       const char *en;
       size_t el;
       wasmtime_component_item_t item;
-      if (!wasmtime_component_type_export_nth(ct, engine, i, &en, &el, &item)) continue;
+      if (!export_nth(ct, engine, i, &en, &el, &item)) continue;
       if (el > ilen && memcmp(en, name, ilen) == 0 && en[ilen] == '@')
         parent = wasmtime_component_get_export_index(c, NULL, en, el);
       wasmtime_component_item_delete(&item);
@@ -513,8 +544,8 @@ ERL_NIF_TERM component_items(ErlNifEnv *env, module_res_t *m, int exports) {
     const char *name;
     size_t len;
     wasmtime_component_item_t item;
-    int ok = exports ? wasmtime_component_type_export_nth(ct, engine, i - 1, &name, &len, &item)
-                     : wasmtime_component_type_import_nth(ct, engine, i - 1, &name, &len, &item);
+    bool ok = exports ? export_nth(ct, engine, i - 1, &name, &len, &item)
+                      : import_nth(ct, engine, i - 1, &name, &len, &item);
     if (!ok) continue;
     if (item.kind == WASMTIME_COMPONENT_ITEM_COMPONENT_INSTANCE) {
       const wasmtime_component_instance_type_t *it = item.of.component_instance;
@@ -523,8 +554,7 @@ ERL_NIF_TERM component_items(ErlNifEnv *env, module_res_t *m, int exports) {
         const char *fname;
         size_t flen;
         wasmtime_component_item_t fitem;
-        if (!wasmtime_component_instance_type_export_nth(it, engine, j - 1, &fname, &flen, &fitem))
-          continue;
+        if (!instance_export_nth(it, engine, j - 1, &fname, &flen, &fitem)) continue;
         if (fitem.kind == WASMTIME_COMPONENT_ITEM_COMPONENT_FUNC) {
           ERL_NIF_TERM full;
           unsigned char *p = enif_make_new_binary(env, len + 1 + flen, &full);

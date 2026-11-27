@@ -52,7 +52,7 @@ case "$VARIANT" in
         FEATURES="-DWASMTIME_DISABLE_ALL_FEATURES=ON -DWASMTIME_FEATURE_WASI=ON \
 -DWASMTIME_FEATURE_ASYNC=ON -DWASMTIME_FEATURE_DISABLE_LOGGING=ON -DWASMTIME_FEATURE_GC=ON \
 -DWASMTIME_FEATURE_GC_DRC=ON -DWASMTIME_FEATURE_THREADS=ON -DWASMTIME_FEATURE_POOLING_ALLOCATOR=ON \
--DWASMTIME_FEATURE_COMPONENT_MODEL=ON"
+-DWASMTIME_FEATURE_COMPONENT_MODEL=ON -DWASMTIME_FEATURE_COMPONENT_MODEL_ASYNC=ON"
         export CARGO_PROFILE_RELEASE_OPT_LEVEL=s
         export CARGO_PROFILE_RELEASE_LTO=true
         export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
@@ -61,6 +61,10 @@ case "$VARIANT" in
     *) echo "wasmtime: unknown variant '$VARIANT' (full or runtime)" >&2; exit 1 ;;
 esac
 export CARGO_PROFILE_RELEASE_STRIP=debuginfo
+# On macOS the shared library is stripped below with Apple's strip instead:
+# some Rust releases (1.97 among them) strip with rust-objcopy, which leaves
+# the symbol string table misaligned, and Apple's linker refuses the library.
+if [ "$(uname -s)" = Darwin ]; then export CARGO_PROFILE_RELEASE_STRIP=none; fi
 TARGET_FLAGS=""
 if [ -n "${WASMTIME_TARGET:-}" ]; then
     TARGET_FLAGS="-DWASMTIME_TARGET=$WASMTIME_TARGET"
@@ -98,5 +102,8 @@ cmake -S "$SRC/crates/c-api" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
 cmake --build "$BUILD" >>"$BUILD.log" 2>&1 || { tail -20 "$BUILD.log" >&2; exit 1; }
 cmake --install "$BUILD" >>"$BUILD.log" 2>&1 || { tail -20 "$BUILD.log" >&2; exit 1; }
 [ -f "$PREFIX/include/wasmtime.h" ] || { echo "wasmtime: build produced no headers" >&2; exit 1; }
+if [ "$(uname -s)" = Darwin ] && [ -f "$PREFIX/lib/libwasmtime.dylib" ]; then
+    /usr/bin/strip -S "$PREFIX/lib/libwasmtime.dylib"
+fi
 [ "$VARIANT" = runtime ] && rm -f "$PREFIX/lib/libwasmtime.a"
 echo "$PREFIX"

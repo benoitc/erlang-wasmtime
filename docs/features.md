@@ -22,6 +22,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Explicit teardown | `destroy/1`: stops the instance and frees its store (and pool slot) before returning |
 | Text to binary | `wat2wasm/1` (core modules and components) |
 | Components | compiled, validated, precompiled, pooled like modules; `module_kind/1`; `call/3,4` by `Export` or `Interface#Function`, `{ok, Value}`; erlang_wasm's term mapping for every WIT value; host imports keyed `{Interface, Function}` (raw `{ok, [V]}` funs or erlang_wasm's typed `import_fun/2`); resources as integer handles, `drop_resource/2,3`; see [components](components.md) |
+| WASI 0.3 | linked beside 0.2 for components with a `wasi` option, on libraries with this project's patches (`features/0`, `wasi_p3`): commands through `run/1,2`, the same options, `wasi:http` client under `http => all`; see [WASI 0.3](wasi-0-3.md) |
 | Component async | `async func` exports through `call/3,4` and `async func` imports as host functions, on libraries with this project's patches (`features/0`, `component_async`); see [components](components.md) |
 | Host resources | a `resource` in an interface the import map serves is the host's: `wasmtime_component:host_new/2,3`, `host_get/1`, `host_update/2`, `host_drop/1`, `host_live/0`; the guest's drop removes the entry, or calls your `[resource-drop]<name>` fun |
 | WASI 0.2 | for components with a `wasi` option: the same keys as preview 1, `run/1,2`, streamed stdin and stdout, `clocks => monotonic` traps the wall clock (`kind => clock_refused`); `http => all` grants `wasi:http/outgoing-handler` to any server, on full builds; `network => all` grants `wasi:sockets` |
@@ -35,7 +36,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | References across the boundary | `funcref`, `externref` and GC values as `ref()` terms, `null`, `{i31, N}`: in calls, host signatures, globals and tables; `externref/2` wraps a term; `call_ref/3,4`; `struct_get/set`, `array_len/get/set`; `gc/1`; see [references](references.md) |
 | WASI stdio in memory | `stdin => {binary, _}`, `stdout`/`stderr => capture` with `read_output/1` and `output_limit`; `args`/`env => inherit` |
 | Streams | `send/2`, `close/1`, `inbox_limit`; `stdin`/`stdout`/`stderr => stream` (a streamed stdout looks like a terminal to the guest, so lines leave as written); the `erlang.send` and `erlang.recv` imports; `{wasmtime_stream, Ref, Kind, Bytes}` to the `stream` process; see [streams](streams.md) |
-| Runtime-only builds | `WASMTIME_RUNTIME_ONLY=1`: no compiler, 4 MB; `features/0` reports the linked library's capabilities; see [building](building.md) |
+| Runtime-only builds | `WASMTIME_RUNTIME_ONLY=1`: no compiler, about 7 MB; `features/0` reports the linked library's capabilities; see [building](building.md) |
 | Source build fallback | a platform without a prebuilt archive compiles the C API itself |
 | WASI preview 1 | args, env, preopened dirs with read or write, stdio to file or inherited; `clocks => monotonic` refuses wall and CPU clocks with `ENOTCAPABLE` |
 | Snapshots | `snapshot/1,2` of an instance made with `snapshotable => true`, `restore/3`, `snapshot_info/1`, `save_snapshot/2`, `load_snapshot/2`, `compatibility_key`; core modules, memories and mutable globals; see [snapshots](snapshots.md) |
@@ -145,10 +146,9 @@ feature is missing the runtime says so with an error; it does not approximate.
 - **Instruction scan in `preinit/3`.** Wizer refuses modules whose code
   holds `data.drop` or `elem.drop`; `preinit/3` compares tables instead and
   does not read code. See [preinit](preinit.md), "Notes".
-- **Streams, futures and WASI 0.3.** `stream`, `future` and
+- **Streams and futures across the boundary.** `stream`, `future` and
   `error-context` values are refused with `kind => badarg`: the C API cannot
-  represent them. The WASI 0.3 hosts are not linked yet. erlang_wasm has
-  both.
+  represent them. erlang_wasm passes streams and futures.
 - **`preinit/3` for components.** Core modules only; componentize-py
   pre-initializes what it builds.
 - **Snapshot adapters for script workers.** erlang_wasm's `wasm_javascript`,

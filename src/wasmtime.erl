@@ -216,7 +216,8 @@ components.md). See building.md, "Runtime-only builds".
     components := boolean(),
     wasi_http := boolean(),
     wasi_sockets := boolean(),
-    component_async := boolean()
+    component_async := boolean(),
+    wasi_p3 := boolean()
 }.
 
 -doc """
@@ -614,7 +615,7 @@ import_fun(_Sig, Fun) when is_function(Fun, 1) -> Fun.
 run(Inst) -> run(Inst, #{}).
 
 -doc """
-Run a WASI 0.2 command component: call its `wasi:cli/run` export.
+Run a WASI 0.2 or 0.3 command component: call its `wasi:cli/run` export.
 
 Returns `ok` when the program ends normally. `run` answering its error
 case, or `exit` with a non-zero status, is `{error, #{class := exit,

@@ -733,22 +733,24 @@ static ERL_NIF_TERM nif_features(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
 #else
   ERL_NIF_TERM http = atom_false;
 #endif
-  ERL_NIF_TERM keys[7] = {atom_compiler,
+  ERL_NIF_TERM keys[8] = {atom_compiler,
                           atom_wat,
                           atom_wasi,
                           mk_atom(env, "components"),
                           mk_atom(env, "wasi_http"),
                           mk_atom(env, "wasi_sockets"),
-                          mk_atom(env, "component_async")};
-  ERL_NIF_TERM vals[7] = {NIF_HAVE_COMPILER ? atom_true : atom_false,
+                          mk_atom(env, "component_async"),
+                          mk_atom(env, "wasi_p3")};
+  ERL_NIF_TERM vals[8] = {NIF_HAVE_COMPILER ? atom_true : atom_false,
                           NIF_HAVE_WAT ? atom_true : atom_false,
                           NIF_HAVE_WASI ? atom_true : atom_false,
                           components,
                           http,
                           sockets_available() ? atom_true : atom_false,
-                          async_available() ? atom_true : atom_false};
+                          async_available() ? atom_true : atom_false,
+                          wasi3_available() ? atom_true : atom_false};
   ERL_NIF_TERM map;
-  enif_make_map_from_arrays(env, keys, vals, 7, &map);
+  enif_make_map_from_arrays(env, keys, vals, 8, &map);
   return map;
 }
 

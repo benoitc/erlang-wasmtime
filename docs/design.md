@@ -224,10 +224,14 @@ worker thread, the same queue, host calls through `host_exchange`,
   `{Interface, Function}` with or without the interface's version, or
   `{<<>>, Function}` at the root. The key sent to Erlang is the one the
   caller wrote.
-- `clocks => monotonic` puts two functions in front of Wasmtime's
-  `WALL_CLOCK` (`wasi:clocks/wall-clock@0.2.12`, the version Wasmtime 51
-  defines); they set `clock_refused` and fail the call. A Wasmtime bump
-  must check the constant (RELEASING.md).
+- `clocks => monotonic` puts two functions in front of each of Wasmtime's
+  wall clocks, `WALL_CLOCK` (`wasi:clocks/wall-clock@0.2.12`) and, with
+  WASI 0.3, `SYSTEM_CLOCK` (`wasi:clocks/system-clock@0.3.0`); they set
+  `clock_refused` and fail the call. A Wasmtime bump must check both names
+  (RELEASING.md).
+- WASI 0.3 hosts are added to every WASI component linker when the library
+  has them (`wasi3_available`), after the 0.2 ones: a 0.3 program built
+  through an adapter imports both. They read the same WASI context.
 - Resources are integer handles into `wasm.res`, owned clones of
   `wasmtime_component_resource_any_t`, freed with the store. A drop runs
   the guest's destructor, which is guest code, so it is a queued request
@@ -477,7 +481,7 @@ Decisions and their reasons:
 | Decision | Reason |
 |---|---|
 | Download at build time, not in the hex package | hex caps a package at 8 MB; the full C API is 15 MB |
-| Full library linked statically, runtime library shared | a static runtime build's LTO objects make an 8 MB NIF; shared it is 4 MB |
+| Full library linked statically, runtime library shared | a static runtime build's LTO objects made an 8 MB NIF against 4 MB shared (measured before component async, which with WASI 0.3 brings the shared library to 6.6 MB) |
 | Wasmtime's `min/` archives are not used | no WASI, no GC: they cannot load what the full build compiles |
 | FreeBSD full library comes from this repo's release | Wasmtime publishes none |
 | musl archives built with rustup targets and a `zig cc` wrapper | Alpine containers do not run on arm64 runners and Alpine's cargo is too old; the wrapper drops `--target=`, maps `-lgcc_s` to `-lunwind`, drops the Cortex-A53 erratum flag |

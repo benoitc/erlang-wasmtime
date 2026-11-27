@@ -26,6 +26,15 @@ int async_available(void) {
 #endif
 }
 
+/* WASI 0.3 is async: it needs the blocking calls too. */
+int wasi3_available(void) {
+#if NIF_HAVE_ASYNC_API
+  return async_available() && wasmtime_component_linker_add_wasip3 != NULL;
+#else
+  return 0;
+#endif
+}
+
 static const char *const proposal_names[NPROPOSALS] = {"simd",
                                                        "relaxed_simd",
                                                        "relaxed_simd_deterministic",

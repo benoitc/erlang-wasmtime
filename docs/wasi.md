@@ -93,6 +93,8 @@ Wasmtime's WASI with every clock.
 
 ## WASI 0.2
 
+For a component built for WASI 0.3, see [WASI 0.3](wasi-0-3.md).
+
 A [component](components.md) instantiated with a `wasi` option gets WASI
 0.2 (Wasmtime's `wasi:cli`, `wasi:io`, `wasi:clocks`, `wasi:random`,
 `wasi:filesystem`), configured by the same keys as preview 1 above. A

@@ -42,7 +42,7 @@ all come back as `{error, #{class => ..., kind => ..., message => ...}}`.
 - References as terms: `funcref`, `externref` (wrapping any Erlang term) and
   GC structs and arrays cross calls, host functions, globals and tables.
 - Precompiled modules: compile once, `deserialize/1` in milliseconds.
-- Runtime-only builds: `WASMTIME_RUNTIME_ONLY=1` gives a 4 MB NIF without the
+- Runtime-only builds: `WASMTIME_RUNTIME_ONLY=1` gives a NIF and library of about 7 MB without the
   compiler for nodes that only load precompiled modules.
 - Host functions served by the caller or by a dedicated process.
 - erlang_wasm's API: `instantiate/3`, `get_global/2`, `load/1,2`,

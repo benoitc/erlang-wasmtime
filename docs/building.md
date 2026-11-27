@@ -87,7 +87,7 @@ wasmtime-py does too, at wheel-build time instead of at compile time.
 Point the build at a directory holding `include/` and `lib/libwasmtime.a`:
 
 ```sh
-WASMTIME_C_API_DIR=/opt/wasmtime-v48.0.1-x86_64-linux-c-api rebar3 compile
+WASMTIME_C_API_DIR=/opt/wasmtime-v51.0.0-x86_64-linux-c-api rebar3 compile
 ```
 
 The directory must hold the same major version as `scripts/wasmtime.version`.
@@ -96,8 +96,8 @@ Wasmtime's C ABI changes between major releases.
 To pre-seed the cache instead, place the tarball where the script looks:
 
 ```sh
-mkdir -p _build/wasmtime/v48.0.1-r3
-cp wasmtime-v48.0.1-x86_64-linux-c-api.tar.xz _build/wasmtime/v48.0.1-r3/
+mkdir -p _build/wasmtime/v51.0.0-r1
+cp wasmtime-v51.0.0-x86_64-linux-c-api.tar.xz _build/wasmtime/v51.0.0-r1/
 ```
 
 The revision is `scripts/wasmtime-runtime.rev`.

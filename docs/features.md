@@ -8,7 +8,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Area | Status |
 |---|---|
 | Compile from binary or `.wat` text | yes, dirty CPU scheduler |
-| WebAssembly proposals | Wasmtime 48 defaults, verified by compiling probe modules: bulk memory, reference types, multi-value, SIMD, relaxed SIMD, tail calls, extended const, multi-memory, memory64, exceptions, GC and typed function references, threads and shared memories |
+| WebAssembly proposals | Wasmtime 51 defaults, verified by compiling probe modules: bulk memory, wide arithmetic, reference types, multi-value, SIMD, relaxed SIMD, tail calls, extended const, multi-memory, memory64, exceptions, GC and typed function references, threads and shared memories |
 | Instantiate with host functions | yes, function imports only; an import you give wins over the WASI function of the same name; `instantiate/3` takes the import map as erlang_wasm does, `instantiate/2` the import map or the options |
 | Call exports | yes, `i32`, `i64`, `f32`, `f64`, `v128` values |
 | Traps | reported with `class => trap` and a `kind` per Wasmtime trap code |
@@ -159,7 +159,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 - **Other script worker options.** `restore_ahead`, `compiled`, the heap
   floors, a result channel apart from stdout, and the conformance kit
   module are erlang_wasm's and have no counterpart yet.
-- **Sockets for a guest.** Wasmtime 48 starts a WASI context with TCP and
+- **Sockets for a guest.** Wasmtime 51 starts a WASI context with TCP and
   UDP off, and its C API can open the address check
   (`wasi_config_inherit_network`) but not turn them on. `network => all` is
   refused instead of being accepted without effect. erlang_wasm grants

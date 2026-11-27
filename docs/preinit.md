@@ -113,9 +113,9 @@ What a freed slot costs its next user differs too:
 
 The Linux reset finds the written pages with the `PAGEMAP_SCAN` ioctl
 (Linux 6.7 and later). Wasmtime leaves that off and its C API cannot turn
-it on, and its scan gave up after 32 dirty regions; the archives this
-project builds for Linux carry both fixes (`scripts/wasmtime-patches`).
-Measured on the same runner, CPython request total at p50:
+it on; the archives this project builds for Linux add that
+(`scripts/wasmtime-patches`).
+Measured on the same runner with Wasmtime 48, CPython request total at p50:
 
 | Slot reset | total |
 |---|---|

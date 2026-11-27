@@ -6,7 +6,7 @@ on:
   pull_request:
 
 env:
-  WASMTIME_VERSION: v48.0.1
+  WASMTIME_VERSION: v51.0.0
 
 jobs:
   static:

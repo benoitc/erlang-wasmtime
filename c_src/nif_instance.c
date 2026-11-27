@@ -21,7 +21,7 @@ static void send_result(instance_t *inst, req_t *req, ErlNifEnv *env, ERL_NIF_TE
   enif_send(NULL, &req->caller, env, msg);
 }
 
-wasmtime_error_t *epoch_callback(wasmtime_context_t *ctx, void *data, uint64_t *delta,
+wasmtime_error_t *epoch_callback(const wasmtime_context_t *ctx, void *data, uint64_t *delta,
                                  wasmtime_update_deadline_kind_t *kind) {
   instance_t *inst = data;
   if (__atomic_load_n(&inst->interrupt, __ATOMIC_ACQUIRE)) {

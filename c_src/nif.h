@@ -383,7 +383,7 @@ void cvalues_init(ErlNifEnv *env);
 int private_fifo(char *path, size_t len, int *writer);
 void private_fifo_remove(char *path);
 wasmtime_module_t *engine_shim(engine_t *e, ErlNifEnv *env, ERL_NIF_TERM shim, const char **why);
-wasmtime_error_t *epoch_callback(wasmtime_context_t *ctx, void *data, uint64_t *delta,
+wasmtime_error_t *epoch_callback(const wasmtime_context_t *ctx, void *data, uint64_t *delta,
                                  wasmtime_update_deadline_kind_t *kind);
 void *worker_main(void *arg);
 void module_dtor(ErlNifEnv *env, void *obj);

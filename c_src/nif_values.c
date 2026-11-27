@@ -20,7 +20,6 @@ void vtype_of(const wasm_valtype_t *vt, vtype_t *t) {
     case WASMTIME_HEAPTYPE_KIND_CONCRETE_FUNC:
     case WASMTIME_HEAPTYPE_KIND_NOFUNC: t->fam = FAM_FUNC; break;
     case WASMTIME_HEAPTYPE_KIND_EXN:
-    case WASMTIME_HEAPTYPE_KIND_CONCRETE_EXN:
     case WASMTIME_HEAPTYPE_KIND_NOEXN: t->fam = FAM_EXN; break;
     default: t->fam = FAM_ANY; break;
     }

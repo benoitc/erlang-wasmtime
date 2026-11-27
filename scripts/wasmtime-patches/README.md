@@ -9,11 +9,9 @@ upstream made it unnecessary.
   `PoolingAllocationConfig::pagemap_scan`, which Wasmtime leaves off and
   the C API does not expose. With it, a freed pool slot is reset by
   restoring only the pages the guest wrote (Linux 6.7+).
-- `0002-pagemap-scan-past-max-regions.patch`: the reset scan stops after 32
-  dirty regions and decommits the rest of memory, so an interpreter's
-  scattered heap writes lose the benefit and fault again on the next
-  request. The scan now continues from where the kernel stopped.
+Wasmtime 51 continues the reset scan past a full result buffer itself, which
+a second patch did for 48.
 
-Measured with CPython on a GitHub x86_64 runner: request total 2.17 ms
-against 3.26 ms (`keep_resident => 0`) or 4.49 ms (64 MB, unpatched); see
-`docs/preinit.md`.
+Measured with CPython on a GitHub x86_64 runner, on Wasmtime 48 with both
+patches: request total 2.17 ms against 3.26 ms (`keep_resident => 0`) or
+4.49 ms (64 MB, first patch only); see `docs/preinit.md`.

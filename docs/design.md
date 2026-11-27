@@ -481,7 +481,7 @@ Decisions and their reasons:
 | Decision | Reason |
 |---|---|
 | Download at build time, not in the hex package | hex caps a package at 8 MB; the full C API is 15 MB |
-| Full library linked statically, runtime library shared | a static runtime build's LTO objects make an 8 MB NIF; shared it is 4 MB |
+| Full library linked statically, runtime library shared | a static runtime build's LTO objects made an 8 MB NIF against 4 MB shared (measured before component async, which with WASI 0.3 brings the shared library to 6.6 MB) |
 | Wasmtime's `min/` archives are not used | no WASI, no GC: they cannot load what the full build compiles |
 | FreeBSD full library comes from this repo's release | Wasmtime publishes none |
 | musl archives built with rustup targets and a `zig cc` wrapper | Alpine containers do not run on arm64 runners and Alpine's cargo is too old; the wrapper drops `--target=`, maps `-lgcc_s` to `-lunwind`, drops the Cortex-A53 erratum flag |

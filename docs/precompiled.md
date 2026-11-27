@@ -95,5 +95,5 @@ side.
 - The bytes are not a WebAssembly module: `compile/1` rejects them, and
   `deserialize/1` rejects a `.wasm` file.
 - A node that only ever loads precompiled modules can be built without the
-  compiler: `WASMTIME_RUNTIME_ONLY=1 rebar3 compile`, 4 MB instead of 25.
+  compiler: `WASMTIME_RUNTIME_ONLY=1 rebar3 compile`, about 7 MB instead of 25.
   See [building](building.md), "Runtime-only builds".

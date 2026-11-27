@@ -33,8 +33,8 @@ for hosts that forbid runtime code generation.
 WASMTIME_RUNTIME_ONLY=1 rebar3 compile
 ```
 
-This links a `libwasmtime` shared library of about 4 MB, copied into `priv/` next
-to an 80 KB NIF, from this repository's releases
+This links a `libwasmtime` shared library of about 6.6 MB (macOS arm64), copied
+into `priv/` next to a 170 KB NIF, from this repository's releases
 (`wasmtime-runtime-<version>-<arch>-<os>.tar.xz`, checksums in
 `scripts/wasmtime-runtime.sha256`). It has WASI, GC and threads but no
 compiler and no text format:
@@ -45,7 +45,7 @@ compiler and no text format:
 | `deserialize/1` | yes | yes |
 | `wasi` option | yes | yes |
 | host functions, memory, interrupts | yes | yes |
-| NIF plus library | 25 MB | about 4.3 MB (macOS arm64) |
+| NIF plus library | 25 MB | about 6.8 MB (macOS arm64) |
 
 `wasmtime:features/0` reports what the linked library supports:
 

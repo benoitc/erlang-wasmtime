@@ -93,7 +93,7 @@ rebar3 xref                                      # Cross-reference analysis
 rebar3 ex_doc                                    # Docs into doc/
 rebar3 hex build                                 # Must stay under 8 MB
 WASMTIME_C_API_DIR=/path rebar3 compile          # Use a local Wasmtime C API
-WASMTIME_RUNTIME_ONLY=1 rebar3 compile           # No compiler: 4 MB shared library
+WASMTIME_RUNTIME_ONLY=1 rebar3 compile           # No compiler: 7 MB shared library
 WASMTIME_SOURCE_BUILD=1 rebar3 compile           # Build the C API from source
 escript scripts/precompile-fixtures.escript test/wasmtime_runtime_only_SUITE_data _build/cwasm
 WASMTIME_RUNTIME_ONLY=1 WASMTIME_CWASM_DIR=$PWD/_build/cwasm rebar3 ct   # runtime-only suite

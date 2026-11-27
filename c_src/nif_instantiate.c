@@ -27,14 +27,30 @@ static char *bin_to_cstr(ErlNifEnv *env, ERL_NIF_TERM t) {
  * stdout, stderr :: none | inherit | stream | {file, Path} | capture
  * dirs  :: [{GuestPath, HostPath, read | write}]
  * clocks :: all | monotonic
- * network, http :: none | all. `http` is an explicit grant and all or
- * nothing: the C API has no hook on an outgoing request. `network => all`
- * is refused: Wasmtime 51's WasiCtxBuilder starts with TCP and UDP off
- * (its derived Default, against its own documentation) and the C API has
- * wasi_config_inherit_network, which only opens the address check, but no
- * allow_tcp or allow_udp. A Wasmtime bump must look again (RELEASING.md).
- * *grants gets WASI_GRANT_HTTP. */
+ * network, http :: none | all. Both are explicit grants and all or
+ * nothing: the C API has no hook on an address or an outgoing request.
+ * `network => all` opens the address check, TCP, UDP and name lookup, for
+ * WASI 0.2 sockets; it needs the two switches this project adds to the C
+ * API (scripts/wasmtime-patches) and is refused without them.
+ * *grants gets WASI_GRANT_HTTP and WASI_GRANT_NETWORK. */
 #define WASI_GRANT_HTTP 2
+#define WASI_GRANT_NETWORK 4
+
+#if NIF_HAVE_WASI
+/* Weak: null with a library built without the patch. Wasmtime's own
+ * builder leaves TCP and UDP off. */
+extern void wasi_config_allow_tcp(wasi_config_t *, bool) __attribute__((weak));
+extern void wasi_config_allow_udp(wasi_config_t *, bool) __attribute__((weak));
+#endif
+
+int sockets_available(void) {
+#if NIF_HAVE_WASI && defined(WASMTIME_FEATURE_COMPONENT_MODEL)
+  return wasi_config_allow_tcp != NULL && wasi_config_allow_udp != NULL;
+#else
+  return 0;
+#endif
+}
+
 static int grant_of(ErlNifEnv *env, ERL_NIF_TERM wasi, const char *key, int *granted) {
   ERL_NIF_TERM v;
   if (!enif_get_map_value(env, wasi, mk_atom(env, key), &v)) return 0;
@@ -61,12 +77,20 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
   if (http)
     return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no wasi:http");
 #endif
-  if (network)
+  if (network && !sockets_available())
     return mk_error_s(out, "wasi", "unavailable",
-                      "the Wasmtime C API cannot enable TCP and UDP for a guest");
-  *grants = http ? WASI_GRANT_HTTP : 0;
+                      "this build of erlang_wasmtime cannot open sockets to a guest");
+  *grants = (http ? WASI_GRANT_HTTP : 0) | (network ? WASI_GRANT_NETWORK : 0);
 
   wasi_config_t *cfg = wasi_config_new();
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+  if (network) {
+    wasi_config_inherit_network(cfg);
+    wasi_config_allow_ip_name_lookup(cfg, true);
+    wasi_config_allow_tcp(cfg, true);
+    wasi_config_allow_udp(cfg, true);
+  }
+#endif
   const char *err = NULL;
   unsigned n;
   ERL_NIF_TERM l, h;
@@ -540,10 +564,10 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
     return atom_ok;
   }
 #endif
-  /* preview 1 has no wasi:http */
+  /* preview 1 has no wasi:http and no sockets */
   if (grants)
     return mk_error_s(out, "wasi", "unsupported",
-                      "http is for components (WASI 0.2), not core modules");
+                      "network and http are for components (WASI 0.2), not core modules");
   if ((err = link_entry(inst, env, o.imports, wasi, monotonic, out))) return err;
   if ((err = instantiate_module(inst, out))) return err;
   cache_memory(inst);

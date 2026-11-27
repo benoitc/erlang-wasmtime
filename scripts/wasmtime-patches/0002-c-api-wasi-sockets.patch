@@ -1,0 +1,48 @@
+diff --git a/crates/c-api/include/wasi.h b/crates/c-api/include/wasi.h
+index e770d38..5bcbabb 100644
+--- a/crates/c-api/include/wasi.h
++++ b/crates/c-api/include/wasi.h
+@@ -67,6 +67,22 @@ WASI_API_EXTERN void wasi_config_inherit_network(wasi_config_t *config);
+ WASI_API_EXTERN void wasi_config_allow_ip_name_lookup(wasi_config_t *config,
+                                                       bool enable);
+ 
++/**
++ * \brief Allow usage of TCP through `wasi:sockets`.
++ *
++ * By default this is disabled. Which addresses may be used is decided
++ * separately, for example by #wasi_config_inherit_network.
++ */
++WASI_API_EXTERN void wasi_config_allow_tcp(wasi_config_t *config, bool enable);
++
++/**
++ * \brief Allow usage of UDP through `wasi:sockets`.
++ *
++ * By default this is disabled. Which addresses may be used is decided
++ * separately, for example by #wasi_config_inherit_network.
++ */
++WASI_API_EXTERN void wasi_config_allow_udp(wasi_config_t *config, bool enable);
++
+ /**
+  * \brief Sets the argv list for this configuration object.
+  *
+diff --git a/crates/c-api/src/wasi.rs b/crates/c-api/src/wasi.rs
+index 731c8e6..a2f6e5e 100644
+--- a/crates/c-api/src/wasi.rs
++++ b/crates/c-api/src/wasi.rs
+@@ -54,6 +54,16 @@ pub unsafe extern "C" fn wasi_config_inherit_network(config: &mut wasi_config_t)
+     config.builder.inherit_network();
+ }
+ 
++#[unsafe(no_mangle)]
++pub extern "C" fn wasi_config_allow_tcp(config: &mut wasi_config_t, enable: bool) {
++    config.builder.allow_tcp(enable);
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn wasi_config_allow_udp(config: &mut wasi_config_t, enable: bool) {
++    config.builder.allow_udp(enable);
++}
++
+ #[unsafe(no_mangle)]
+ pub unsafe extern "C" fn wasi_config_allow_ip_name_lookup(
+     config: &mut wasi_config_t,

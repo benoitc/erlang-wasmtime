@@ -9,6 +9,11 @@ upstream made it unnecessary.
   `PoolingAllocationConfig::pagemap_scan`, which Wasmtime leaves off and
   the C API does not expose. With it, a freed pool slot is reset by
   restoring only the pages the guest wrote (Linux 6.7+).
+- `0002-c-api-wasi-sockets.patch`: C API switches for
+  `WasiCtxBuilder::allow_tcp` and `allow_udp`, both off by default. Without
+  them `wasi_config_inherit_network` gives a guest no socket
+  (bytecodealliance/wasmtime#15388).
+
 Wasmtime 51 continues the reset scan past a full result buffer itself, which
 a second patch did for 48.
 

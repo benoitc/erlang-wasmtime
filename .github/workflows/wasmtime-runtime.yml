@@ -1,12 +1,12 @@
 name: wasmtime-runtime
 
 # Builds the runtime-only Wasmtime C API (no compiler, with WASI) for every
-# supported platform, plus the full C API for FreeBSD (which Wasmtime does
-# not publish) and for Linux glibc and musl (Wasmtime's lack the patches in
-# scripts/wasmtime-patches), and attaches them to the release tagged
+# supported platform, plus the full C API for each (Wasmtime's own lack the
+# patches in scripts/wasmtime-patches, and it publishes none for FreeBSD),
+# and attaches them to the release tagged
 # wasmtime-runtime-<version>-r<rev>.
 # The checksums it prints are then pasted into scripts/wasmtime-runtime.sha256
-# (and the FreeBSD line of scripts/wasmtime.sha256) by hand and committed.
+# (and the -c-api lines into scripts/wasmtime.sha256) by hand and committed.
 # The release tag carries scripts/wasmtime-runtime.rev: bump it to rebuild
 # after a recipe change, so pinned assets are never replaced.
 
@@ -51,6 +51,9 @@ jobs:
             target: aarch64-unknown-linux-musl
             zig_target: aarch64-linux-musl
     runs-on: ${{ matrix.os }}
+    env:
+      # The oldest macOS the libraries link on; ignored on Linux.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@v4
 
@@ -106,12 +109,10 @@ jobs:
       - name: Build the runtime C API
         run: scripts/build-wasmtime.sh runtime "$PWD/out/prefix"
 
-      - name: Build the full C API (Linux)
-        if: contains(matrix.asset, 'linux') || contains(matrix.asset, 'musl')
+      - name: Build the full C API
         run: scripts/build-wasmtime.sh full "$PWD/out/full"
 
-      - name: Package the full C API (Linux)
-        if: contains(matrix.asset, 'linux') || contains(matrix.asset, 'musl')
+      - name: Package the full C API
         run: |
           V="$(tr -d '[:space:]' < scripts/wasmtime.version)"
           NAME="wasmtime-$V-${{ matrix.asset }}-c-api"
@@ -196,7 +197,7 @@ jobs:
           TAG="wasmtime-runtime-$V-r$REV"
           gh release view "$TAG" >/dev/null 2>&1 || \
             gh release create "$TAG" --prerelease --title "Wasmtime C API $V for erlang_wasmtime" \
-              --notes "Runtime-only (no compiler, with WASI) builds of the Wasmtime C API, and the full C API for FreeBSD and Linux, with scripts/wasmtime-patches applied, build revision $REV of the recipe in scripts/build-wasmtime.sh at $GITHUB_SHA. Pinned by checksum in scripts/wasmtime-runtime.sha256 and scripts/wasmtime.sha256 of the erlang_wasmtime releases that use it; assets are never replaced: a rebuild bumps scripts/wasmtime-runtime.rev and gets its own release."
+              --notes "Runtime-only (no compiler, with WASI) and full builds of the Wasmtime C API, with scripts/wasmtime-patches applied, build revision $REV of the recipe in scripts/build-wasmtime.sh at $GITHUB_SHA. Pinned by checksum in scripts/wasmtime-runtime.sha256 and scripts/wasmtime.sha256 of the erlang_wasmtime releases that use it; assets are never replaced: a rebuild bumps scripts/wasmtime-runtime.rev and gets its own release."
           # Assets that exist are pinned somewhere: refuse to replace them
           # unless the run says so explicitly.
           if [ "${{ inputs.force }}" != "true" ]; then

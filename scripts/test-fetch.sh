@@ -26,7 +26,7 @@ echo "\$2"
 STUB
 chmod +x "$TMP/build-stub.sh"
 
-# A fake archive of the upstream layout, served from a file:// URL.
+# A fake archive of the full layout, served from a file:// URL.
 mkdir -p "$TMP/served/$FULL/include" "$TMP/served/$FULL/lib"
 : > "$TMP/served/$FULL/include/wasmtime.h"
 : > "$TMP/served/$FULL/lib/libwasmtime.a"
@@ -52,7 +52,7 @@ run() { # name, expected-exit, expected-stdout-regex, expected-stderr-regex, env
     rm -rf "$TMP/cache" "$TMP/built-variant"
     set +e
     out="$(env WASMTIME_CACHE_DIR="$TMP/cache" WASMTIME_BUILD_SCRIPT="$TMP/build-stub.sh" \
-        WASMTIME_UPSTREAM_URL="file://$TMP/served" WASMTIME_RELEASE_URL="file://$TMP/nowhere" \
+        WASMTIME_RELEASE_URL="file://$TMP/nowhere" \
         "$@" "$FAKE/scripts/fetch-wasmtime.sh" 2>"$TMP/err")"
     got=$?
     set -e
@@ -69,7 +69,6 @@ run() { # name, expected-exit, expected-stdout-regex, expected-stderr-regex, env
 run "explicit dir is used as is" 0 "^$TMP/served/$FULL\$" "" WASMTIME_C_API_DIR="$TMP/served/$FULL"
 run "explicit dir without headers is refused" 1 "^\$" "no include/wasmtime.h" WASMTIME_C_API_DIR="$TMP/nowhere"
 run "bad WASMTIME_RUNTIME_ONLY is refused" 1 "^\$" "must be 1 or unset" WASMTIME_RUNTIME_ONLY=maybe
-# The full archive is upstream's on macOS and this project's elsewhere.
 run "full archive is downloaded and verified" 0 "/cache/$VERSION-r[0-9]+/$FULL\$" "downloading" WASMTIME_RUNTIME_ONLY= \
     WASMTIME_RELEASE_URL="file://$TMP/served"
 [ ! -f "$TMP/built-variant" ] || fail "download case must not build"

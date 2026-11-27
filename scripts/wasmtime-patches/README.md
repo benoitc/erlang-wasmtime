@@ -14,6 +14,12 @@ upstream made it unnecessary.
   them `wasi_config_inherit_network` gives a guest no socket
   (bytecodealliance/wasmtime#15388).
 
+- `0003-c-api-blocking-component-calls.patch`: instantiate, call and resource
+  drop that run Wasmtime's async path to completion on the calling thread,
+  inside Tokio, and that another thread can cancel. The C API's own
+  `wasmtime_call_future_poll` polls with no waker and outside Tokio, where a
+  WASI timer panics.
+
 Wasmtime 51 continues the reset scan past a full result buffer itself, which
 a second patch did for 48.
 

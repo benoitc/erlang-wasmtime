@@ -119,7 +119,7 @@ Transitions, by who makes them:
 | `host_exchange` | worker (inside the guest) | `ST_IN_HOST` while waiting for `host_reply`, bounded by `host_timeout`; spins up to `HOST_SPIN_NS` with `mu` released before the condition wait; `abort` ends the wait as `interrupted`; back to `ST_RUNNING` |
 | `inbox_wait` | worker (inside the guest) | waits on `cv` for bytes, `close/1` or `abort`; state stays `ST_RUNNING` |
 | `nif_host_reply` | scheduler | stores the reply if `ST_IN_HOST` and the id matches; broadcasts |
-| `stop_current` | any, with `mu` | sets `abort` and `interrupt`; broadcasts; bumps the engine's epoch so the guest reaches the epoch callback now, not at the next tick |
+| `stop_current` | any, with `mu` | sets `abort` and `interrupt`; fires the request's cancel handle (a component waiting inside Wasmtime); broadcasts; bumps the engine's epoch so the guest reaches the epoch callback now, not at the next tick |
 | `nif_destroy` | scheduler | `stopping`; the running request is stopped (not cancelled: its caller gets the error); records the caller in `queue.destroy` |
 | `nif_interrupt` | scheduler | `stop_current` if a request runs |
 | `nif_cancel` | scheduler | marks the request `cancelled` (running: also `stop_current`); the result is dropped in the NIF |
@@ -234,6 +234,20 @@ worker thread, the same queue, host calls through `host_exchange`,
   (`{drop, Handle}`) run on the worker.
 - A component instance that trapped cannot be entered again (Component
   Model); calls answer Wasmtime's error.
+- When the library has this project's blocking calls (`async_available`),
+  components run on Wasmtime's async path: async WASI hosts, and
+  instantiate, call and guest resource drop through the `_blocking`
+  functions, which drive the future on the instance thread inside Tokio.
+  The thread blocks, which it may; no scheduler waits on it. Do not use the
+  C API's `wasmtime_call_future_poll`: it polls outside Tokio, where a WASI
+  timer panics.
+- Each component request has a `wasmtime_cancel_t`, created and deleted by
+  `worker_main` under `mu` and fired by `stop_current`. A cancelled
+  operation may leave the guest suspended, so `wasm.cancelled` refuses any
+  further call (`note_cancel`).
+- A host function stays synchronous, also for an `async func` import (a
+  concurrent host function that completes at once): the C API panics on
+  nothing there, but no other task of the store runs while Erlang answers.
 - A resource declared by an interface the import map serves is defined as a
   host resource (`add_host_resource`): its type id is its rank in the
   linker entry, and `host_resource_id` in `nif_cvalues.c` compares a value's
@@ -251,6 +265,11 @@ Rules for `nif_cvalues.c`, which a change must keep:
 - Names inside a value (record fields, variant cases, enum cases, flags)
   are always copied from the type, never from the term, so they are valid
   by construction.
+- The C API panics converting a `stream`, `future` or `error-context` from
+  the guest. Every type the guest fills is checked by `ctype_crosses`
+  before it can: a function's result before the call, a host import's
+  parameters at link time. A new path that converts guest values needs the
+  same check.
 - Every slot of a vector is blanked before it is filled, so an error half
   way leaves a value `wasmtime_component_val_delete` can free.
 
@@ -274,7 +293,8 @@ bounds, `parse_allocator` in `nif_engine.c` checks them again (the NIF can
 be called directly), and `pool_fits` (`nif_os.c`) reserves the address space the pool
 will ask for (about 4 GB per slot) and releases it, so a host under
 `ulimit -v` gets `pool_too_large`; it counts 4 GB per memory slot and
-1 MB per core instance slot. Change the bounds in both files.
+1 MB and a 2 MB call stack per core instance slot (the pool holds one
+stack per core instance slot, where Wasmtime defaults to 1000). Change the bounds in both files.
 
 The allocator is not recorded in a precompiled module: the same `.cwasm`
 loads on a pooled engine and on the default one.
@@ -293,7 +313,9 @@ made with. Wasmtime accepts it when:
 Consequences: `deserialize/1` tries the default engine then the fuel one;
 `deserialize/2` picks by options; a module compiled with proposals off
 loads anywhere; the full and runtime-only libraries share `make_config`
-so they accept the same files; the WASI shim shipped in `priv/shims` (for the streamed stdout rule under "Streams")
+so they accept the same files (concurrency support is part of that check:
+on with the blocking calls, and component async with it unless reference
+types are turned off, since Wasmtime cannot build that engine); the WASI shim shipped in `priv/shims` (for the streamed stdout rule under "Streams")
 must be compiled with the same settings, which is why
 `scripts/precompile-shims.sh` mirrors `make_config` flag by flag and
 `shim_files_load` in the tests fails when they drift.
@@ -428,7 +450,7 @@ A NIF runs in the VM's address space. What remains after the guards above:
 |---|---|
 | A panic in Wasmtime | the C API is built with `panic = abort`; a Rust panic cannot unwind into C |
 | Host memory exhausted inside Wasmtime (compiling a large module, creating a store) | Rust aborts on a failed allocation |
-| A C API call that aborts on an input it does not support | `wasm_valtype_kind` is never called, and a GC reference from another instance is refused before the call (Wasmtime aborts on it); new calls must be checked for the same |
+| A C API call that aborts on an input it does not support | `wasm_valtype_kind` is never called, stream and future types are refused before conversion, and a GC reference from another instance is refused before the call (Wasmtime aborts on it); new calls must be checked for the same |
 | A memory-safety bug in the NIF | the ASan run (CONTRIBUTING.md) is the guard |
 | The pool's address space taken by something else between `pool_fits` and `Engine::new` | the probe and the reservation are two calls |
 
@@ -478,7 +500,7 @@ Decisions and their reasons:
 | 20 us host reply spin | `HOST_SPIN_NS` | a reply from an idle process comes back in 2 to 3 us; sleeping on the condition variable costs a wake-up of several | CPU burnt when the host fun is slow |
 | 10,000 pooled instances, 4 GB per slot | `POOL_MAX_INSTANCES`, `POOL_MAX_MEMORY` in `nif_engine.c`, the same in `wasmtime_options.erl` | a slot may not exceed Wasmtime's 4 GB memory reservation; 10,000 slots reserve about 40 TB of address space | aborts in `Engine::new` if the C and Erlang checks drift |
 | 10,000 snapshot segments, merged across 4-byte gaps | `MAX_SEGMENTS`, `MERGE_GAP` in `nif_preinit.c` | Wizer's values: a segment costs about 4 bytes to encode, and Wasmtime handles tens of thousands slowly | the size of pre-initialized modules |
-| 100,000 pooled core instances and tables | `POOL_MAX_SLOTS` in `nif_engine.c`, the same in `wasmtime_options.erl` | a component takes several core instances and tables per instance; a slot costs about 1 MB and 160 KB of address space | aborts in `Engine::new` if the C and Erlang checks drift |
+| 100,000 pooled core instances and tables | `POOL_MAX_SLOTS` in `nif_engine.c`, the same in `wasmtime_options.erl` | a component takes several core instances and tables per instance; a slot costs about 3 MB (with its call stack) and 160 KB of address space | aborts in `Engine::new` if the C and Erlang checks drift |
 | 16 MB always-dense span | `?ALWAYS_DENSE` in `wasmtime_preinit.erl` | Wasmtime's `memory_guaranteed_dense_image_size` default | whether a snapshot is mapped or copied at each instantiation |
 | 256 cached modules | `?DEFAULT_MAX_RESIDENT` in `wasmtime_module_cache.erl`, `max_resident_modules` in the application environment | compiled code stays mapped while the cache holds it; a bound turns a loader that never unloads into an error | `cache_full` sooner or later |
 | Script worker limits: 5 s, 1 MiB output and request, 8 MiB and 64 staged files; 500 ms kill grace | `?WORKER_LIMITS`, `?KILL_GRACE` in `wasmtime_script_worker.erl` | erlang_wasm's defaults, so a request sized for one runtime fits the other; the grace is how long the worker waits past the deadline for the runner, which interrupts the guest itself, before killing it | what a tenant's request may cost |

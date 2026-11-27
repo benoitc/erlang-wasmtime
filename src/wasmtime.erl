@@ -206,7 +206,8 @@ innermost first.
 What the linked Wasmtime library can do. A runtime-only build has no
 `compiler` (`compile/1` and `serialize/1` answer `kind => unavailable`) and
 may have no `wat` or `wasi`; `components` says whether it can load
-components. See building.md, "Runtime-only builds".
+components, and `component_async` whether it runs component async (see
+components.md). See building.md, "Runtime-only builds".
 """.
 -type features() :: #{
     compiler := boolean(),
@@ -214,7 +215,8 @@ components. See building.md, "Runtime-only builds".
     wasi := boolean(),
     components := boolean(),
     wasi_http := boolean(),
-    wasi_sockets := boolean()
+    wasi_sockets := boolean(),
+    component_async := boolean()
 }.
 
 -doc """

@@ -8,7 +8,7 @@
 # from priv/shims/<platform>-<plain|fuel>.cwasm. The Wasmtime CLI of the
 # pinned version cross-compiles it for each target with baseline ISA flags,
 # with the engine settings make_config() in wasmtime_nif.c uses: epoch
-# interruption on, concurrency support off, the DRC collector, fuel per
+# interruption on, concurrency support on, the DRC collector, fuel per
 # variant, opt level speed, and every proposal off so the module's features
 # are a subset of any engine's. Rerun after a Wasmtime bump; the files are
 # committed and shim_files_load in test/wasmtime_stream_SUITE.erl checks the host's.
@@ -63,8 +63,9 @@ x86_64-freebsd:x86_64-unknown-freebsd"
 
 OFF="-Wsimd=n -Wrelaxed-simd=n -Wbulk-memory=n -Wmulti-value=n -Wmulti-memory=n \
 -Wmemory64=n -Wtail-call=n -Wwide-arithmetic=n -Wcustom-page-sizes=n -Wthreads=n \
--Wreference-types=n -Wfunction-references=n -Wgc=n -Wexceptions=n"
-COMMON="-Wepoch-interruption=y -Wconcurrency-support=n -Ccollector=drc -Oopt-level=2 $OFF"
+-Wreference-types=n -Wfunction-references=n -Wgc=n -Wexceptions=n \
+-Wcomponent-model-async=n"
+COMMON="-Wepoch-interruption=y -Wconcurrency-support=y -Ccollector=drc -Oopt-level=2 $OFF"
 
 mkdir -p "$OUT"
 echo "$PLATFORMS" | while IFS=: read -r platform triple; do

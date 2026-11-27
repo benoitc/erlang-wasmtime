@@ -158,6 +158,14 @@ stream_dead_receiver(_) ->
     ok.
 
 shim_files_load(_) ->
+    %% the shims are compiled for the engines of this project's library; one
+    %% without its patches runs without concurrency support
+    case wasmtime:features() of
+        #{component_async := true} -> shim_files();
+        #{component_async := false} -> {skip, "an unpatched library"}
+    end.
+
+shim_files() ->
     %% the committed shims for this platform (scripts/precompile-shims.sh)
     %% match the engines a runtime-only build creates: exact tunables per
     %% fuel variant, features a subset of any proposal set

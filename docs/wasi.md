@@ -141,8 +141,8 @@ ok = wasmtime:run(I, #{timeout => 5000}).
 
 The grant covers TCP, UDP and name lookup, to or from any address, the
 loopback included; there is no rule per address. A guest waiting on a peer
-holds its instance until the peer answers or closes: `timeout` and
-`interrupt/1` answer the caller, and reach the guest only then. A library
+is stopped by `timeout`, `interrupt/1` or its caller's death, like any
+component call (`features/0`, `component_async`). A library
 without this project's patches (`features/0`, `wasi_sockets`) answers
 `kind => unavailable`.
 

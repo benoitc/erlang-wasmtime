@@ -461,7 +461,77 @@ const char *term_to_cval(ErlNifEnv *env, instance_t *inst, ERL_NIF_TERM t,
     wasmtime_component_valtype_delete(&vt);
     return err;
   }
-  default: return "this type cannot cross yet (stream, future, error-context)";
+  default: return NOT_CROSSING;
+  }
+}
+
+/* Whether the C API can represent a value of this type. It panics, which
+ * aborts the VM, on converting a stream, future or error-context from the
+ * guest, at any depth: every type the guest fills is checked first. An
+ * unknown kind does not cross either. */
+static int crosses_and_delete(wasmtime_component_valtype_t *t) {
+  int ok = ctype_crosses(t);
+  wasmtime_component_valtype_delete(t);
+  return ok;
+}
+
+int ctype_crosses(const wasmtime_component_valtype_t *ty) {
+  wasmtime_component_valtype_t a, b;
+  const char *name;
+  size_t len;
+  int ok = 1;
+  switch (ty->kind) {
+  case WASMTIME_COMPONENT_VALTYPE_BOOL:
+  case WASMTIME_COMPONENT_VALTYPE_S8:
+  case WASMTIME_COMPONENT_VALTYPE_S16:
+  case WASMTIME_COMPONENT_VALTYPE_S32:
+  case WASMTIME_COMPONENT_VALTYPE_S64:
+  case WASMTIME_COMPONENT_VALTYPE_U8:
+  case WASMTIME_COMPONENT_VALTYPE_U16:
+  case WASMTIME_COMPONENT_VALTYPE_U32:
+  case WASMTIME_COMPONENT_VALTYPE_U64:
+  case WASMTIME_COMPONENT_VALTYPE_F32:
+  case WASMTIME_COMPONENT_VALTYPE_F64:
+  case WASMTIME_COMPONENT_VALTYPE_CHAR:
+  case WASMTIME_COMPONENT_VALTYPE_STRING:
+  case WASMTIME_COMPONENT_VALTYPE_ENUM:
+  case WASMTIME_COMPONENT_VALTYPE_FLAGS:
+  case WASMTIME_COMPONENT_VALTYPE_OWN:
+  case WASMTIME_COMPONENT_VALTYPE_BORROW: return 1;
+  case WASMTIME_COMPONENT_VALTYPE_LIST:
+    wasmtime_component_list_type_element(ty->of.list, &a);
+    return crosses_and_delete(&a);
+  case WASMTIME_COMPONENT_VALTYPE_OPTION:
+    wasmtime_component_option_type_ty(ty->of.option, &a);
+    return crosses_and_delete(&a);
+  case WASMTIME_COMPONENT_VALTYPE_RECORD:
+    for (size_t i = 0;
+         ok && wasmtime_component_record_type_field_nth(ty->of.record, i, &name, &len, &a); i++)
+      ok = crosses_and_delete(&a);
+    return ok;
+  case WASMTIME_COMPONENT_VALTYPE_TUPLE:
+    for (size_t i = 0; ok && wasmtime_component_tuple_type_types_nth(ty->of.tuple, i, &a); i++)
+      ok = crosses_and_delete(&a);
+    return ok;
+  case WASMTIME_COMPONENT_VALTYPE_VARIANT: {
+    size_t n = wasmtime_component_variant_type_case_count(ty->of.variant);
+    for (size_t i = 0; ok && i < n; i++) {
+      bool has;
+      if (wasmtime_component_variant_type_case_nth(ty->of.variant, i, &name, &len, &has, &a) && has)
+        ok = crosses_and_delete(&a);
+    }
+    return ok;
+  }
+  case WASMTIME_COMPONENT_VALTYPE_RESULT:
+    if (wasmtime_component_result_type_ok(ty->of.result, &a)) ok = crosses_and_delete(&a);
+    if (ok && wasmtime_component_result_type_err(ty->of.result, &a)) ok = crosses_and_delete(&a);
+    return ok;
+  case WASMTIME_COMPONENT_VALTYPE_MAP:
+    wasmtime_component_map_type_key(ty->of.map, &a);
+    wasmtime_component_map_type_value(ty->of.map, &b);
+    ok = crosses_and_delete(&a);
+    return crosses_and_delete(&b) && ok;
+  default: return 0;
   }
 }
 

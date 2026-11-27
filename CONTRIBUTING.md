@@ -87,6 +87,7 @@ The order the code enforces, with one file per step:
    | `wasmtime_stream_SUITE` | the inbox, streamed stdio, the `erlang` imports, the shim files |
    | `wasmtime_ref_SUITE` | references: funcref, externref, GC values |
    | `wasmtime_component_SUITE` | components: WIT values, host imports, resources, WASI 0.2 |
+   | `wasmtime_component_async_SUITE` | component async, stopping a waiting guest, types that cannot cross |
    | `wasmtime_preinit_SUITE` | pre-initialization, the pooling allocator |
    | `wasmtime_script_SUITE` | `wasmtime_script_worker` with `wasmtime_test_adapter`; the language cases need `WASMTIME_LANG_DIR` |
    | `wasmtime_snapshot_SUITE` | `snapshot/1,2`, `restore/3`, image files |

@@ -18,6 +18,14 @@ wasmtime_pooling_allocation_config_pagemap_scan_set(wasmtime_pooling_allocation_
 #define POOL_MAX_MEMORY (4ull << 30)
 #define WASM_PAGE 65536
 
+int async_available(void) {
+#if NIF_HAVE_ASYNC_API
+  return wasmtime_component_func_call_blocking != NULL;
+#else
+  return 0;
+#endif
+}
+
 static const char *const proposal_names[NPROPOSALS] = {"simd",
                                                        "relaxed_simd",
                                                        "relaxed_simd_deterministic",
@@ -156,12 +164,11 @@ static wasm_config_t *make_config(const engine_t *want, const char **missing) {
   wasm_config_t *cfg = wasm_config_new();
   wasmtime_config_epoch_interruption_set(cfg, true);
   wasmtime_config_consume_fuel_set(cfg, want->fuel);
-  /* Engine settings are part of a precompiled module's compatibility check.
-   * Runtime-only builds have no component model, so the full build must not
-   * compile modules with the concurrency support it would otherwise enable
-   * by default; nothing here uses components. */
+  /* Engine settings are part of a precompiled module's compatibility check,
+   * so the full and runtime-only libraries must agree. On: component async,
+   * which needs this project's blocking calls to be driven. */
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
-  wasmtime_config_concurrency_support_set(cfg, false);
+  wasmtime_config_concurrency_support_set(cfg, async_available());
 #endif
 #if NIF_HAVE_COMPILER
   wasmtime_config_cranelift_opt_level_set(cfg, want->opt_level == 0 ? WASMTIME_OPT_LEVEL_NONE
@@ -195,6 +202,10 @@ static wasm_config_t *make_config(const engine_t *want, const char **missing) {
     wasmtime_pooling_allocation_config_max_memory_size_set(pc, (size_t)want->pool_max_memory);
     wasmtime_pooling_allocation_config_linear_memory_keep_resident_set(
         pc, (size_t)want->pool_keep_resident);
+#ifdef WASMTIME_FEATURE_ASYNC
+    /* a component call runs on its own stack; Wasmtime's default is 1000 */
+    wasmtime_pooling_allocation_config_total_stacks_set(pc, want->pool_core_instances);
+#endif
     if (wasmtime_pooling_allocation_config_pagemap_scan_set)
       wasmtime_pooling_allocation_config_pagemap_scan_set(pc, true);
     wasmtime_pooling_allocation_strategy_set(cfg, pc);
@@ -216,6 +227,13 @@ static wasm_config_t *make_config(const engine_t *want, const char **missing) {
       return NULL;
     }
   }
+#if NIF_HAVE_ASYNC_API
+  /* Component async needs reference types, and Wasmtime aborts on a
+   * configuration it cannot build: follow the proposal when it is off.
+   * 11 is reference_types in proposal_names. */
+  if (async_available() && (want->set_mask & (1u << 11)) && !(want->val_mask & (1u << 11)))
+    wasmtime_config_wasm_component_model_async_set(cfg, false);
+#endif
   return cfg;
 }
 

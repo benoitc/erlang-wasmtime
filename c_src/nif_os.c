@@ -25,10 +25,11 @@ void private_fifo_remove(char *path);
  * be reserved at all: under `ulimit -v` or strict overcommit it may not,
  * and Wasmtime aborts the process then. Each memory slot is the 4 GB
  * memory reservation and its 32 MB guard, each core instance slot about
- * 1 MB of state; the probe maps that much without access and unmaps it. */
+ * 1 MB of state and one call stack (Wasmtime's 2 MB and its guard page);
+ * the probe maps that much without access and unmaps it. */
 int pool_fits(unsigned memories, unsigned core_instances) {
-  uint64_t bytes =
-      ((4ull << 30) + (32ull << 20)) * memories + (1ull << 20) * core_instances + (4ull << 30);
+  uint64_t slot = (1ull << 20) + (2ull << 20) + (64ull << 10);
+  uint64_t bytes = ((4ull << 30) + (32ull << 20)) * memories + slot * core_instances + (4ull << 30);
   if (bytes > SIZE_MAX) return 0;
   int flags = MAP_PRIVATE | MAP_ANON;
 #ifdef MAP_NORESERVE

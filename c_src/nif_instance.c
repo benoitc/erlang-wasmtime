@@ -61,6 +61,10 @@ void *worker_main(void *arg) {
     inst->clock_refused = 0;
     inst->host.failed = 0;
     __atomic_store_n(&inst->interrupt, 0, __ATOMIC_RELEASE);
+#if NIF_HAVE_ASYNC_API
+    /* components only: a core module's guest never waits on the async path */
+    if (async_available() && inst->wasm.mod->comp) inst->wasm.cancel = wasmtime_cancel_new();
+#endif
     pthread_mutex_unlock(&inst->mu);
 
     ErlNifEnv *out = enif_alloc_env();
@@ -70,6 +74,12 @@ void *worker_main(void *arg) {
     pthread_mutex_lock(&inst->mu);
     inst->queue.state = ST_IDLE;
     inst->queue.current = NULL;
+#if NIF_HAVE_ASYNC_API
+    if (inst->wasm.cancel) {
+      wasmtime_cancel_delete(inst->wasm.cancel);
+      inst->wasm.cancel = NULL;
+    }
+#endif
     if (!req->cancelled) send_result(inst, req, out, result);
     enif_free_env(out);
     int failed_instantiate = req->kind == REQ_INSTANTIATE && !inst->wasm.instantiated;
@@ -167,6 +177,11 @@ void stop_current(instance_t *inst) {
   inst->host.abort = 1;
   __atomic_store_n(&inst->interrupt, 1, __ATOMIC_RELEASE);
   stdin_abort(inst); /* a guest blocked reading stdin wakes on end of file */
+#if NIF_HAVE_ASYNC_API
+  /* the epoch stops guest code only; this ends a call waiting on a timer,
+   * a socket or another task */
+  if (inst->wasm.cancel) wasmtime_cancel_fire(inst->wasm.cancel);
+#endif
   pthread_cond_broadcast(&inst->cv);
   /* Reach the epoch callback now rather than at the next tick: the
    * increment is one atomic add, and the engine's other running guests

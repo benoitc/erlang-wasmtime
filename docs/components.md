@@ -58,7 +58,8 @@ the signature is read from the component instead.
 A term that does not fit the type is `{error, #{kind := badarg}}`, with the
 reason in `message`: an invalid UTF-8 string, a surrogate `char`, an
 integer out of range, an unknown case or flag, a missing record field.
-`stream`, `future` and `error-context` (WASI 0.3) cannot cross yet.
+`stream`, `future` and `error-context` cannot cross: see "Async exports and
+imports".
 
 ## Provide imports
 
@@ -154,6 +155,42 @@ ok = wasmtime:run(Inst),
 ```
 
 See [WASI](wasi.md), "WASI 0.2", for streams, clocks and exit statuses.
+
+## Async exports and imports
+
+An `async func` export is called like any other, with `call/3,4`; the call
+returns when the function has its result:
+
+```erlang
+{ok, Component} = wasmtime:compile(Bytes),
+{ok, I} = wasmtime:instantiate(Component),
+{ok, Sum} = wasmtime:call(I, ~"sum", [[1, 2, 3]], #{timeout => 5000}).
+```
+
+An `async func` import is a host function like the others:
+
+```erlang
+Fetch = fun(_Inst, [Url]) -> {ok, [download(Url)]} end,
+{ok, I} = wasmtime:instantiate(Component, #{imports => #{{~"", ~"fetch"} => Fetch}}).
+```
+
+Notes:
+
+- `wasmtime:features()` says whether the library can: `component_async`.
+  It needs this project's patched library (see [building](building.md)).
+- This is erlang_wasm's `wasm_component:call_async/4`; no type signature is
+  given, the component declares it. `wasmtime:call_async/3` is something
+  else, a call you collect later with `await/2`.
+- A guest's host calls run one at a time: while your function runs, no other
+  task of that instance moves.
+- A task still running when its function returned its result moves only
+  during a later call into the instance.
+- A function whose result, or a host import whose argument, holds a
+  `stream`, `future` or `error-context` is refused with `kind => badarg`.
+  erlang_wasm's `start_async/4` and `pump/2` have no counterpart.
+- `timeout`, `interrupt/1` and a dead caller stop a call wherever it waits,
+  in the guest, on a timer or on a socket. The instance cannot be entered
+  again afterwards.
 
 ## Notes
 

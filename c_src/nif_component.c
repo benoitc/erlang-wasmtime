@@ -75,6 +75,26 @@ static wasmtime_error_t *refuse_wall_clock(wasmtime_component_linker_t *l) {
   return e;
 }
 
+/* The async hosts for a library that runs components asynchronously: only
+ * those let a call waiting inside WASI be cancelled. */
+#if NIF_HAVE_WASI
+static wasmtime_error_t *add_wasip2(wasmtime_component_linker_t *l) {
+#if NIF_HAVE_ASYNC_API
+  if (async_available()) return wasmtime_component_linker_add_wasip2_async(l);
+#endif
+  return wasmtime_component_linker_add_wasip2(l);
+}
+
+#ifdef WASMTIME_FEATURE_WASI_HTTP
+static wasmtime_error_t *add_wasi_http(wasmtime_component_linker_t *l) {
+#if NIF_HAVE_ASYNC_API
+  if (async_available()) return wasmtime_component_linker_add_wasi_http_async(l);
+#endif
+  return wasmtime_component_linker_add_wasi_http(l);
+}
+#endif
+#endif
+
 /* The key in `imports` (a list of {Module, Name}) matching an import:
  * Module is the interface with or without its version, "" for a function
  * the component imports at its root. Copies the key's own strings. */
@@ -111,14 +131,41 @@ static int match_key(ErlNifEnv *env, ERL_NIF_TERM imports, const char *iface, si
 }
 
 static wasmtime_error_t *add_host_func(linker_entry_t *le, wasmtime_component_linker_instance_t *li,
-                                       const char *fname, size_t flen, char *module, char *name) {
+                                       const char *fname, size_t flen,
+                                       const wasmtime_component_func_type_t *type, char *module,
+                                       char *name) {
   size_t idx = le->nhostfns++;
   hostfn_t *fn = &le->hostfns[idx];
   fn->module = module;
   fn->name = name;
   fn->type = NULL; /* the callback gets the component function type itself */
+#if NIF_HAVE_ASYNC_API
+  /* an `async func` import takes only a concurrent host function */
+  if (async_available() && wasmtime_component_func_type_async(type))
+    return wasmtime_component_linker_instance_add_func_concurrent_blocking(
+        li, fname, flen, component_host_callback, (void *)(uintptr_t)idx, NULL);
+#else
+  (void)type;
+#endif
   return wasmtime_component_linker_instance_add_func(li, fname, flen, component_host_callback,
                                                      (void *)(uintptr_t)idx, NULL);
+}
+
+/* A host function's arguments come from the guest and cross through the C
+ * API before the callback runs: one that cannot cross is refused at link
+ * time (ctype_crosses). */
+static int params_cross(const wasmtime_component_func_type_t *ft) {
+  size_t n = wasmtime_component_func_type_param_count(ft);
+  int ok = 1;
+  for (size_t i = 0; ok && i < n; i++) {
+    const char *name;
+    size_t len;
+    wasmtime_component_valtype_t t;
+    wasmtime_component_func_type_param_nth(ft, i, &name, &len, &t);
+    ok = ctype_crosses(&t);
+    wasmtime_component_valtype_delete(&t);
+  }
+  return ok;
 }
 
 /* Binds every import the component declares and `imports` provides. */
@@ -216,7 +263,8 @@ static ERL_NIF_TERM bind_component_imports(linker_entry_t *le, module_res_t *m, 
   wasmtime_component_type_t *ct = wasmtime_component_type(m->comp);
   size_t n = wasmtime_component_type_import_count(ct, engine);
   wasmtime_error_t *e = NULL;
-  for (size_t i = 0; i < n && !e && nfuncs < nkeys; i++) {
+  int refused = 0;
+  for (size_t i = 0; i < n && !e && !refused && nfuncs < nkeys; i++) {
     const char *iname;
     size_t ilen;
     wasmtime_component_item_t item;
@@ -224,16 +272,22 @@ static ERL_NIF_TERM bind_component_imports(linker_entry_t *le, module_res_t *m, 
     char *module, *name;
     if (item.kind == WASMTIME_COMPONENT_ITEM_COMPONENT_FUNC) {
       if (match_key(env, imports, "", 0, iname, ilen, &module, &name)) {
-        wasmtime_component_linker_instance_t *root = wasmtime_component_linker_root(le->clinker);
-        e = add_host_func(le, root, iname, ilen, module, name);
-        nfuncs++;
-        wasmtime_component_linker_instance_delete(root);
+        if (params_cross(item.of.component_func)) {
+          wasmtime_component_linker_instance_t *root = wasmtime_component_linker_root(le->clinker);
+          e = add_host_func(le, root, iname, ilen, item.of.component_func, module, name);
+          nfuncs++;
+          wasmtime_component_linker_instance_delete(root);
+        } else {
+          refused = 1;
+          enif_free(module);
+          enif_free(name);
+        }
       }
     } else if (item.kind == WASMTIME_COMPONENT_ITEM_COMPONENT_INSTANCE) {
       const wasmtime_component_instance_type_t *it = item.of.component_instance;
       size_t nf = wasmtime_component_instance_type_export_count(it, engine);
       wasmtime_component_linker_instance_t *root = NULL, *li = NULL;
-      for (size_t j = 0; j < nf && !e; j++) {
+      for (size_t j = 0; j < nf && !e && !refused; j++) {
         const char *fname;
         size_t flen;
         wasmtime_component_item_t fitem;
@@ -256,8 +310,9 @@ static ERL_NIF_TERM bind_component_imports(linker_entry_t *le, module_res_t *m, 
             root = wasmtime_component_linker_root(le->clinker);
             e = wasmtime_component_linker_instance_add_instance(root, iname, ilen, &li);
           }
-          if (!e) {
-            e = add_host_func(le, li, fname, flen, module, name);
+          if (!e && !params_cross(fitem.of.component_func)) refused = 1;
+          if (!e && !refused) {
+            e = add_host_func(le, li, fname, flen, fitem.of.component_func, module, name);
             nfuncs++;
           } else {
             enif_free(module);
@@ -272,6 +327,10 @@ static ERL_NIF_TERM bind_component_imports(linker_entry_t *le, module_res_t *m, 
     wasmtime_component_item_delete(&item);
   }
   wasmtime_component_type_delete(ct);
+  if (refused) {
+    if (e) wasmtime_error_delete(e);
+    return mk_error_s(out, "link", "badarg", NOT_CROSSING);
+  }
   return e ? error_to_term(out, e, "link") : 0;
 }
 
@@ -287,12 +346,12 @@ static linker_entry_t *build_centry(module_res_t *m, ErlNifEnv *env, ERL_NIF_TER
   *err = 0;
   if (wasi) {
 #if NIF_HAVE_WASI
-    e = wasmtime_component_linker_add_wasip2(le->clinker);
+    e = add_wasip2(le->clinker);
     if (!e && monotonic) e = refuse_wall_clock(le->clinker);
 #ifdef WASMTIME_FEATURE_WASI_HTTP
     /* bit 1 of `wasi`: `http => all` was given (WASI_GRANT_HTTP in
      * nif_instantiate.c, which refuses it on a build without wasi:http) */
-    if (!e && (wasi & 2)) e = wasmtime_component_linker_add_wasi_http(le->clinker);
+    if (!e && (wasi & 2)) e = add_wasi_http(le->clinker);
 #endif
     if (e) *err = error_to_term(out, e, "wasi");
 #else
@@ -306,6 +365,16 @@ static linker_entry_t *build_centry(module_res_t *m, ErlNifEnv *env, ERL_NIF_TER
     return NULL;
   }
   return le;
+}
+
+/* An operation that failed while the request was being stopped was ended by
+ * the stop: either the epoch trapped the guest or the cancel dropped the
+ * call, possibly with the guest suspended. Report it as an interrupt, and
+ * run no more guest code in this store. */
+static void note_cancel(instance_t *inst, const wasmtime_error_t *e) {
+  if (!e || !__atomic_load_n(&inst->interrupt, __ATOMIC_ACQUIRE)) return;
+  inst->interrupted_fired = 1;
+  inst->wasm.cancelled = 1;
 }
 
 #define MAX_LINKERS 16
@@ -334,8 +403,16 @@ ERL_NIF_TERM component_instantiate(instance_t *inst, ErlNifEnv *env, ERL_NIF_TER
   pthread_mutex_unlock(&m->mu);
   inst->wasm.entry = le;
   if (err) return err;
-  wasmtime_error_t *e = wasmtime_component_linker_instantiate(le->clinker, inst->wasm.ctx, m->comp,
-                                                              &inst->wasm.cinst);
+  wasmtime_error_t *e;
+#if NIF_HAVE_ASYNC_API
+  if (async_available())
+    e = wasmtime_component_linker_instantiate_blocking(le->clinker, inst->wasm.ctx, m->comp,
+                                                       inst->wasm.cancel, &inst->wasm.cinst);
+  else
+#endif
+    e = wasmtime_component_linker_instantiate(le->clinker, inst->wasm.ctx, m->comp,
+                                              &inst->wasm.cinst);
+  note_cancel(inst, e);
   ERL_NIF_TERM r = outcome(inst, out, e, NULL, "link");
   return enif_is_identical(r, atom_ok) ? 0 : r;
 }
@@ -385,7 +462,14 @@ static ERL_NIF_TERM drop_resource(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM
     return mk_error_s(out, "call", "badarg", "not a live resource handle of this instance");
   wasmtime_component_resource_any_t *r = inst->wasm.res[i - 1];
   wasmtime_context_set_epoch_deadline(inst->wasm.ctx, 1);
-  wasmtime_error_t *e = wasmtime_component_resource_any_drop(inst->wasm.ctx, r);
+  wasmtime_error_t *e;
+#if NIF_HAVE_ASYNC_API
+  if (async_available())
+    e = wasmtime_component_resource_any_drop_blocking(inst->wasm.ctx, r, inst->wasm.cancel);
+  else
+#endif
+    e = wasmtime_component_resource_any_drop(inst->wasm.ctx, r);
+  note_cancel(inst, e);
   /* the slot is freed under the mutex: a scheduler may read the table */
   pthread_mutex_lock(&inst->mu);
   inst->wasm.res[i - 1] = NULL;
@@ -402,6 +486,9 @@ ERL_NIF_TERM component_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
   ErlNifBinary name;
   const ERL_NIF_TERM *dt;
   int dar;
+  if (inst->wasm.cancelled)
+    return mk_error_s(out, "call", "trap",
+                      "the instance was interrupted and cannot be entered again");
   if (enif_get_tuple(env, req->name, &dar, &dt) && dar == 2 &&
       enif_is_identical(dt[0], mk_atom(env, "drop")))
     return drop_resource(inst, env, dt[1], out);
@@ -424,6 +511,12 @@ ERL_NIF_TERM component_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
   size_t built = 0;
   if (!enif_get_list_length(env, req->args, &nargs) || nargs != np) {
     result = mk_error_s(out, "call", "badarity", "wrong number of arguments");
+    goto done;
+  }
+  /* converting a stream, future or error-context result panics inside the C
+   * API: refuse by type, before the call */
+  if (has_result && !ctype_crosses(&rt)) {
+    result = mk_error_s(out, "call", "badarg", NOT_CROSSING);
     goto done;
   }
   args = enif_alloc((np ? np : 1) * sizeof *args);
@@ -455,8 +548,15 @@ ERL_NIF_TERM component_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
   wasmtime_component_val_t res;
   memset(&res, 0, sizeof res);
   res.kind = WASMTIME_COMPONENT_BOOL;
-  wasmtime_error_t *e =
-      wasmtime_component_func_call(&func, inst->wasm.ctx, args, np, &res, has_result ? 1 : 0);
+  wasmtime_error_t *e;
+#if NIF_HAVE_ASYNC_API
+  if (async_available())
+    e = wasmtime_component_func_call_blocking(&func, inst->wasm.ctx, args, np, &res,
+                                              has_result ? 1 : 0, inst->wasm.cancel);
+  else
+#endif
+    e = wasmtime_component_func_call(&func, inst->wasm.ctx, args, np, &res, has_result ? 1 : 0);
+  note_cancel(inst, e);
   result = outcome(inst, out, e, NULL, "call");
   const ERL_NIF_TERM *rt2;
   int rar;

@@ -6,6 +6,12 @@
   version are refused: precompile them again.
 - Modules using the wide arithmetic proposal (128-bit integer operations)
   now compile.
+- A runtime-only library built from source on macOS with some Rust releases
+  could not be linked. Fixed.
+- Components can export and import `async func`. Streams and futures cannot
+  cross yet.
+- `timeout`, `interrupt/1` and a dead caller now stop a component that waits
+  on a timer or a socket; before, it held its instance until the wait ended.
 - `network => all` in the `wasi` options lets a component use TCP, UDP and
   name lookup. Off by default, and all or nothing: any address the node can
   reach.

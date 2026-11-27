@@ -91,6 +91,36 @@
 #include <string.h>
 #include <time.h>
 
+/* Components run on Wasmtime's async path when the library has this
+ * project's blocking calls (scripts/wasmtime-patches). They are declared
+ * weak here, so an unpatched library links and keeps the synchronous path:
+ * test async_available() before any use. docs/design.md, "Components". */
+#if defined(WASMTIME_FEATURE_COMPONENT_MODEL_ASYNC) && NIF_HAVE_WASI
+#define NIF_HAVE_ASYNC_API 1
+typedef struct wasmtime_cancel_t wasmtime_cancel_t;
+__attribute__((weak)) wasmtime_cancel_t *wasmtime_cancel_new(void);
+__attribute__((weak)) void wasmtime_cancel_fire(const wasmtime_cancel_t *cancel);
+__attribute__((weak)) void wasmtime_cancel_delete(wasmtime_cancel_t *cancel);
+__attribute__((weak)) wasmtime_error_t *wasmtime_component_linker_instantiate_blocking(
+    const wasmtime_component_linker_t *linker, wasmtime_context_t *context,
+    const wasmtime_component_t *component, const wasmtime_cancel_t *cancel,
+    wasmtime_component_instance_t *instance_out);
+__attribute__((weak)) wasmtime_error_t *wasmtime_component_func_call_blocking(
+    const wasmtime_component_func_t *func, wasmtime_context_t *context,
+    const wasmtime_component_val_t *args, size_t args_size, wasmtime_component_val_t *results,
+    size_t results_size, const wasmtime_cancel_t *cancel);
+__attribute__((weak)) wasmtime_error_t *
+wasmtime_component_resource_any_drop_blocking(wasmtime_context_t *context,
+                                              const wasmtime_component_resource_any_t *resource,
+                                              const wasmtime_cancel_t *cancel);
+__attribute__((weak)) wasmtime_error_t *
+wasmtime_component_linker_instance_add_func_concurrent_blocking(
+    wasmtime_component_linker_instance_t *linker_instance, const char *name, size_t name_len,
+    wasmtime_component_func_callback_t callback, void *data, void (*finalizer)(void *));
+#else
+#define NIF_HAVE_ASYNC_API 0
+#endif
+
 #define EPOCH_TICK_NS (10 * 1000 * 1000) /* 10 ms */
 #define MAX_VALS 32
 
@@ -266,6 +296,11 @@ typedef struct instance {
     linker_entry_t *entry; /* the module's, or this instance's own */
     int owns_entry;        /* the module's cache was full */
     int component;         /* a component instance: cinst, not instance */
+    int cancelled;         /* an async operation was dropped: no more guest code */
+#if NIF_HAVE_ASYNC_API
+    /* The running request's, under mu: stop_current fires it. */
+    wasmtime_cancel_t *cancel;
+#endif
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
     wasmtime_component_instance_t cinst;
     /* Resources the guest handed out, as integer handles: handle N is
@@ -380,7 +415,12 @@ wasmtime_error_t *component_host_callback(void *envp, wasmtime_context_t *ctx,
 #endif
 int is_component_binary(const uint8_t *data, size_t size);
 int sockets_available(void);
+int async_available(void);
 void cvalues_init(ErlNifEnv *env);
+#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
+#define NOT_CROSSING "this type cannot cross yet (stream, future, error-context)"
+int ctype_crosses(const wasmtime_component_valtype_t *ty);
+#endif
 int private_fifo(char *path, size_t len, int *writer);
 void private_fifo_remove(char *path);
 wasmtime_module_t *engine_shim(engine_t *e, ErlNifEnv *env, ERL_NIF_TERM shim, const char **why);

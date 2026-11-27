@@ -15,6 +15,7 @@
     deserialize_garbage/1,
     pooling_from_file/1,
     component/1,
+    component_async/1,
     host_functions/1,
     memory_access/1,
     interrupt/1,
@@ -32,6 +33,7 @@ all() ->
         deserialize_garbage,
         pooling_from_file,
         component,
+        component_async,
         host_functions,
         memory_access,
         interrupt,
@@ -129,6 +131,17 @@ component(Config) ->
             ok;
         _ ->
             {skip, "this runtime library has no component model"}
+    end.
+
+%% An async export runs on a runtime-only library with the blocking calls.
+component_async(Config) ->
+    case wasmtime:features() of
+        #{component_async := true} ->
+            {ok, Inst} = wasmtime:instantiate(load(Config, "component_async")),
+            {ok, 42} = wasmtime:call(Inst, ~"double", [21]),
+            ok;
+        #{component_async := false} ->
+            {skip, "this library cannot run component async"}
     end.
 
 deserialize_garbage(_) ->

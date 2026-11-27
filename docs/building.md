@@ -155,8 +155,10 @@ bumped for a rebuild so pinned assets are never replaced). Its checksums go into
 The libraries are this project's rather than Wasmtime's because of
 `scripts/wasmtime-patches`: Wasmtime's C API cannot turn on the
 `PAGEMAP_SCAN` slot reset that pooled, pre-initialized instances need on
-Linux, nor TCP and UDP for a guest. A library without the patches still
-links; `features/0` says what it lacks.
+Linux, TCP and UDP for a guest, or drive component async. A library without
+the patches still links; `features/0` says what it lacks. Modules
+precompiled with one do not load with the other, and the committed shims of
+`priv/shims` fit the patched one.
 
 ## Upgrade Wasmtime
 

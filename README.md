@@ -18,7 +18,8 @@ call Erlang.
 ```
 
 Nothing raises for guest failures. Compile, link, trap, WASI and host errors
-all come back as `{error, #{class => ..., kind => ..., message => ...}}`.
+all come back as `{error, #{class => ..., kind => ..., msg => ..., ctx => ...}}`, the shape
+erlang_wasm uses.
 
 ## What you get
 

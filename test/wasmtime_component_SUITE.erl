@@ -105,17 +105,12 @@ detect_and_describe(Config) ->
     component = wasmtime:module_kind(Mod),
     [{~"example:host/clock", instance}, {~"example:host/clock#now", func} | _] =
         wasmtime:imports(Mod),
-    Exports = wasmtime:exports(Mod),
-    true = lists:member({~"read-now", func}, Exports),
+    #{~"read-now" := {func, undefined}} = wasmtime:exports(Mod),
     module = wasmtime:module_kind(wasmtime_test:compile(~"(module)")),
-    ok = wasmtime:validate(
-        element(
-            2,
-            file:read_file(
-                filename:join(?config(data_dir, Config), "vectors.component.wasm")
-            )
-        )
+    {ok, Bytes} = file:read_file(
+        filename:join(?config(data_dir, Config), "vectors.component.wasm")
     ),
+    {ok, Bytes} = wasmtime:validate(Bytes),
     ok.
 
 from_text(_) ->
@@ -132,8 +127,8 @@ from_text(_) ->
     ),
     {ok, Inst} = wasmtime:instantiate(Mod),
     {ok, 42} = wasmtime:call(Inst, ~"add", [2, 40]),
-    {error, #{kind := badarity}} = wasmtime:call(Inst, ~"add", [1]),
-    {error, #{kind := no_such_export}} = wasmtime:call(Inst, ~"nope", []),
+    {error, #{kind := argument_arity}} = wasmtime:call(Inst, ~"add", [1]),
+    {error, #{kind := unknown_export}} = wasmtime:call(Inst, ~"nope", []),
     ok.
 
 precompiled(Config) ->
@@ -216,7 +211,7 @@ flags(Config) ->
 bad_values_are_refused(Config) ->
     Inst = instance(Config, "vectors"),
     Bad = fun(Export, V) ->
-        {error, #{class := call, kind := badarg}} = wasmtime:call(Inst, Export, [V])
+        {error, #{class := link, kind := argument_type}} = wasmtime:call(Inst, Export, [V])
     end,
     Bad(~"echo-string", <<255, 254>>),
     Bad(~"echo-string", <<"a", 16#ED, 16#A0, 16#80>>),
@@ -270,18 +265,20 @@ host_import_failures(Config) ->
     Raise = instance(Config, "hostcall", #{
         imports => Base#{{~"example:host/clock", ~"now"} => fun([]) -> error(boom) end}
     }),
-    {error, #{class := host}} = wasmtime:call(Raise, ~"read-now", []),
+    {error, #{class := trap}} = wasmtime:call(Raise, ~"read-now", []),
     Wrong = instance(Config, "hostcall", #{
         imports => Base#{{~"example:host/clock", ~"now"} => fun([]) -> ~"not a u64" end}
     }),
-    {error, #{class := host}} = wasmtime:call(Wrong, ~"read-now", []),
+    {error, #{class := trap}} = wasmtime:call(Wrong, ~"read-now", []),
     Refuse = instance(Config, "hostcall", #{
         imports => Base#{{~"example:host/clock", ~"now"} => fun(_, []) -> {error, denied} end}
     }),
-    {error, #{class := host, message := ~"denied"}} = wasmtime:call(Refuse, ~"read-now", []),
+    {error, #{class := trap, kind := host_error, ctx := #{reason := denied}}} =
+        wasmtime:call(Refuse, ~"read-now", []),
     %% a component instance that trapped may not be entered again (a
     %% Component Model rule): a new instance is needed
-    {error, #{class := call}} = wasmtime:call(Refuse, ~"read-add", [1, 2]),
+    {error, #{class := trap, kind := cannot_enter_component}} =
+        wasmtime:call(Refuse, ~"read-add", [1, 2]),
     ok.
 
 missing_import(Config) ->
@@ -316,8 +313,8 @@ resources(Config) ->
     {ok, 105} = wasmtime:call(Inst, q(~"[method]counter.get"), [B]),
     ok = wasmtime:drop_resource(Inst, q(~"[dtor]counter"), A),
     {error, #{kind := badarg}} = wasmtime:drop_resource(Inst, A),
-    {error, #{kind := badarg}} = wasmtime:call(Inst, q(~"[method]counter.get"), [A]),
-    {error, #{kind := badarg}} = wasmtime:call(Inst, q(~"[method]counter.get"), [9999]),
+    {error, #{kind := argument_type}} = wasmtime:call(Inst, q(~"[method]counter.get"), [A]),
+    {error, #{kind := argument_type}} = wasmtime:call(Inst, q(~"[method]counter.get"), [9999]),
     {ok, 105} = wasmtime:call(Inst, q(~"[method]counter.get"), [B]),
     ok = wasmtime:drop_resource(Inst, B),
     ok.
@@ -350,7 +347,7 @@ wasi_command(Config) ->
 %% WASI 0.2's exit carries success or failure only: a non-zero status is 1.
 wasi_exit(Config) ->
     ok = wasmtime:run(instance(Config, "exitcode", #{wasi => #{}})),
-    {error, #{class := exit, status := 1}} =
+    {error, #{class := trap, ctx := #{wasi_exit := 1}}} =
         wasmtime:run(instance(Config, "exitcode", #{wasi => #{args => ["x", "7"]}})),
     ok.
 
@@ -442,12 +439,12 @@ command(Config, Name, Args, Grants) ->
 wasi_network_grant(Config) ->
     {Server, Port} = serve(~"pong\n"),
     Addr = "127.0.0.1:" ++ Port,
-    {{error, #{class := exit, status := 1}}, <<"refused: ", _/binary>>} = net(
+    {{error, #{class := trap, ctx := #{wasi_exit := 1}}}, <<"refused: ", _/binary>>} = net(
         Config, ["tcp", Addr], #{}
     ),
-    {{error, #{class := exit}}, <<"refused: ", _/binary>>} =
+    {{error, #{class := trap, ctx := #{wasi_exit := _}}}, <<"refused: ", _/binary>>} =
         net(Config, ["tcp", Addr], #{network => none}),
-    {{error, #{class := exit}}, <<"refused: ", _/binary>>} = net(
+    {{error, #{class := trap, ctx := #{wasi_exit := _}}}, <<"refused: ", _/binary>>} = net(
         Config, ["resolve", "localhost"], #{}
     ),
     case wasmtime:features() of
@@ -455,10 +452,10 @@ wasi_network_grant(Config) ->
             {ok, ~"pong\n"} = net(Config, ["tcp", Addr], #{network => all}),
             {ok, ~"true\n"} = net(Config, ["resolve", "localhost"], #{network => all}),
             %% a connection nobody accepts is the guest's error, not ours
-            {{error, #{class := exit, status := 1}}, <<"refused: ", _/binary>>} =
+            {{error, #{class := trap, ctx := #{wasi_exit := 1}}}, <<"refused: ", _/binary>>} =
                 net(Config, ["tcp", "127.0.0.1:" ++ closed_port()], #{network => all});
         #{wasi_sockets := false} ->
-            {error, #{class := wasi, kind := unavailable}} = wasmtime:instantiate(
+            {error, #{class := link, kind := unavailable}} = wasmtime:instantiate(
                 component(Config, "net"), #{wasi => #{network => all}}
             )
     end,
@@ -508,7 +505,7 @@ wasi_http_grant(Config) ->
             exit(Server, kill),
             ok;
         _ ->
-            {error, #{class := wasi, kind := unavailable}} = wasmtime:instantiate(
+            {error, #{class := link, kind := unavailable}} = wasmtime:instantiate(
                 component(Config, "httpget"), #{wasi => #{http => all}}
             ),
             ok
@@ -519,7 +516,7 @@ wasi_grants_refused(Config) ->
     {ok, Core} = wasmtime:compile({wat, ~"(module)"}),
     case wasmtime:features() of
         #{wasi_http := true} ->
-            {error, #{class := wasi, kind := unsupported}} =
+            {error, #{class := link, kind := unsupported}} =
                 wasmtime:instantiate(Core, #{wasi => #{http => all}});
         _ ->
             ok
@@ -530,7 +527,7 @@ wasi_grants_refused(Config) ->
             #{wasi_sockets := true} -> unsupported;
             #{wasi_sockets := false} -> unavailable
         end,
-    {error, #{class := wasi, kind := NetworkKind}} =
+    {error, #{class := link, kind := NetworkKind}} =
         wasmtime:instantiate(Core, #{wasi => #{network => all}}),
     {ok, _} = wasmtime:instantiate(Core, #{wasi => #{network => none, http => none}}),
     %% no grant by address
@@ -627,7 +624,7 @@ host_resource_drop_hook(Config) ->
     %% a handle the host never made is a host error, not a crash
     Bad = (kv_imports())#{{?KV, ~"open"} => fun(_Inst, [_]) -> {ok, [not_a_handle]} end},
     Inst2 = instance(Config, "hostres", #{imports => Bad, wasi => #{}}),
-    {error, #{class := host}} = wasmtime:call(Inst2, ~"fill-and-close", [~"x"]),
+    {error, #{class := trap}} = wasmtime:call(Inst2, ~"fill-and-close", [~"x"]),
     %% destroying an instance that still holds a handle tells nobody: the
     %% entry stays for the host to drop
     Inst3 = instance(Config, "hostres", #{imports => kv_imports(), wasi => #{}}),

@@ -21,11 +21,12 @@ has arguments, environment and stdio that lead nowhere, and no filesystem.
 {ok, []} = wasmtime:call(Inst, ~"_start", []).
 ```
 
-`_start` is not run for you; call it. `proc_exit(0)` returns `{ok, []}`; any other
-status returns:
+`_start` is not run for you; call it. A `_start` that returns answers
+`{ok, []}`. `proc_exit`, with any status including 0, traps as in
+erlang_wasm:
 
 ```erlang
-{error, #{class := exit, kind := exit, status := 3, message := ~"exited with status 3"}}
+{error, #{class := trap, kind := host_error, ctx := #{wasi_exit := 3}}}
 ```
 
 ## Grant a directory
@@ -108,7 +109,7 @@ ok = wasmtime:run(Inst).
 | Preview 1 | WASI 0.2 |
 |---|---|
 | `_start` called with `call/3` | `run/1,2`, which calls `wasi:cli/run#run` |
-| `proc_exit(N)`: `{error, #{class := exit, status := N}}` | `exit`: `ok` or `{error, #{class := exit, status := 1}}`; WASI 0.2 carries success or failure only |
+| `proc_exit(N)`: an error with `ctx.wasi_exit` | `exit`: `ok`, or an error with `ctx.wasi_exit := 1`; WASI 0.2 carries success or failure only |
 | `clocks => monotonic`: a refused clock answers `ENOTCAPABLE` | `clocks => monotonic`: `wall-clock` `now` and `resolution` trap with `kind => clock_refused`, since they have no error case |
 | `stdin => stream`, `stdout => stream` | the same, through the same pipe and callback |
 | a streamed stdout reports itself a terminal | it does not: Wasmtime's custom stdout is no terminal for WASI 0.2, so a program's C library buffers it; flush in the guest |

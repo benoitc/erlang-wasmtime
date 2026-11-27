@@ -1,8 +1,8 @@
 # Troubleshooting
 
 The errors you are likely to meet, what they mean and what to do. Every
-guest failure is `{error, #{class, kind, message}}`; the `kind` is the key
-to look up here. Build problems show up as `rebar3 compile` output.
+guest failure is `{error, #{class, kind, msg, ctx}}`; the `kind` is the key
+to look up here, and `ctx.detail` holds Wasmtime's own words. Build problems show up as `rebar3 compile` output.
 
 ## The NIF does not load
 
@@ -22,7 +22,7 @@ to look up here. Build problems show up as `rebar3 compile` output.
 | `compilation settings are not compatible with the native host` | the `.cwasm` was compiled with other engine settings (fuel, opt_level, target, CPU features) | precompile on the same platform with the options you load with; `deserialize/2` with `#{fuel => true}` or the `opt_level` used; see [precompiled](precompiled.md) |
 | `module was compiled with concurrency support but it is not enabled for the host` | the `.cwasm` came from a tool with different engine defaults (the Wasmtime CLI, another embedding) | compile with this library's `serialize/1`, or the flags `scripts/precompile-shims.sh` uses |
 | `too_many_configurations` | more than 32 distinct compile option sets in this VM | reuse option sets; engines are never freed |
-| `class => link` | an import the module needs is not in `imports` (or WASI was not granted) | check `imports/1`; give `wasi => #{}` for WASI programs |
+| `unknown_import` (`ctx.module`, `ctx.name`) | an import the module needs is not in `imports` (or WASI was not granted) | check `imports/1`; give `wasi => #{}` for WASI programs |
 | `unsupported_import` | the module imports a memory, table or global | only function imports can come from Erlang |
 | `unsupported_type` | `exnref` in a signature, `v128` and references in one signature, or a value that cannot cross | split the function or keep the value inside the guest |
 
@@ -34,20 +34,24 @@ to look up here. Build problems show up as `rebar3 compile` output.
 | `interrupt` | `interrupt/1` was called, or the caller died | expected |
 | `out_of_fuel` | the `fuel` budget ran out | more fuel, or none |
 | `fuel_disabled` | `fuel` given for a module compiled without `fuel => true` | compile with fuel |
-| `busy` | memory, globals, tables or refs accessed while the guest runs | do it from a host function (the guest is parked) or when the call returns |
+| `instance_busy` | memory, globals, tables or refs accessed while the guest runs | do it from a host function (the guest is parked) or when the call returns |
 | `reentrant` | a host function called the instance it runs on | keep what you need (a funcref, data) and act after the call returns |
 | `stopped` | the instance handle was dropped or instantiation failed | keep a reference to the instance while you use it |
-| `wrong_instance` | a `ref()` used with another instance | refs belong to the instance that made them |
-| `badarity`, `badarg` | wrong number of arguments, or a value that does not match the type (`null` for a non-nullable reference, a funcref where an externref is expected, `{i31, N}` out of range) | check `exports/1` |
+| `foreign_reference` | a `ref()` used with another instance | refs belong to the instance that made them |
+| `argument_arity`, `argument_type`, `badarg` | wrong number of arguments, or a value that does not match the type (`null` for a non-nullable reference, a funcref where an externref is expected, `{i31, N}` out of range) | check `func_type_of/2` |
+| `host_error` with `ctx.wasi_exit` | the program called `proc_exit` | status 0 is a normal end |
 
 ## Host functions
 
-| Message | Meaning | Do |
+A failed host function answers `class => trap, kind => host_error`, with the
+import in `ctx.host` and the reason in `ctx.reason`.
+
+| `ctx.reason` | Meaning | Do |
 |---|---|---|
-| `host function timed out` | the Erlang fun did not return within `host_timeout` (default 30 s) | keep host funs short; hand long work to another process; raise `host_timeout` |
-| `host process is gone` | the `host` process died | restart it before instantiating |
-| `host function returned the wrong number of values` / `a value of the wrong type` | the fun's `{ok, Results}` does not match the import's type | return exactly the declared results |
-| an exception text in `message` | the fun raised; class, reason and stacktrace are in the message | the instance is still usable |
+| `host_timeout` | the Erlang fun did not return within `host_timeout` (default 30 s) | keep host funs short; hand long work to another process; raise `host_timeout` |
+| `host_gone` | the `host` process died | restart it before instantiating |
+| `result_arity`, `result_type` | the fun's `{ok, Results}` does not match the import's type | return exactly the declared results |
+| another term, with `ctx.stacktrace` | the fun raised | the instance is still usable |
 
 ## Streams
 
@@ -66,7 +70,7 @@ to look up here. Build problems show up as `rebar3 compile` output.
 | `class => link` naming a `wasi:*` interface | the component imports it without a version, or WASI was not granted | build with a toolchain that writes the version; give `wasi => #{}` |
 | `badarg` on a call | a value does not fit the WIT type (bad UTF-8, an unknown case or flag, a missing field, a number out of range), or a resource handle is dropped or unknown | check `exports/1` and the mapping in [components](components.md) |
 | `component` or `no_memory` | a core-module function (globals, tables, memory) used on a component instance | call the component's exports instead |
-| `class => call` on every call after a trap | the Component Model forbids re-entering an instance that trapped | instantiate a new one |
+| `kind => cannot_enter_component` on every call after a trap | the Component Model forbids re-entering an instance that trapped | instantiate a new one |
 | `class => link` naming `wasi:http/types` | the component makes HTTP requests and was not granted them | `wasi => #{http => all}`, if it may call any server |
 | `clock_refused` | the guest read the wall clock under `clocks => monotonic` | drop the option, or keep the guest off the wall clock |
 | streamed stdout arrives late or in one piece | a component's stdout is never a terminal, so its C library buffers it | flush in the guest |
@@ -81,7 +85,7 @@ to look up here. Build problems show up as `rebar3 compile` output.
 | `not_snapshotable` | the instance was made without `snapshotable => true`, or restored from an image | instantiate again with the option |
 | `module_not_loaded` on `snapshotable => true` or `load_snapshot/2` | the module came from `compile/1,2` | use `load/1,2` |
 | `snapshot_incompatible` | another `compatibility_key`, or an image file of another module | restore with the key it was captured with; load the image for the module it came from |
-| `class => preinit, kind => table_changed` on `snapshot/1,2` | a table changed since the instance was made | a snapshot carries memories and globals only |
+| `kind => table_changed` on `snapshot/1,2` | a table changed since the instance was made | a snapshot carries memories and globals only |
 
 ## Workers
 
@@ -99,13 +103,15 @@ to look up here. Build problems show up as `rebar3 compile` output.
 ## Reading a trap
 
 ```erlang
-{error, #{class := trap, kind := unreachable, message := Msg,
-          trace := [#{func_index := 3, func_offset := 12, func_name := ~"f", module_name := undefined} | _]}}
+{error, #{class := trap, kind := unreachable, msg := ~"unreachable",
+          ctx := #{detail := Detail,
+                   trace := [#{func_index := 3, func_offset := 12, func_name := ~"f",
+                               module_name := undefined} | _]}}}
 ```
 
 `trace` is innermost first. `func_name` is `undefined` when the module has
 no name section; `func_index` still identifies the function in
-`wasm-objdump` or `wasm-tools print`. `message` is Wasmtime's own text and
+`wasm-objdump` or `wasm-tools print`. `ctx.detail` is Wasmtime's own text and
 includes the backtrace.
 
 ## When the VM crashes

@@ -95,9 +95,9 @@ ERL_NIF_TERM restrict_clocks(wasmtime_linker_t *linker, ErlNifEnv *out) {
   wasmtime_error_t *e = define(linker, "clock_time_get", 1, time_get_cb);
   if (!e) e = define(linker, "clock_res_get", 0, res_get_cb);
   wasmtime_linker_allow_shadowing(linker, false);
-  return e ? error_to_term(out, e, "wasi") : 0;
+  return e ? error_to_term(out, e, "wasi_config") : 0;
 #else
   (void)linker;
-  return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
+  return mk_error_s(out, "link", "unavailable", "this build of erlang_wasmtime has no WASI");
 #endif
 }

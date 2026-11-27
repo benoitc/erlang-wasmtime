@@ -166,5 +166,5 @@ conformance_fixtures(_Artifact) ->
 
 %% A command ends by exiting: WASI's exit is an error of class `exit` here.
 classify({ok, _Values}, _State) -> continue;
-classify({error, #{class := exit, status := Code}}, _State) -> {stop, {exited, Code}};
+classify({error, #{ctx := #{wasi_exit := Code}}}, _State) -> {stop, {exited, Code}};
 classify({error, _}, _State) -> {stop, trapped}.

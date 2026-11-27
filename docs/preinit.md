@@ -163,7 +163,7 @@ Not carried, so it must be the same or absent when the result runs:
   init call that changes a table fails the capture with
   `kind => table_changed`.
 
-Refused, with `class => preinit`:
+Refused, with `class => link` (`malformed` for bytes that are no module):
 
 | Module | `kind` |
 |---|---|

@@ -83,7 +83,7 @@ memory_grow_from_guest(_) ->
     {ok, [-1]} = wasmtime:call(Inst, ~"grow", [2]),
     {ok, [3]} = wasmtime:call(Inst, ~"grow", [1]),
     {ok, [-1]} = wasmtime:call(Inst, ~"grow", [1]),
-    {ok, {4, 262144}} = wasmtime:memory_size(Inst),
+    {ok, 4} = wasmtime:memory_size(Inst),
     ok.
 
 memory_large_read_write(_) ->
@@ -91,11 +91,15 @@ memory_large_read_write(_) ->
     Data = crypto:strong_rand_bytes(1_000_000),
     ok = wasmtime:write_memory(Inst, 4096, Data),
     {ok, Data} = wasmtime:read_memory(Inst, 4096, 1_000_000),
-    {ok, {16, 1048576}} = wasmtime:memory_size(Inst),
+    {ok, 16} = wasmtime:memory_size(Inst),
     ok = wasmtime:write_memory(Inst, 1048576 - 1, <<1>>),
-    {error, #{kind := out_of_bounds}} = wasmtime:write_memory(Inst, 1048576 - 1, <<1, 2>>),
-    {error, #{kind := out_of_bounds}} = wasmtime:read_memory(Inst, 1048576, 1),
-    {error, #{kind := out_of_bounds}} = wasmtime:read_memory(Inst, 16#FFFFFFFFFFFFFFFF, 1),
+    {error, #{kind := out_of_bounds_memory_access}} = wasmtime:write_memory(
+        Inst, 1048576 - 1, <<1, 2>>
+    ),
+    {error, #{kind := out_of_bounds_memory_access}} = wasmtime:read_memory(Inst, 1048576, 1),
+    {error, #{kind := out_of_bounds_memory_access}} = wasmtime:read_memory(
+        Inst, 16#FFFFFFFFFFFFFFFF, 1
+    ),
     ok.
 
 memory_first_export_used(_) ->
@@ -110,7 +114,7 @@ memory_first_export_used(_) ->
           (export "mem_a" (memory $a)))
         """
     ),
-    {ok, {2, 131072}} = wasmtime:memory_size(Inst),
+    {ok, 2} = wasmtime:memory_size(Inst),
     ok.
 
 memory_size_after_grow(_) ->
@@ -121,11 +125,11 @@ memory_size_after_grow(_) ->
           (func (export "grow") (param i32) (result i32) local.get 0 memory.grow))
         """
     ),
-    {ok, {0, 0}} = wasmtime:memory_size(Inst),
-    {error, #{kind := out_of_bounds}} = wasmtime:read_memory(Inst, 0, 1),
+    {ok, 0} = wasmtime:memory_size(Inst),
+    {error, #{kind := out_of_bounds_memory_access}} = wasmtime:read_memory(Inst, 0, 1),
     {ok, <<>>} = wasmtime:read_memory(Inst, 0, 0),
     {ok, [0]} = wasmtime:call(Inst, ~"grow", [1]),
-    {ok, {1, 65536}} = wasmtime:memory_size(Inst),
+    {ok, 1} = wasmtime:memory_size(Inst),
     ok = wasmtime:write_memory(Inst, 0, ~"now"),
     ok.
 
@@ -142,17 +146,17 @@ memory_by_name(_) ->
           (data (memory $b) (i32.const 0) "in b"))
         """
     ),
-    {ok, {1, 65536}} = wasmtime:memory_size(Inst),
-    {ok, {1, 65536}} = wasmtime:memory_size(Inst, ~"memory"),
-    {ok, {2, 131072}} = wasmtime:memory_size(Inst, ~"scratch"),
+    {ok, 1} = wasmtime:memory_size(Inst),
+    {ok, 1} = wasmtime:memory_size(Inst, ~"memory"),
+    {ok, 2} = wasmtime:memory_size(Inst, ~"scratch"),
     {ok, ~"in b"} = wasmtime:read_memory(Inst, ~"scratch", 0, 4),
     {ok, <<0, 0, 0, 0>>} = wasmtime:read_memory(Inst, 0, 4),
     ok = wasmtime:write_memory(Inst, ~"scratch", 100, ~"x"),
     ok = wasmtime:write_memory(Inst, "scratch", 101, ~"y"),
     {ok, ~"xy"} = wasmtime:read_memory(Inst, ~"scratch", 100, 2),
     {ok, <<0, 0>>} = wasmtime:read_memory(Inst, ~"memory", 100, 2),
-    {error, #{class := memory, kind := no_memory}} = wasmtime:read_memory(Inst, ~"nope", 0, 1),
-    {error, #{class := memory, kind := out_of_bounds}} =
+    {error, #{class := link, kind := no_memory}} = wasmtime:read_memory(Inst, ~"nope", 0, 1),
+    {error, #{class := trap, kind := out_of_bounds_memory_access}} =
         wasmtime:read_memory(Inst, ~"memory", 131000, 1),
     ok.
 
@@ -245,7 +249,7 @@ lifetime_error_shape(_) ->
         wasmtime:read_memory(instance(~"(module)"), 0, 1)
     ],
     lists:foreach(
-        fun({error, #{class := C, kind := K, message := M}}) ->
+        fun({error, #{class := C, kind := K, msg := M}}) ->
             true = is_atom(C) andalso is_atom(K) andalso is_binary(M)
         end,
         Errors

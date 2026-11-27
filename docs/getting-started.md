@@ -50,7 +50,7 @@ instantiate as often as you like.
 
 ```erlang
 [] = wasmtime:imports(Mod),
-[{~"memory", memory}, {~"add", func}] = wasmtime:exports(Mod).
+#{~"memory" := {mem, _}, ~"add" := {func, _}} = wasmtime:exports(Mod).
 ```
 
 ## Instantiate and call
@@ -67,17 +67,20 @@ float cannot hold), `v128` as a 16-byte binary.
 ## Handle failure
 
 ```erlang
-{error, #{class := trap, kind := integer_division_by_zero}} =
+{error, #{class := trap, kind := integer_divide_by_zero}} =
     wasmtime:call(Inst, ~"div", [1, 0]).
 ```
 
-Every error is `{error, Map}` with `class`, `kind` and `message`. The instance
-survives a trap and can be called again.
+Every error is `{error, Map}` with `class`, `kind`, `msg` and `ctx`, the
+shape of erlang_wasm's `wasm_error`; `wasmtime_error` lists the classes and
+`format_error/1` renders one. The instance survives a trap and can be called
+again.
 
 ## Put a time limit on a call
 
 ```erlang
-{error, #{kind := timeout}} = wasmtime:call(Inst, ~"loop", [], #{timeout => 100}).
+{error, #{class := exhaustion, kind := timeout}} =
+    wasmtime:call(Inst, ~"loop", [], #{timeout => 100}).
 ```
 
 Or from another process while it runs:
@@ -120,7 +123,7 @@ one instance run one after the other.
 - `opt_level`: Cranelift's `none`, `speed` (default) or `speed_and_size`.
 - `proposals`: turn WebAssembly proposals off (or on) relative to Wasmtime's
   defaults. A module that uses a disabled one is refused by `compile/2` and
-  `validate/2` with `class => compile`, which is how you pin down what a
+  `validate/2` with `class => invalid`, which is how you pin down what a
   plugin format may contain.
 - `fuel`: compile with fuel metering, see below.
 
@@ -135,7 +138,7 @@ need nothing at load time.
 ```erlang
 {ok, Mod}  = wasmtime:compile(Bin, #{fuel => true}),
 {ok, Inst} = wasmtime:instantiate(Mod),
-{error, #{kind := out_of_fuel}} = wasmtime:call(Inst, ~"loop", [], #{fuel => 1000000}),
+{error, #{class := exhaustion, kind := out_of_fuel}} = wasmtime:call(Inst, ~"loop", [], #{fuel => 1000000}),
 {ok, Left} = wasmtime:fuel_remaining(Inst).
 ```
 
@@ -147,11 +150,11 @@ consumed across calls until set again.
 ## Read traps with their frames
 
 ```erlang
-{error, #{kind := unreachable, trace := [#{func_name := ~"inner"} | _]}} =
+{error, #{kind := unreachable, ctx := #{trace := [#{func_name := ~"inner"} | _]}}} =
     wasmtime:call(Inst, ~"outer", []).
 ```
 
-`trace` lists the wasm frames innermost first, with the function index and
+`ctx.trace` lists the wasm frames innermost first, with the function index and
 byte offset, and names when the module carries a name section.
 
 ## Globals and tables
@@ -173,11 +176,11 @@ what a reference term is and what you can do with it.
 ```erlang
 ok = wasmtime:write_memory(Inst, 0, <<"hello">>),
 {ok, <<"hello">>} = wasmtime:read_memory(Inst, 0, 5),
-{ok, {Pages, Bytes}} = wasmtime:memory_size(Inst).
+{ok, Pages} = wasmtime:memory_size(Inst).
 ```
 
 Memory is reachable while the instance is idle, or from inside a host function.
-During a call it returns `{error, #{kind := busy}}`. These act on the export
+During a call it returns `{error, #{kind := instance_busy}}`. These act on the export
 named `memory` (or the first exported memory); `read_memory/4`,
 `write_memory/4` and `memory_size/2` take an export name for modules with
 several memories.

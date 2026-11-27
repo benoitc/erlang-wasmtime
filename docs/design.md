@@ -32,6 +32,7 @@ thread, but never from two at once.
 | Change how components link, call or serve imports | `c_src/nif_component.c` |
 | Change how WIT values map to terms | `c_src/nif_cvalues.c` |
 | Measure a change against the CPython reactor | `bench/reactor_bench.erl`, run by `scripts/bench-reactor.sh` |
+| Change an error's class, kind or context | `c_src/nif_atoms.c` and `src/wasmtime_error.erl`, then "Errors" |
 | Add a NIF entry point | `c_src/nif_api.c`, then [CONTRIBUTING.md](../CONTRIBUTING.md) |
 | Change the build, the download, the archives | `scripts/`, [building](building.md), [RELEASING.md](../RELEASING.md) |
 
@@ -107,7 +108,7 @@ changed.
 | `interrupt` (atomic) | same signal for the guest itself, read by the epoch callback, which `stop_current` reaches at once by bumping the epoch |
 | `req->cancelled` | the caller does not want the result (died or timed out): run nothing if not started, send nothing if running |
 | `host.has_reply`, `host.reply` | the host call answer arrived |
-| `interrupted_fired`, `host.failed`, `host.msg` | how the running request ended, worker thread only, read by `outcome` |
+| `interrupted_fired`, `host.failed`, `host.error` | how the running request ended, worker thread only, read by `outcome` |
 | `wasm.instantiated` | the store holds a live instance; false before `do_instantiate` succeeds |
 
 Transitions, by who makes them:
@@ -115,7 +116,7 @@ Transitions, by who makes them:
 | Entry point | Thread | Does |
 |---|---|---|
 | `enqueue` | scheduler | refuses when `stopping`; refuses `reentrant` when `state == ST_IN_HOST` and the caller is the process serving that host call; monitors the caller; appends; broadcasts |
-| `worker_main` | worker | pops; skips `cancelled`; `ST_RUNNING`, clears `abort`, `interrupt`, `interrupted_fired`, `host_failed`; runs; `ST_IDLE`; sends the result unless `cancelled`; a failed instantiate sets `stopping` |
+| `worker_main` | worker | pops; skips `cancelled`; `ST_RUNNING`, clears `abort`, `interrupt`, `interrupted_fired`, `host.failed`; runs; `ST_IDLE`; sends the result unless `cancelled`; a failed instantiate sets `stopping` |
 | `host_exchange` | worker (inside the guest) | `ST_IN_HOST` while waiting for `host_reply`, bounded by `host_timeout`; spins up to `HOST_SPIN_NS` with `mu` released before the condition wait; `abort` ends the wait as `interrupted`; back to `ST_RUNNING` |
 | `inbox_wait` | worker (inside the guest) | waits on `cv` for bytes, `close/1` or `abort`; state stays `ST_RUNNING` |
 | `nif_host_reply` | scheduler | stores the reply if `ST_IN_HOST` and the id matches; broadcasts |
@@ -152,6 +153,23 @@ Replies go the other way through NIFs, never messages: `host_reply/3`,
 `send/2`, `close/1`. Terms in a message are built in a fresh
 `enif_alloc_env` and sent with `enif_send(NULL, ...)`, the only way a
 non-scheduler thread may send.
+
+## Errors
+
+Every error is `{error, #{class, kind, msg, ctx}}` with erlang_wasm's five
+classes, built in two places only: `nif_atoms.c` and `wasmtime_error`.
+
+- A trap with a code is mapped by `trap_rows`; a component's trap arrives as
+  an error and is recognised by Wasmtime's wording (`trap_by_text`). A new
+  Wasmtime version can add codes or reword: an unknown one is `trap/trap`
+  with Wasmtime's text as `msg`.
+- `malformed` and `invalid`, link failures and a few GC accesses are told
+  apart by Wasmtime's wording too; the fallback is a generic kind, never a
+  wrong class of failure.
+- A host function's failure is a whole error map: Erlang builds it
+  (`run_host`) and passes it to `host_reply`, the NIF builds it for the
+  failures it sees itself. It is kept in `host.error_env`, which only the
+  worker thread touches, and copied into the result.
 
 ## Values
 

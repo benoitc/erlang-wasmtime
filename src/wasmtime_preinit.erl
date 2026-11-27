@@ -55,7 +55,7 @@ run(Wasm, Opts, Init) when is_binary(Wasm), is_map(Opts) ->
             {ok, Before} ?= tables(Inst, Names),
             {ok, Snapshot} ?= snapshot(Inst, Names),
             Out = rewrite(M, Snapshot, Remove ++ initialize(Init)),
-            ok ?= wasmtime:validate(Out, maps:with([proposals], CompileOpts)),
+            {ok, _} ?= wasmtime:validate(Out, maps:with([proposals], CompileOpts)),
             {ok, Out}
         else
             {ok, _Changed} -> preinit_error(table_changed, "an init call changed a table");
@@ -96,7 +96,7 @@ capture(Inst, #{parsed := M, names := Names}, Before, CompileOpts) ->
             {ok, Before} ?= tables(Inst, Names),
             {ok, Snapshot} ?= snapshot(Inst, Names),
             Out = rewrite(M, Snapshot, []),
-            ok ?= wasmtime:validate(Out, maps:with([proposals], CompileOpts)),
+            {ok, _} ?= wasmtime:validate(Out, maps:with([proposals], CompileOpts)),
             {ok, Out}
         else
             {ok, _Changed} ->
@@ -109,7 +109,12 @@ capture(Inst, #{parsed := M, names := Names}, Before, CompileOpts) ->
     end.
 
 preinit_error(Kind, Msg) ->
-    {error, #{class => preinit, kind => Kind, message => iolist_to_binary(Msg)}}.
+    Class =
+        case Kind of
+            malformed -> malformed;
+            _ -> link
+        end,
+    wasmtime_error:new(Class, Kind, iolist_to_binary(Msg)).
 
 -spec fail(atom(), iodata()) -> no_return().
 fail(Kind, Msg) -> throw({preinit, Kind, Msg}).

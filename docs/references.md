@@ -68,8 +68,9 @@ ok = wasmtime:array_set(A, 0, 100).
 
 Fields and elements hold `value()`s, references included; `i8` and `i16`
 fields take and give integers. An index past the end is
-`{error, #{class := ref, kind := out_of_bounds}}`; a value of the wrong type
-is `kind => badarg`; a field the guest declared immutable is refused by
+`{error, #{class := trap, kind := out_of_bounds_array_access}}` for an array
+and `kind => out_of_bounds` for a struct field; a value of the wrong type is
+`kind => badarg`; a field the guest declared immutable is refused by
 Wasmtime. Wasmtime checks the type of a reference passed to a function
 whose parameter is a concrete type, so passing a struct where
 `(ref array)` is expected is an error, never a crash.
@@ -92,11 +93,11 @@ ok = wasmtime:table_set(Inst, ~"handlers", 2, Handler),
 - A `ref()` keeps its instance alive. It stays usable after you dropped the
   instance handle.
 - A `ref()` belongs to one instance; using it with another is
-  `kind => wrong_instance`.
+  `kind => foreign_reference`.
 - `externref/2` fails with `kind => gc_heap_full` when the GC heap is full;
   `gc/1` may make room.
 - Reading or writing through a `ref()` needs the guest idle or parked in a
-  host function, like memory access: `kind => busy` otherwise.
+  host function, like memory access: `kind => instance_busy` otherwise.
 
 ## Notes
 

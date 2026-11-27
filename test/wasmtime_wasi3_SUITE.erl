@@ -264,7 +264,7 @@ interrupt_waiting_program(_) ->
     {ok, Inst} = wasmtime:instantiate(Mod, #{wasi => #{}}),
     {error, #{kind := timeout}} = wasmtime:call(Inst, ~"nap", [], #{timeout => 300}),
     %% the worker is free again: this answers instead of queueing for an hour
-    {error, #{class := call}} = wasmtime:call(Inst, ~"nap", [], #{timeout => 5000}),
+    {error, #{class := link}} = wasmtime:call(Inst, ~"nap", [], #{timeout => 5000}),
     ok = wasmtime:destroy(Inst).
 
 precompiled(Config) ->

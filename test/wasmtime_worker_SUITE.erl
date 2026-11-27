@@ -174,7 +174,7 @@ trap_leaves_the_worker_usable(_) ->
 
 crashing_host_function_becomes_an_error(_) ->
     W = start(#{}),
-    {error, #{class := host}} = ?W:call(W, ~"host", [0]),
+    {error, #{class := trap}} = ?W:call(W, ~"host", [0]),
     true = is_process_alive(W),
     {ok, [4]} = ?W:call(W, ~"host", [2]),
     ok = ?W:stop(W).
@@ -261,7 +261,7 @@ stop_destroys_the_instance(_) ->
     Self = self(),
     Imports = (imports())#{
         {~"env", ~"host"} => fun(Ctx, [N]) ->
-            Self ! {instance, Ctx},
+            Self ! {instance, maps:get(instance, Ctx)},
             {ok, [N]}
         end
     },

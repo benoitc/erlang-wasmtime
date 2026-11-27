@@ -109,7 +109,7 @@ state_is_captured(_) ->
     {ok, [$h]} = wasmtime:call(Inst, ~"load", [100]),
     {ok, [7]} = wasmtime:call(Inst, ~"load", [200]),
     {ok, [9]} = wasmtime:call(Inst, ~"load", [70000]),
-    {ok, {2, _}} = wasmtime:memory_size(Inst),
+    {ok, 2} = wasmtime:memory_size(Inst),
     %% each instance starts from the snapshot, not from the last one's state
     {ok, [-4]} = wasmtime:call(run(Out), ~"bump", []),
     ok.
@@ -130,20 +130,20 @@ start_section_runs_once(_) ->
 initialize_removed(_) ->
     {ok, Out} = preinit(counter_wat(), #{}, [~"_initialize", ~"init"]),
     {ok, Mod} = wasmtime:compile(Out),
-    Names = [N || {N, _} <- wasmtime:exports(Mod)],
+    Names = maps:keys(wasmtime:exports(Mod)),
     false = lists:member(~"_initialize", Names),
     true = lists:member(~"init", Names),
     false = lists:any(fun(N) -> binary:match(N, ~"__wasmtime_preinit") =/= nomatch end, Names),
     %% not called, so kept
     {ok, Out2} = preinit(counter_wat(), #{}, [~"init"]),
     {ok, Mod2} = wasmtime:compile(Out2),
-    true = lists:member({~"_initialize", func}, wasmtime:exports(Mod2)),
+    #{~"_initialize" := {func, _}} = wasmtime:exports(Mod2),
     ok.
 
 remove_exports(_) ->
     {ok, Out} = preinit(counter_wat(), #{remove_exports => [~"init", "k"]}, [~"init"]),
     {ok, Mod} = wasmtime:compile(Out),
-    Names = [N || {N, _} <- wasmtime:exports(Mod)],
+    Names = maps:keys(wasmtime:exports(Mod)),
     [] = [N || N <- Names, N =:= ~"init" orelse N =:= ~"k"],
     ok.
 
@@ -166,7 +166,7 @@ init_fun(_) ->
     end,
     {ok, [-3]} = wasmtime:call(run(Out), ~"bump", []),
     %% anything but ok, {ok, _} or an error refuses the snapshot
-    {error, #{class := preinit, kind := init}} = preinit(counter_wat(), #{}, fun(_) -> nope end),
+    {error, #{class := link, kind := init}} = preinit(counter_wat(), #{}, fun(_) -> nope end),
     ok.
 
 init_failures(_) ->
@@ -177,7 +177,7 @@ init_failures(_) ->
       (func (export "ok")))
     """,
     {error, #{class := trap, kind := unreachable}} = preinit(Wat, #{}, [~"ok", ~"boom"]),
-    {error, #{kind := no_such_export}} = preinit(Wat, #{}, [~"missing"]),
+    {error, #{kind := unknown_export}} = preinit(Wat, #{}, [~"missing"]),
     ok.
 
 host_functions_during_init(_) ->
@@ -328,7 +328,7 @@ serialize_and_pool(Config) ->
 
 refused_modules(_) ->
     Refused = fun(Kind, Wat) ->
-        {error, #{class := preinit, kind := Kind}} = preinit(Wat, #{}, [])
+        {error, #{class := link, kind := Kind}} = preinit(Wat, #{}, [])
     end,
     Refused(unsupported_import, ~"(module (import \"env\" \"m\" (memory 1)))"),
     Refused(unsupported_import, ~"(module (import \"env\" \"g\" (global i32)))"),
@@ -336,10 +336,10 @@ refused_modules(_) ->
     Refused(unsupported_type, ~"(module (global (mut externref) (ref.null extern)))"),
     Refused(unsupported_type, ~"(module (type (struct (field i32))))"),
     Refused(unsupported, ~"(module (memory 1 1 shared))"),
-    {error, #{class := preinit, kind := malformed}} = wasmtime:preinit(~"garbage", #{}, []),
-    {error, #{class := preinit, kind := malformed}} =
+    {error, #{class := malformed}} = wasmtime:preinit(~"garbage", #{}, []),
+    {error, #{class := malformed}} =
         wasmtime:preinit(<<0, "asm", 1, 0, 0, 0, 1, 100>>, #{}, []),
-    {error, #{class := preinit, kind := unsupported}} =
+    {error, #{class := link, kind := unsupported}} =
         wasmtime:preinit(<<0, "asm", 13, 0, 1, 0>>, #{}, []),
     %% an immutable reference global and funcref tables are fine
     {ok, _} = preinit(
@@ -359,7 +359,7 @@ table_changed(_) ->
       (func (export "set") (table.set (i32.const 1) (ref.func $f)))
       (func (export "same") (table.set (i32.const 1) (ref.null func))))
     """,
-    {error, #{class := preinit, kind := table_changed}} = preinit(Wat, #{}, [~"set"]),
+    {error, #{class := link, kind := table_changed}} = preinit(Wat, #{}, [~"set"]),
     %% writing back what was there is no change
     {ok, _} = preinit(Wat, #{}, [~"same"]),
     ok.
@@ -390,7 +390,7 @@ destroy_idle(_) ->
     {ok, [1]} = wasmtime:call(Inst, ~"one", []),
     ok = wasmtime:destroy(Inst),
     {error, #{kind := stopped}} = wasmtime:call(Inst, ~"one", []),
-    {error, #{kind := no_such_export}} = wasmtime:get_global(Inst, ~"g"),
+    {error, #{kind := unknown_export}} = wasmtime:get_global(Inst, ~"g"),
     {error, #{kind := no_memory}} = wasmtime:read_memory(Inst, 0, 1),
     ok.
 

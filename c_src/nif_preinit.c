@@ -128,7 +128,7 @@ ERL_NIF_TERM nif_preinit_global(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
   case WASMTIME_V128: kind = "v128", n = 16, memcpy(bits, v.of.v128, 16); break;
   default:
     wasmtime_val_unroot(&v);
-    return mk_error_s(env, "preinit", "unsupported_type", "a reference global cannot be captured");
+    return mk_error_s(env, "link", "unsupported_type", "a reference global cannot be captured");
   }
   /* The C API is little-endian only, like every host Wasmtime supports. */
   return enif_make_tuple3(env, atom_ok, mk_atom(env, kind), mk_binary(env, bits, n));
@@ -168,7 +168,7 @@ ERL_NIF_TERM nif_preinit_table(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv
   pthread_mutex_unlock(&inst->mu);
   if (refused) {
     enif_release_binary(&out);
-    return mk_error_s(env, "preinit", "unsupported_type", refused);
+    return mk_error_s(env, "link", "unsupported_type", refused);
   }
   return enif_make_tuple2(env, atom_ok, enif_make_binary(env, &out));
 }

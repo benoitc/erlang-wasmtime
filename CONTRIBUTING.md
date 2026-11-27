@@ -112,7 +112,7 @@ options map with its default; `parse_options` or `configure_wasi` in
 
 ## Conventions
 
-- Guest failures never raise. `{error, #{class, kind, message}}` and a
+- Guest failures never raise. `{error, #{class, kind, msg, ctx}}` and a
   `trace` for traps. New `kind`s are listed in `docs/features.md`.
 - One OS thread per instance, requests queued, results as messages. Do not
   add a code path where a scheduler thread waits on the worker.

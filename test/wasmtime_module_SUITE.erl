@@ -95,7 +95,7 @@ module_from_binary(_) ->
     %% the smallest valid module: magic + version
     {ok, Mod} = wasmtime:compile(<<0, "asm", 1, 0, 0, 0>>),
     [] = wasmtime:imports(Mod),
-    [] = wasmtime:exports(Mod),
+    true = wasmtime:exports(Mod) =:= #{},
     {ok, _} = wasmtime:instantiate(Mod),
     ok.
 
@@ -103,14 +103,16 @@ module_from_wat(_) ->
     {ok, _} = wasmtime:compile({wat, ~"(module)"}),
     {ok, _} = wasmtime:compile({wat, "(module)"}),
     {ok, _} = wasmtime:compile({wat, ["(mod", <<"ule)">>]}),
-    {error, #{class := compile, message := Msg}} = wasmtime:compile({wat, ~"(modul)"}),
+    {error, #{class := malformed, kind := syntax_error, ctx := #{detail := Msg}}} =
+        wasmtime:compile({wat, ~"(modul)"}),
     ?assert(byte_size(Msg) > 0),
     ok.
 
 module_invalid(_) ->
-    {error, #{class := compile}} = wasmtime:compile(<<>>),
-    {error, #{class := compile}} = wasmtime:compile(<<0, "asm", 2, 0, 0, 0>>),
-    {error, #{class := compile}} = wasmtime:compile(<<0, "asm", 1, 0, 0, 0, 255>>),
+    {error, #{class := malformed, kind := unexpected_end}} = wasmtime:compile(<<>>),
+    {error, #{class := malformed, kind := unknown_binary_version}} =
+        wasmtime:compile(<<0, "asm", 2, 0, 0, 0>>),
+    {error, #{class := malformed}} = wasmtime:compile(<<0, "asm", 1, 0, 0, 0, 255>>),
     ?assertError(function_clause, wasmtime:compile(not_a_binary)),
     ok.
 
@@ -145,8 +147,13 @@ module_export_kinds(_) ->
           (tag (export "e")))
         """
     ),
-    [{~"f", func}, {~"g", global}, {~"t", table}, {~"m", memory}, {~"e", tag}] =
-        wasmtime:exports(Mod),
+    #{
+        ~"f" := {func, undefined},
+        ~"g" := {global, undefined},
+        ~"t" := {table, undefined},
+        ~"m" := {mem, undefined},
+        ~"e" := {tag, undefined}
+    } = wasmtime:exports(Mod),
     ok.
 
 module_reuse_across_processes(_) ->
@@ -169,7 +176,7 @@ module_reuse_across_processes(_) ->
     ok.
 
 module_validation_rejects_bad_types(_) ->
-    {error, #{class := compile, message := Msg}} =
+    {error, #{class := invalid, ctx := #{detail := Msg}}} =
         wasmtime:compile({wat, ~"(module (func (result i32) f32.const 1))"}),
     ?assertMatch({_, _}, binary:match(Msg, ~"type mismatch")),
     ok.
@@ -181,17 +188,18 @@ serialize_roundtrip(_) ->
     {ok, Bin} = wasmtime:serialize(Mod),
     ?assert(byte_size(Bin) > 0),
     {ok, Mod2} = wasmtime:deserialize(Bin),
-    [{~"one", func}] = wasmtime:exports(Mod2),
+    #{~"one" := {func, undefined}} = wasmtime:exports(Mod2),
     {ok, Inst} = wasmtime:instantiate(Mod2),
     {ok, [1]} = wasmtime:call(Inst, ~"one", []),
     %% the precompiled form is not a wasm module and vice versa
-    {error, #{class := compile}} = wasmtime:compile(Bin),
+    {error, #{class := malformed}} = wasmtime:compile(Bin),
     ok.
 
 serialize_rejects_garbage(_) ->
-    {error, #{class := compile}} = wasmtime:deserialize(<<"not precompiled">>),
-    {error, #{class := compile}} = wasmtime:deserialize(<<>>),
-    {error, #{class := compile}} = wasmtime:deserialize(<<0, "asm", 1, 0, 0, 0>>),
+    {error, #{class := link, kind := incompatible_module}} =
+        wasmtime:deserialize(<<"not precompiled">>),
+    {error, #{class := link}} = wasmtime:deserialize(<<>>),
+    {error, #{class := link}} = wasmtime:deserialize(<<0, "asm", 1, 0, 0, 0>>),
     ok.
 
 %% -------------------------------------------------------------- memories
@@ -223,7 +231,8 @@ opt_level_precompiled(_) ->
     %% fuel is checked: a metered module needs a metered engine
     {ok, Metered} = wasmtime:compile({wat, add_wat()}, #{fuel => true, opt_level => none}),
     {ok, MBin} = wasmtime:serialize(Metered),
-    {error, #{class := compile}} = wasmtime:deserialize(MBin, #{opt_level => none}),
+    {error, #{class := link, kind := incompatible_module}} =
+        wasmtime:deserialize(MBin, #{opt_level => none}),
     {ok, _} = wasmtime:deserialize(MBin, #{fuel => true}),
     {ok, _} = wasmtime:deserialize(MBin),
     ok.
@@ -231,17 +240,17 @@ opt_level_precompiled(_) ->
 proposals_restrict_validation(_) ->
     %% validate/2 takes the binary form; these two are hand-assembled
     Simd = simd_binary(),
-    ok = wasmtime:validate(Simd),
-    {error, #{class := compile, message := Msg}} =
+    {ok, Simd} = wasmtime:validate(Simd),
+    {error, #{class := invalid, ctx := #{detail := Msg}}} =
         wasmtime:validate(Simd, #{proposals => #{simd => false}}),
     ?assertMatch({_, _}, binary:match(Msg, ~"SIMD")),
-    {error, #{class := compile}} = wasmtime:compile(Simd, #{proposals => #{simd => false}}),
+    {error, #{class := invalid}} = wasmtime:compile(Simd, #{proposals => #{simd => false}}),
     {ok, _} = wasmtime:compile(Simd, #{proposals => #{threads => false}}),
     Shared = threads_binary(),
     {ok, _} = wasmtime:compile(Shared),
-    {error, #{class := compile}} = wasmtime:compile(Shared, #{proposals => #{threads => false}}),
+    {error, #{class := invalid}} = wasmtime:compile(Shared, #{proposals => #{threads => false}}),
     %% a set Wasmtime would refuse is an error here, never an engine abort
-    {error, #{class := compile, kind := badarg}} =
+    {error, #{class := link, kind := badarg}} =
         wasmtime:compile(Simd, #{proposals => #{simd => false, relaxed_simd => true}}),
     %% disabling SIMD implies disabling relaxed SIMD
     {ok, Mod} = wasmtime:compile(add_binary(), #{proposals => #{simd => false}}),
@@ -316,7 +325,7 @@ pooling_roundtrip(_) ->
 
 pooling_limits(_) ->
     %% a memory bigger than a slot is refused when compiled for the pool
-    {error, #{class := compile}} =
+    {error, #{class := exhaustion, kind := pool_limit}} =
         wasmtime:compile({wat, ~"(module (memory 2000))"}, wasmtime_test:pooling()),
     %% a guest growing past the slot fails its grow, like past memory_limit
     {ok, Mod} = wasmtime:compile(
@@ -383,7 +392,7 @@ deserialize_file(Config) ->
         {ok, [3]} = wasmtime:call(I, ~"add", [1, 2])
      || M <- [M1, M2], {ok, I} <- [wasmtime:instantiate(M)]
     ],
-    {error, #{class := compile}} = wasmtime:deserialize_file(Path ++ ".missing"),
+    {error, #{class := link, kind := file_error}} = wasmtime:deserialize_file(Path ++ ".missing"),
     ok.
 
 engine_cap(_) ->
@@ -413,10 +422,13 @@ engine_cap(_) ->
     ok.
 
 validate_module(_) ->
-    ok = wasmtime:validate(<<0, "asm", 1, 0, 0, 0>>),
-    {error, #{class := compile}} = wasmtime:validate(<<"garbage">>),
+    Empty = <<0, "asm", 1, 0, 0, 0>>,
+    {ok, Empty} = wasmtime:validate(Empty),
+    Compiled = compile(~"(module)"),
+    {ok, Compiled} = wasmtime:validate(Compiled),
+    {error, #{class := malformed}} = wasmtime:validate(<<"garbage">>),
     %% a type section announcing five entries and holding none
-    {error, #{class := compile, message := Msg}} = wasmtime:validate(
+    {error, #{class := malformed, ctx := #{detail := Msg}}} = wasmtime:validate(
         <<0, "asm", 1, 0, 0, 0, 1, 1, 5>>
     ),
     ?assert(byte_size(Msg) > 0),
@@ -446,9 +458,9 @@ module_func_types(_) ->
     {ok, Bin} = wasmtime:wat2wasm(Wat),
     {ok, Types} = wasmtime:func_types_of(Bin),
     {ok, {[i32, i64], [f64]}} = wasmtime:func_type_of(Mod, ~"add"),
-    {error, #{class := link, kind := not_a_func_export}} = wasmtime:func_type_of(Mod, ~"memory"),
-    {error, #{class := link, kind := not_a_func_export}} = wasmtime:func_type_of(Mod, ~"nope"),
-    {error, #{class := compile}} = wasmtime:func_types_of(~"not wasm"),
+    {error, {not_a_func_export, ~"memory"}} = wasmtime:func_type_of(Mod, ~"memory"),
+    {error, {not_a_func_export, ~"nope"}} = wasmtime:func_type_of(Mod, ~"nope"),
+    {error, {undecodable_core, #{class := malformed}}} = wasmtime:func_types_of(~"not wasm"),
     ok.
 
 %% ------------------------------------------------------------------- cache
@@ -485,7 +497,7 @@ cache_shares_a_module(_) ->
     Before = wasmtime_module_cache:resident(),
     %% a module that was compiled, not loaded
     ok = wasmtime:unload(compile(~"(module)")),
-    {error, #{class := compile}} = wasmtime:load(~"not wasm"),
+    {error, #{class := malformed}} = wasmtime:load(~"not wasm"),
     Before = wasmtime_module_cache:resident(),
     ok.
 
@@ -568,7 +580,7 @@ cache_load_file(Config) ->
     {ok, FromText} = wasmtime:load_file(Wat),
     {ok, Inst} = wasmtime:instantiate(FromText),
     {ok, [5]} = wasmtime:call(Inst, ~"f", []),
-    {error, #{class := compile, kind := file_error}} =
+    {error, #{class := link, kind := file_error}} =
         wasmtime:load_file(filename:join(Dir, "missing.wasm")),
     ok = wasmtime:unload(Mod),
     ok = wasmtime:unload(Mod),
@@ -582,7 +594,7 @@ cache_full(_) ->
     try
         {ok, A} = wasmtime:load(wat(6)),
         {ok, B} = wasmtime:load(wat(7)),
-        {error, #{class := compile, kind := cache_full}} = wasmtime:load(wat(8)),
+        {error, #{class := exhaustion, kind := cache_full}} = wasmtime:load(wat(8)),
         %% a resident module is still found
         {ok, A} = wasmtime:load(wat(6)),
         ok = wasmtime:unload(B),
@@ -597,7 +609,7 @@ cache_full(_) ->
 cache_not_started(_) ->
     ok = application:stop(erlang_wasmtime),
     try
-        {error, #{class := compile, kind := not_started}} = wasmtime:load(wat(9)),
+        {error, #{class := link, kind := not_started}} = wasmtime:load(wat(9)),
         ok = wasmtime:unload(compile(~"(module)")),
         %% everything that is not the cache works without the application
         {ok, Inst} = wasmtime:instantiate(compile(~"(module (func (export \"f\")))")),
@@ -615,7 +627,7 @@ names_for_erlang_wasm(_) ->
     {ok, _} = wasmtime:instantiate(Mod, #{}, #{profile => script}),
     {error, #{class := link, kind := unknown_profile}} =
         wasmtime:instantiate(Mod, #{}, #{profile => fast}),
-    [{~"f", func}, {~"m", memory}] = wasmtime:exports(Inst),
+    #{~"f" := {func, undefined}, ~"m" := {mem, undefined}} = wasmtime:exports(Inst),
     true = wasmtime:exports(Inst) =:= wasmtime:exports(Mod),
     ok = wasmtime:pin(Inst, some_ref),
     ok = wasmtime:release(Inst, some_ref),

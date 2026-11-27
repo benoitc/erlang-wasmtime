@@ -180,7 +180,7 @@ imports_no_result_host(_) ->
     Inst = instance(Wat, #{imports => #{{~"env", ~"f"} => fun(_, []) -> {ok, []} end}}),
     {ok, []} = wasmtime:call(Inst, ~"g", []),
     Bad = instance(Wat, #{imports => #{{~"env", ~"f"} => fun(_, []) -> {ok, [1]} end}}),
-    {error, #{class := host}} = wasmtime:call(Bad, ~"g", []),
+    {error, #{class := trap}} = wasmtime:call(Bad, ~"g", []),
     ok.
 
 imports_multi_result_host(_) ->
@@ -234,7 +234,7 @@ host_process_reentrancy_refused(_) ->
     Self = self(),
     Handler = spawn_link(fun() -> handler(Self) end),
     Twice = fun(Ctx, [X]) ->
-        Self ! {inner, wasmtime:call(Ctx, ~"run", [1])},
+        Self ! {inner, wasmtime:call(maps:get(instance, Ctx), ~"run", [1])},
         {ok, [X]}
     end,
     {ok, Inst} = wasmtime:instantiate(compile(host_wat()), #{
@@ -259,7 +259,8 @@ host_process_gone(_) ->
         imports => #{{~"env", ~"twice"} => fun(_, [X]) -> {ok, [X]} end}
     }),
     T0 = erlang:monotonic_time(millisecond),
-    {error, #{class := host, message := ~"host process is gone"}} = wasmtime:call(Inst, ~"run", [1]),
+    {error, #{class := trap, kind := host_error, ctx := #{reason := host_gone}}} =
+        wasmtime:call(Inst, ~"run", [1]),
     ?assert(erlang:monotonic_time(millisecond) - T0 < 1000),
     ok.
 

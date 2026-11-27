@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Breaking: errors now have erlang_wasm's shape, `class`, `kind`, `msg` and
+  `ctx`, with its five classes and its kind names. `message`, `trace` and
+  `status` are gone: use `msg`, `ctx.trace` and `ctx.wasi_exit`. Script
+  worker errors use `msg` too.
+- Breaking: a host function receives a context map holding the instance,
+  not the instance itself. The memory functions accept either.
+- Breaking: `proc_exit` is an error whatever the status, including 0;
+  `run/1,2` still answers `ok` for status 0.
+- Breaking: `memory_size/1,2` answers the number of pages, `exports/1` a
+  map, `validate/1,2` `{ok, Module}`, and `func_type_of/2` and
+  `func_types_of/1` answer erlang_wasm's error tuples.
+- Breaking: erlang_wasm options this library cannot honour, unknown `wasi`
+  keys, and `max_depth` or `max_host_calls` on a call are refused instead of
+  ignored.
+- Host functions can be given as `{Module, Function}` and can answer
+  `{trap, Reason}`. `wasmtime_error` builds and formats errors.
+- The `wasi` options accept `env` as a map and `clocks` as a list.
+- A module whose start function never returns could hang `instantiate`
+  whatever its `timeout`. Fixed.
+- A `wasi` `env` map or `clocks` list crashed the caller. Fixed.
 - Wasmtime 51.0.0. Modules and components precompiled with an earlier
   version are refused: precompile them again.
 - Modules using the wide arithmetic proposal (128-bit integer operations)

@@ -137,18 +137,19 @@ instance(Config, Opts) ->
 %% --------------------------------------------------------------- modules
 
 compile_errors(_) ->
-    {error, #{class := compile, message := _}} = wasmtime:compile({wat, ~"(module (func"}),
-    {error, #{class := compile}} = wasmtime:compile(<<"not wasm">>),
-    {error, #{class := compile}} =
+    {error, #{class := malformed, kind := syntax_error}} = wasmtime:compile(
+        {wat, ~"(module (func"}
+    ),
+    {error, #{class := malformed, kind := magic_header_not_detected}} =
+        wasmtime:compile(<<"not wasm">>),
+    {error, #{class := invalid, kind := type_mismatch}} =
         wasmtime:compile({wat, ~"(module (func (result i32) i64.const 1))"}),
     ok.
 
 imports_exports(Config) ->
     Mod = ?config(basic, Config),
     [{~"env", ~"log", func}] = wasmtime:imports(Mod),
-    Exports = wasmtime:exports(Mod),
-    {~"memory", memory} = lists:keyfind(~"memory", 1, Exports),
-    {~"add", func} = lists:keyfind(~"add", 1, Exports),
+    #{~"memory" := {mem, _}, ~"add" := {func, _}} = wasmtime:exports(Mod),
     ok.
 
 %% ----------------------------------------------------------------- calls
@@ -165,25 +166,27 @@ call_values(Config) ->
     {ok, [neg_infinity]} = wasmtime:call(Inst, ~"half", [neg_infinity]),
     {ok, [3.0]} = wasmtime:call(Inst, ~"sqrt32", [9.0]),
     {ok, [2, 1]} = wasmtime:call(Inst, ~"swap", [1, 2]),
-    {error, #{class := call, kind := badarity}} = wasmtime:call(Inst, ~"add", [1]),
-    {error, #{class := call, kind := badarg}} = wasmtime:call(Inst, ~"add", [1, foo]),
-    {error, #{class := call, kind := badarg}} = wasmtime:call(Inst, ~"add", [1 bsl 33, 0]),
-    {error, #{class := call, kind := no_such_export}} = wasmtime:call(Inst, ~"nope", []),
-    {error, #{class := call, kind := not_a_function}} = wasmtime:call(Inst, ~"memory", []),
+    {error, #{class := link, kind := argument_arity}} = wasmtime:call(Inst, ~"add", [1]),
+    {error, #{class := link, kind := argument_type}} = wasmtime:call(Inst, ~"add", [1, foo]),
+    {error, #{class := link, kind := argument_type}} = wasmtime:call(Inst, ~"add", [1 bsl 33, 0]),
+    {error, #{class := link, kind := unknown_export}} = wasmtime:call(Inst, ~"nope", []),
+    {error, #{class := link, kind := not_a_function}} = wasmtime:call(Inst, ~"memory", []),
     ok.
 
 traps(Config) ->
     Inst = instance(Config),
-    {error, #{class := trap, kind := unreachable, message := Msg}} = wasmtime:call(
+    {error, #{class := trap, kind := unreachable, msg := Msg}} = wasmtime:call(
         Inst, ~"boom", []
     ),
     ?assertMatch({_, _}, binary:match(Msg, ~"unreachable")),
-    {error, #{class := trap, kind := integer_division_by_zero}} = wasmtime:call(Inst, ~"div", [1, 0]),
+    {error, #{class := trap, kind := integer_divide_by_zero}} = wasmtime:call(Inst, ~"div", [1, 0]),
     {error, #{class := trap, kind := integer_overflow}} = wasmtime:call(Inst, ~"div", [
         -16#80000000, -1
     ]),
-    {error, #{class := trap, kind := stack_overflow}} = wasmtime:call(Inst, ~"recurse", [1]),
-    {error, #{class := trap, kind := memory_out_of_bounds}} = wasmtime:call(Inst, ~"load", [
+    {error, #{class := exhaustion, kind := call_stack_exhausted}} = wasmtime:call(
+        Inst, ~"recurse", [1]
+    ),
+    {error, #{class := trap, kind := out_of_bounds_memory_access}} = wasmtime:call(Inst, ~"load", [
         16#FFFFFFF0
     ]),
     %% the instance survives its traps
@@ -193,8 +196,9 @@ traps(Config) ->
 %% ------------------------------------------------------------ host calls
 
 missing_import_fails_link(Config) ->
-    {error, #{class := link, message := Msg}} = wasmtime:instantiate(?config(basic, Config)),
-    ?assertMatch({_, _}, binary:match(Msg, ~"env::log")),
+    {error, #{class := link, kind := unknown_import, ctx := Ctx}} =
+        wasmtime:instantiate(?config(basic, Config)),
+    #{module := ~"env", name := ~"log"} = Ctx,
     ok.
 
 host_call(Config) ->
@@ -215,26 +219,23 @@ host_call(Config) ->
     ok.
 
 host_error(Config) ->
-    Inst = instance(Config, #{imports => #{{~"env", ~"log"} => fun(_, _) -> {error, ~"nope"} end}}),
-    {error, #{class := host, kind := host_error, message := ~"nope"}} = wasmtime:call(
-        Inst, ~"twice", [1]
-    ),
-    Inst2 = instance(Config, #{
-        imports => #{{~"env", ~"log"} => fun(_, _) -> {error, {some, term}} end}
-    }),
-    {error, #{class := host, message := ~"{some,term}"}} = wasmtime:call(Inst2, ~"twice", [1]),
-    Inst3 = instance(Config, #{imports => #{{~"env", ~"log"} => fun(_, _) -> {ok, [1, 2]} end}}),
-    {error, #{class := host, message := Msg}} = wasmtime:call(Inst3, ~"twice", [1]),
-    ?assertMatch({_, _}, binary:match(Msg, ~"wrong number")),
-    Inst4 = instance(Config, #{imports => #{{~"env", ~"log"} => fun(_, _) -> {ok, [1.5]} end}}),
-    {error, #{class := host, message := Msg4}} = wasmtime:call(Inst4, ~"twice", [1]),
-    ?assertMatch({_, _}, binary:match(Msg4, ~"wrong type")),
+    Failing = fun(Log) ->
+        Inst = instance(Config, #{imports => #{{~"env", ~"log"} => Log}}),
+        {error, #{class := trap, kind := host_error, ctx := Ctx}} =
+            wasmtime:call(Inst, ~"twice", [1]),
+        #{host := {~"env", ~"log"}} = Ctx,
+        maps:get(reason, Ctx)
+    end,
+    ~"nope" = Failing(fun(_, _) -> {error, ~"nope"} end),
+    {some, term} = Failing(fun(_, _) -> {trap, {some, term}} end),
+    result_arity = Failing(fun(_, _) -> {ok, [1, 2]} end),
+    result_type = Failing(fun(_, _) -> {ok, [1.5]} end),
     ok.
 
 host_exception(Config) ->
     Inst = instance(Config, #{imports => #{{~"env", ~"log"} => fun(_, _) -> error(kaboom) end}}),
-    {error, #{class := host, message := Msg}} = wasmtime:call(Inst, ~"twice", [1]),
-    ?assertMatch({_, _}, binary:match(Msg, ~"kaboom")),
+    {error, #{class := trap, ctx := #{reason := kaboom, class := error, stacktrace := [_ | _]}}} =
+        wasmtime:call(Inst, ~"twice", [1]),
     {ok, [3]} = wasmtime:call(Inst, ~"add", [1, 2]),
     ok.
 
@@ -251,9 +252,8 @@ host_timeout(Config) ->
     %% The Erlang fun still runs to completion in this process; the guest is
     %% the one that gives up waiting and traps.
     T0 = erlang:monotonic_time(millisecond),
-    {error, #{class := host, message := ~"host function timed out"}} = wasmtime:call(
-        Inst, ~"twice", [1]
-    ),
+    {error, #{class := trap, ctx := #{reason := host_timeout}}} =
+        wasmtime:call(Inst, ~"twice", [1]),
     ?assert(erlang:monotonic_time(millisecond) - T0 >= 100),
     ok.
 
@@ -281,20 +281,22 @@ reference_types_cross(_) ->
 
 memory_access(Config) ->
     Inst = instance(Config),
-    {ok, {1, 65536}} = wasmtime:memory_size(Inst),
+    {ok, 1} = wasmtime:memory_size(Inst),
     ok = wasmtime:write_memory(Inst, 100, <<1, 2, 3, 4>>),
     {ok, <<1, 2, 3, 4>>} = wasmtime:read_memory(Inst, 100, 4),
     {ok, [16#04030201]} = wasmtime:call(Inst, ~"load", [100]),
     {ok, []} = wasmtime:call(Inst, ~"store", [200, 16#11223344]),
     {ok, <<16#44, 16#33, 16#22, 16#11>>} = wasmtime:read_memory(Inst, 200, 4),
-    {error, #{class := memory, kind := out_of_bounds}} = wasmtime:read_memory(Inst, 65536, 1),
-    {error, #{class := memory, kind := out_of_bounds}} = wasmtime:write_memory(
+    {error, #{class := trap, kind := out_of_bounds_memory_access}} = wasmtime:read_memory(
+        Inst, 65536, 1
+    ),
+    {error, #{class := trap, kind := out_of_bounds_memory_access}} = wasmtime:write_memory(
         Inst, 65535, <<1, 2>>
     ),
     {ok, <<>>} = wasmtime:read_memory(Inst, 65536, 0),
     {ok, Mod} = wasmtime:compile({wat, ~"(module (func (export \"f\")))"}),
     {ok, NoMem} = wasmtime:instantiate(Mod),
-    {error, #{class := memory, kind := no_memory}} = wasmtime:read_memory(NoMem, 0, 1),
+    {error, #{class := link, kind := no_memory}} = wasmtime:read_memory(NoMem, 0, 1),
     ok.
 
 memory_limit(Config) ->
@@ -302,7 +304,7 @@ memory_limit(Config) ->
     {ok, [1]} = wasmtime:call(Inst, ~"grow", [1]),
     {ok, [2]} = wasmtime:call(Inst, ~"grow", [1]),
     {ok, [-1]} = wasmtime:call(Inst, ~"grow", [1]),
-    {ok, {3, _}} = wasmtime:memory_size(Inst),
+    {ok, 3} = wasmtime:memory_size(Inst),
     ok.
 
 instances_are_isolated(Config) ->
@@ -319,7 +321,9 @@ instances_are_isolated(Config) ->
 timeout_and_interrupt(Config) ->
     Inst = instance(Config),
     T0 = erlang:monotonic_time(millisecond),
-    {error, #{class := trap, kind := timeout}} = wasmtime:call(Inst, ~"loop", [], #{timeout => 100}),
+    {error, #{class := exhaustion, kind := timeout}} = wasmtime:call(Inst, ~"loop", [], #{
+        timeout => 100
+    }),
     Elapsed = erlang:monotonic_time(millisecond) - T0,
     ?assert(Elapsed >= 100 andalso Elapsed < 1000, Elapsed),
     %% the result was dropped in the NIF; within a tick or two the instance
@@ -435,8 +439,10 @@ wasi_dirs(Config) ->
 wasi_exit(_) ->
     {ok, Mod} = wasmtime:compile({wat, wasi_wat()}),
     {ok, Inst} = wasmtime:instantiate(Mod, #{wasi => #{}}),
-    {ok, []} = wasmtime:call(Inst, ~"exit", [0]),
-    {error, #{class := exit, kind := exit, status := 3}} = wasmtime:call(Inst, ~"exit", [3]),
+    {error, #{class := trap, kind := host_error, ctx := #{wasi_exit := 0}}} =
+        wasmtime:call(Inst, ~"exit", [0]),
+    {error, #{class := trap, kind := host_error, ctx := #{wasi_exit := 3}}} =
+        wasmtime:call(Inst, ~"exit", [3]),
     ok.
 
 %% --------------------------------------------------------------- lifetime
@@ -481,14 +487,14 @@ reentrant_call_refused(Config) ->
         host_timeout => infinity,
         imports => #{
             {~"env", ~"log"} => fun(Ctx, [X]) ->
-                Self ! {inner, wasmtime:call(Ctx, ~"add", [1, 2])},
+                Self ! {inner, wasmtime:call(maps:get(instance, Ctx), ~"add", [1, 2])},
                 {ok, [X]}
             end
         }
     }),
     {ok, [7]} = wasmtime:call(Inst, ~"twice", [7]),
     receive
-        {inner, {error, #{class := call, kind := reentrant}}} -> ok
+        {inner, {error, #{class := link, kind := reentrant}}} -> ok
     after 1000 -> ct:fail(no_inner)
     end,
     ok.
@@ -517,7 +523,7 @@ cancelled_call_leaves_no_messages(Config) ->
         {ok, [1]}
     end,
     Inst = instance(Config, #{host_timeout => 100, imports => #{{~"env", ~"log"} => Slow}}),
-    {error, #{class := host, message := ~"host function timed out"}} =
+    {error, #{class := trap, ctx := #{reason := host_timeout}}} =
         wasmtime:call(Inst, ~"twice", [1], #{timeout => 5000}),
     timer:sleep(200),
     receive
@@ -554,7 +560,7 @@ nif_options_by_key(_) ->
     Id = erlang:unique_integer([positive]),
     {ok, _} = wasmtime_nif:instantiate(Mod, #{}, Ref, Id),
     receive
-        {wasmtime_result, Ref, Id, {error, #{kind := badarg, message := M1}}} ->
+        {wasmtime_result, Ref, Id, {error, #{kind := badarg, msg := M1}}} ->
             {_, _} = binary:match(M1, ~"imports")
     after 2000 -> error(no_result)
     end,
@@ -574,7 +580,7 @@ nif_options_by_key(_) ->
     },
     {ok, _} = wasmtime_nif:instantiate(Mod, Good#{host_timeout => bad}, Ref, Id2),
     receive
-        {wasmtime_result, Ref, Id2, {error, #{kind := badarg, message := M2}}} ->
+        {wasmtime_result, Ref, Id2, {error, #{kind := badarg, msg := M2}}} ->
             {_, _} = binary:match(M2, ~"host_timeout")
     after 2000 -> error(no_result)
     end,

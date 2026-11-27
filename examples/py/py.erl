@@ -50,7 +50,8 @@ run(#{mod := Mod, dir := Dir}, Args, Opts) ->
             {ok, {Out, Err, _Dropped}} = wasmtime:read_output(Inst),
             case Result of
                 {ok, []} -> {ok, Out};
-                {error, #{class := exit, status := Status}} -> {error, {exit, Status, Err}};
+                {error, #{ctx := #{wasi_exit := 0}}} -> {ok, Out};
+                {error, #{ctx := #{wasi_exit := Status}}} -> {error, {exit, Status, Err}};
                 {error, #{kind := timeout}} -> {error, timeout};
                 {error, Reason} -> {error, Reason}
             end;

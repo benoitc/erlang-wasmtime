@@ -136,7 +136,7 @@ captures), and the calls to make in order.
 
 -doc """
 Called after every call, success or error: the worker interprets none of
-them. A WASI exit arrives as `{error, #{class := exit, status := N}}`, and
+them. A WASI exit arrives as `{error, #{ctx := #{wasi_exit := N}}}`, and
 only the adapter knows whether that ends the request.
 """.
 -callback classify({ok, [term()] | term()} | {error, map()}, adapter_state()) ->

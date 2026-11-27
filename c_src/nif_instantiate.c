@@ -66,19 +66,19 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
   if (enif_is_identical(wasi, atom_none)) return 0;
   for (int i = 0; i < 8; i++)
     if (!enif_get_map_value(env, wasi, keys[i], &t[i]))
-      return mk_error_s(out, "wasi", "config", "wasi option is malformed");
+      return mk_error_s(out, "link", "wasi_config", "wasi option is malformed");
   int network = 0, http = 0;
   if (!grant_of(env, wasi, "network", &network) || !grant_of(env, wasi, "http", &http))
-    return mk_error_s(out, "wasi", "config", "wasi network and http must be none or all");
+    return mk_error_s(out, "link", "wasi_config", "wasi network and http must be none or all");
 #if !NIF_HAVE_WASI
-  return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
+  return mk_error_s(out, "link", "unavailable", "this build of erlang_wasmtime has no WASI");
 #else
 #ifndef WASMTIME_FEATURE_WASI_HTTP
   if (http)
-    return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no wasi:http");
+    return mk_error_s(out, "link", "unavailable", "this build of erlang_wasmtime has no wasi:http");
 #endif
   if (network && !sockets_available())
-    return mk_error_s(out, "wasi", "unavailable",
+    return mk_error_s(out, "link", "unavailable",
                       "this build of erlang_wasmtime cannot open sockets to a guest");
   *grants = (http ? WASI_GRANT_HTTP : 0) | (network ? WASI_GRANT_NETWORK : 0);
 
@@ -239,12 +239,12 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
 done:
   if (err) {
     wasi_config_delete(cfg);
-    return mk_error_s(out, "wasi", "config", err);
+    return mk_error_s(out, "link", "wasi_config", err);
   }
   wasmtime_error_t *werr = wasmtime_context_set_wasi(inst->wasm.ctx, cfg); /* consumes cfg */
   if (werr) {
     wasmtime_error_delete(werr);
-    return mk_error_s(out, "wasi", "config", "wasi could not be configured");
+    return mk_error_s(out, "link", "wasi_config", "wasi could not be configured");
   }
 #ifdef WASMTIME_FEATURE_WASI_HTTP
   if (http) wasmtime_context_set_wasi_http(inst->wasm.ctx);
@@ -451,7 +451,7 @@ static linker_entry_t *build_entry(module_res_t *m, ErlNifEnv *env, ERL_NIF_TERM
     wasmtime_error_t *werr = wasmtime_linker_define_wasi(le->linker);
     if (werr) {
       wasmtime_error_delete(werr);
-      *err = mk_error_s(out, "wasi", "config", "wasi could not be linked");
+      *err = mk_error_s(out, "link", "wasi_config", "wasi could not be linked");
     }
     if (!*err && monotonic) *err = restrict_clocks(le->linker, out);
     if (!*err && tty_mask) *err = shadow_wasi(le->linker, tty_mask, out);
@@ -566,7 +566,7 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
 #endif
   /* preview 1 has no wasi:http and no sockets */
   if (grants)
-    return mk_error_s(out, "wasi", "unsupported",
+    return mk_error_s(out, "link", "unsupported",
                       "network and http are for components (WASI 0.2), not core modules");
   if ((err = link_entry(inst, env, o.imports, wasi, monotonic, out))) return err;
   if ((err = instantiate_module(inst, out))) return err;

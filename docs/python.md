@@ -81,10 +81,10 @@ writes.
 ## Handle failures
 
 An uncaught exception exits with status 1 and its traceback on stderr;
-`sys.exit(3)` gives `status => 3`:
+`sys.exit(3)` gives `wasi_exit => 3`:
 
 ```erlang
-{error, #{class := exit, status := 1}} = wasmtime:call(Inst, ~"_start", []),
+{error, #{ctx := #{wasi_exit := 1}}} = wasmtime:call(Inst, ~"_start", []),
 {ok, {_, Traceback, _}} = wasmtime:read_output(Inst).
 ```
 

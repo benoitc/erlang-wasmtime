@@ -19,25 +19,22 @@ architecture (x86_64 and aarch64) for the shims.
 ## Bump Wasmtime
 
 The pinned version is `scripts/wasmtime.version`. Everything below is
-tied to it: the upstream archives, this repo's runtime archives, the CLI
-that compiles the shims, the precompiled fixtures.
+tied to it: this repo's archives, the CLI that compiles the shims, the
+precompiled fixtures.
 
 1. Edit `scripts/wasmtime.version`.
-2. Download the two upstream macOS C API archives (`x86_64` and `aarch64`)
-   and replace their lines in `scripts/wasmtime.sha256`. The Linux (glibc
-   and musl) and FreeBSD full archives are this project's, from step 3.
-   Check that every patch in `scripts/wasmtime-patches` still applies and
+2. Check that every patch in `scripts/wasmtime-patches` still applies and
    is still needed; its README says what each is for.
 3. Set `scripts/wasmtime-runtime.rev` to `1` for a new Wasmtime version
    (bump it instead when only the build recipe changed), then run the
    runtime workflow: `gh workflow run wasmtime-runtime.yml`. It builds the
-   runtime-only library on native runners for every platform plus the full
-   library for Linux and FreeBSD, and attaches them to the release
+   runtime-only and the full library on native runners for every platform,
+   and attaches them to the release
    `wasmtime-runtime-<version>-r<rev>`. Assets are immutable: a rebuild
    gets a new revision and a new release, so a tagged erlang_wasmtime
    always downloads exactly what it pinned. Paste the workflow's
    `SHA256SUMS` runtime lines into `scripts/wasmtime-runtime.sha256` and the
-   `-c-api` lines (Linux, musl, FreeBSD) into `scripts/wasmtime.sha256`.
+   `-c-api` lines into `scripts/wasmtime.sha256`.
 4. Any change to `scripts/build-wasmtime.sh` or the workflow after the
    archives were built means step 3 again with a bumped revision before
    the release: the archives must come from the recipe the tag ships.
@@ -47,9 +44,9 @@ that compiles the shims, the precompiled fixtures.
    machine; commit the 14 files in `priv/shims/`. The flags in the script
    must match `make_config()` in `c_src/nif_engine.c`; `shim_files_load`
    in the tests fails when they drift.
-6. Look for `wasi_config_allow_tcp` or an equivalent in `wasi.h`: when the
-   C API can turn TCP and UDP on, `network => all` can stop being refused
-   (`configure_wasi` in `c_src/nif_instantiate.c`).
+6. Look for `wasi_config_allow_tcp` in Wasmtime's own `wasi.h`: once it is
+   there, drop `0002-c-api-wasi-sockets.patch` and its weak declarations in
+   `c_src/nif_instantiate.c`.
    Check the C API for changes that matter here: `wasmtime/conf.h`
    feature macros, the `wasmtime_val_t` layout, the reference API
    (`*_unroot` signatures), `wasi.h` stdio hooks, the component value

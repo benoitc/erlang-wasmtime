@@ -29,7 +29,7 @@
 # Other overrides:
 #   WASMTIME_CACHE_DIR          where to store downloads and builds
 #                               (default: _build/wasmtime)
-#   WASMTIME_RELEASE_URL, WASMTIME_UPSTREAM_URL, WASMTIME_BUILD_SCRIPT
+#   WASMTIME_RELEASE_URL, WASMTIME_BUILD_SCRIPT
 #                               where archives come from and what builds from
 #                               source; scripts/test-fetch.sh uses them to
 #                               drive every branch offline
@@ -43,7 +43,6 @@ REV=1
 # an archive of the old one must not be picked up from the cache.
 CACHE="${WASMTIME_CACHE_DIR:-$ROOT/_build/wasmtime}/$VERSION-r$REV"
 RELEASE_URL="${WASMTIME_RELEASE_URL:-https://github.com/benoitc/erlang-wasmtime/releases/download/wasmtime-runtime-$VERSION-r$REV}"
-UPSTREAM_URL="${WASMTIME_UPSTREAM_URL:-https://github.com/bytecodealliance/wasmtime/releases/download/$VERSION}"
 BUILD_SCRIPT="${WASMTIME_BUILD_SCRIPT:-$ROOT/scripts/build-wasmtime.sh}"
 
 # Platform: ARCH-OS as the archive names spell it; empty when unknown.
@@ -84,13 +83,9 @@ if [ "$VARIANT" = runtime ]; then
     SUMS="$ROOT/scripts/wasmtime-runtime.sha256"
 else
     NAME="wasmtime-$VERSION-$ARCH-$OS-c-api"
-    # Wasmtime publishes no FreeBSD archive, and its Linux ones lack the
-    # patches in scripts/wasmtime-patches (pagemap_scan, docs/preinit.md):
-    # this project's releases carry both. macOS takes upstream's.
-    case "$OS" in
-        linux|musl|freebsd) URL="$RELEASE_URL/$NAME.tar.xz" ;;
-        *) URL="$UPSTREAM_URL/$NAME.tar.xz" ;;
-    esac
+    # This project's own archives on every platform: Wasmtime's lack the
+    # patches in scripts/wasmtime-patches, and it publishes none for FreeBSD.
+    URL="$RELEASE_URL/$NAME.tar.xz"
     SUMS="$ROOT/scripts/wasmtime.sha256"
 fi
 FILE="$NAME.tar.xz"

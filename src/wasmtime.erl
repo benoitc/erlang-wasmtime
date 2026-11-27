@@ -213,7 +213,8 @@ components. See building.md, "Runtime-only builds".
     wat := boolean(),
     wasi := boolean(),
     components := boolean(),
-    wasi_http := boolean()
+    wasi_http := boolean(),
+    wasi_sockets := boolean()
 }.
 
 -doc """
@@ -313,9 +314,11 @@ WASI configuration. Nothing is granted by default.
   Wasmtime makes the request, and there is no rule per address. Full builds
   only (`features/0`, `wasi_http`). A core module answers `kind =>
   unsupported`.
-- `network`: `none`. Sockets cannot be granted: `all` answers `kind =>
-  unavailable`, because the Wasmtime C API has no way to enable TCP and UDP
-  for a guest.
+- `network`: `none` (the default) or `all`. With `all` a component may use
+  `wasi:sockets`: TCP, UDP and name lookup, to or from any address the node
+  can reach, the loopback included. A library without this project's
+  patches (`features/0`, `wasi_sockets`) answers `kind => unavailable`; a
+  core module answers `kind => unsupported`.
 """.
 -type wasi_options() :: #{
     args => inherit | [iodata()],

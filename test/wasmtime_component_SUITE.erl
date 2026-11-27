@@ -35,6 +35,7 @@
     wasi_versioned_import/1,
     wasi_clocks_component/1,
     wasi_network_grant/1,
+    wasi_network_timeout/1,
     wasi_http_grant/1,
     wasi_grants_refused/1,
     core_accessors_refused/1,
@@ -76,6 +77,7 @@ groups() ->
             wasi_versioned_import,
             wasi_clocks_component,
             wasi_network_grant,
+            wasi_network_timeout,
             wasi_http_grant,
             wasi_grants_refused
         ]},
@@ -435,8 +437,8 @@ command(Config, Name, Args, Grants) ->
     {ok, {Out, _, _}} = wasmtime:read_output(Inst),
     {Result, Out}.
 
-%% Sockets stay denied: the C API cannot enable TCP and UDP, so the grant
-%% is refused instead of being accepted and doing nothing.
+%% Sockets are denied unless `network => all`, which needs a library built
+%% with this project's patches (`features/0`, `wasi_sockets`).
 wasi_network_grant(Config) ->
     {Server, Port} = serve(~"pong\n"),
     Addr = "127.0.0.1:" ++ Port,
@@ -448,13 +450,48 @@ wasi_network_grant(Config) ->
     {{error, #{class := exit}}, <<"refused: ", _/binary>>} = net(
         Config, ["resolve", "localhost"], #{}
     ),
-    {error, #{class := wasi, kind := unavailable}} = wasmtime:instantiate(
-        component(Config, "net"), #{
-            wasi => #{network => all}
-        }
-    ),
+    case wasmtime:features() of
+        #{wasi_sockets := true} ->
+            {ok, ~"pong\n"} = net(Config, ["tcp", Addr], #{network => all}),
+            {ok, ~"true\n"} = net(Config, ["resolve", "localhost"], #{network => all}),
+            %% a connection nobody accepts is the guest's error, not ours
+            {{error, #{class := exit, status := 1}}, <<"refused: ", _/binary>>} =
+                net(Config, ["tcp", "127.0.0.1:" ++ closed_port()], #{network => all});
+        #{wasi_sockets := false} ->
+            {error, #{class := wasi, kind := unavailable}} = wasmtime:instantiate(
+                component(Config, "net"), #{wasi => #{network => all}}
+            )
+    end,
     exit(Server, kill),
     ok.
+
+closed_port() ->
+    {ok, L} = gen_tcp:listen(0, [{ip, {127, 0, 0, 1}}]),
+    {ok, Port} = inet:port(L),
+    ok = gen_tcp:close(L),
+    integer_to_list(Port).
+
+%% A guest waiting on a peer that never answers: the call's deadline is
+%% reported to the caller, and the guest ends when the peer closes.
+wasi_network_timeout(Config) ->
+    case wasmtime:features() of
+        #{wasi_sockets := true} ->
+            {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {ip, {127, 0, 0, 1}}]),
+            {ok, Port} = inet:port(L),
+            Inst = instance(Config, "net", #{
+                wasi => #{
+                    network => all,
+                    args => ["net", "tcp", "127.0.0.1:" ++ integer_to_list(Port)]
+                }
+            }),
+            {error, #{kind := timeout}} = wasmtime:run(Inst, #{timeout => 200}),
+            {ok, S} = gen_tcp:accept(L, 2000),
+            ok = gen_tcp:close(S),
+            ok = gen_tcp:close(L),
+            ok;
+        #{wasi_sockets := false} ->
+            {skip, "no sockets in this library"}
+    end.
 
 %% `wasi:http` is not linked unless `http => all`, and does not need the
 %% network grant: Wasmtime makes the request, not the guest's sockets.
@@ -487,7 +524,13 @@ wasi_grants_refused(Config) ->
         _ ->
             ok
     end,
-    {error, #{class := wasi, kind := unavailable}} =
+    %% nor sockets: preview 1 has none
+    NetworkKind =
+        case wasmtime:features() of
+            #{wasi_sockets := true} -> unsupported;
+            #{wasi_sockets := false} -> unavailable
+        end,
+    {error, #{class := wasi, kind := NetworkKind}} =
         wasmtime:instantiate(Core, #{wasi => #{network => all}}),
     {ok, _} = wasmtime:instantiate(Core, #{wasi => #{network => none, http => none}}),
     %% no grant by address

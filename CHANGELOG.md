@@ -6,6 +6,9 @@
   version are refused: precompile them again.
 - Modules using the wide arithmetic proposal (128-bit integer operations)
   now compile.
+- `network => all` in the `wasi` options lets a component use TCP, UDP and
+  name lookup. Off by default, and all or nothing: any address the node can
+  reach.
 
 ## 0.3.0 (2026-11-20)
 

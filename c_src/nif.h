@@ -379,6 +379,7 @@ wasmtime_error_t *component_host_callback(void *envp, wasmtime_context_t *ctx,
                                           wasmtime_component_val_t *results, size_t nresults);
 #endif
 int is_component_binary(const uint8_t *data, size_t size);
+int sockets_available(void);
 void cvalues_init(ErlNifEnv *env);
 int private_fifo(char *path, size_t len, int *writer);
 void private_fifo_remove(char *path);

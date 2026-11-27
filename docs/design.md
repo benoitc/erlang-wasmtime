@@ -441,9 +441,10 @@ too needs the instances in another OS process; see [features](features.md),
 ## Build pipeline
 
 `scripts/fetch-wasmtime.sh` resolves the C API in this order: an explicit
-`WASMTIME_C_API_DIR`; a cached archive; a download (this repo's release
-for runtime-only and FreeBSD, upstream otherwise) checked against
-`scripts/*.sha256`; a source build. `scripts/build-nif.sh` probes what the
+`WASMTIME_C_API_DIR`; a cached archive; a download from this repo's
+release checked against `scripts/*.sha256`; a source build. A function a
+patch adds is declared weak and tested before use, so an unpatched library
+links (`sockets_available`, `pagemap_scan`). `scripts/build-nif.sh` probes what the
 library can do (`NIF_HAVE_COMPILER`, `_WAT`, `_WASI`, by `nm` or a link
 test, cross-checked with `conf.h`), records the platform in
 `priv/wasmtime_platform`, and rebuilds only when the stamp file

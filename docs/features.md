@@ -23,7 +23,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Text to binary | `wat2wasm/1` (core modules and components) |
 | Components | compiled, validated, precompiled, pooled like modules; `module_kind/1`; `call/3,4` by `Export` or `Interface#Function`, `{ok, Value}`; erlang_wasm's term mapping for every WIT value; host imports keyed `{Interface, Function}` (raw `{ok, [V]}` funs or erlang_wasm's typed `import_fun/2`); resources as integer handles, `drop_resource/2,3`; see [components](components.md) |
 | Host resources | a `resource` in an interface the import map serves is the host's: `wasmtime_component:host_new/2,3`, `host_get/1`, `host_update/2`, `host_drop/1`, `host_live/0`; the guest's drop removes the entry, or calls your `[resource-drop]<name>` fun |
-| WASI 0.2 | for components with a `wasi` option: the same keys as preview 1, `run/1,2`, streamed stdin and stdout, `clocks => monotonic` traps the wall clock (`kind => clock_refused`); `http => all` grants `wasi:http/outgoing-handler` to any server, on full builds |
+| WASI 0.2 | for components with a `wasi` option: the same keys as preview 1, `run/1,2`, streamed stdin and stdout, `clocks => monotonic` traps the wall clock (`kind => clock_refused`); `http => all` grants `wasi:http/outgoing-handler` to any server, on full builds; `network => all` grants `wasi:sockets` |
 | Host functions in a dedicated process | `host => Pid` at instantiate, `handle_host_call/2` in that process |
 | Non-blocking calls | `call_async/3` and `await/2,3` |
 | Fuel metering | `compile(Bin, #{fuel => true})`, `call/4` with `fuel`, `fuel_remaining/1`; `kind => out_of_fuel` |
@@ -107,8 +107,8 @@ feature is missing the runtime says so with an error; it does not approximate.
 | A dropped or unknown resource handle | `kind => badarg` |
 | `load/1,2` past `max_resident_modules` (256), or without the application | `class => compile`, `kind => cache_full` or `not_started` |
 | `snapshot/1,2` on an instance not made for it, or of a module not from `load/1,2`; an image restored or loaded under another key or module | `class => snapshot`, `kind => not_snapshotable`, `module_not_loaded` or `snapshot_incompatible` |
-| `wasi => #{network => all}`, or `http => all` on a build without `wasi:http` | `class => wasi, kind => unavailable` |
-| `http => all` for a core module | `class => wasi, kind => unsupported` |
+| `network => all` on a library without the patches, or `http => all` on a build without `wasi:http` | `class => wasi, kind => unavailable` |
+| `network => all` or `http => all` for a core module | `class => wasi, kind => unsupported` |
 | A `profile` other than `plugin` or `script` | `class => link, kind => unknown_profile` |
 | erlang_wasm's `max_depth`, `max_heap_words`, `max_host_calls` limits, or a limit of the wrong type | `class => link, kind => invalid_limits` |
 | A core-module accessor on a component instance | `kind => component` |
@@ -159,11 +159,10 @@ feature is missing the runtime says so with an error; it does not approximate.
 - **Other script worker options.** `restore_ahead`, `compiled`, the heap
   floors, a result channel apart from stdout, and the conformance kit
   module are erlang_wasm's and have no counterpart yet.
-- **Sockets for a guest.** Wasmtime 51 starts a WASI context with TCP and
-  UDP off, and its C API can open the address check
-  (`wasi_config_inherit_network`) but not turn them on. `network => all` is
-  refused instead of being accepted without effect. erlang_wasm grants
-  addresses one by one (`wasi_net`).
+- **Rules on sockets.** `network => all` is the only grant: the C API has no
+  hook on an address. erlang_wasm grants addresses one by one (`wasi_net`).
+  A guest blocked on a socket is not stopped by `timeout` or `interrupt/1`
+  until the peer answers or closes.
 - **Rules on outgoing HTTP, and serving HTTP.** `http => all` is the only
   grant: the C API has no hook to allow or refuse a request or to supply
   the transport, and no way to build an incoming request, so

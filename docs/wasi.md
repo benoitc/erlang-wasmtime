@@ -130,16 +130,27 @@ Serving requests (`wasi:http/incoming-handler`) is not available.
 
 ### Sockets
 
-`wasi:sockets` is linked, but TCP, UDP and name lookup are denied: every
-network operation answers `access-denied`. `network => all` answers
-`kind => unavailable`, since the Wasmtime C API cannot turn TCP and UDP on
-for a guest.
+`wasi:sockets` is denied by default: every network operation answers
+`access-denied`. Grant it to a component you would let reach anything the
+node reaches:
+
+```erlang
+{ok, I} = wasmtime:instantiate(Component, #{wasi => #{network => all}}),
+ok = wasmtime:run(I, #{timeout => 5000}).
+```
+
+The grant covers TCP, UDP and name lookup, to or from any address, the
+loopback included; there is no rule per address. A guest waiting on a peer
+holds its instance until the peer answers or closes: `timeout` and
+`interrupt/1` answer the caller, and reach the guest only then. A library
+without this project's patches (`features/0`, `wasi_sockets`) answers
+`kind => unavailable`.
 
 ## Notes
 
 - Components get WASI 0.2 (above); core modules get preview 1.
-- No network. The preview 1 surface Wasmtime exposes has no sockets, and no
-  option here enables them.
+- No network for core modules: preview 1 as Wasmtime exposes it has no
+  sockets, and `network => all` answers `kind => unsupported`.
 - Randomness (`random_get`) is the host's cryptographic generator, seeded
   per instance. A pre-initialized module starts with whatever its init drew;
   see [preinit](preinit.md).

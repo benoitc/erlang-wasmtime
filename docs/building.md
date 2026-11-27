@@ -8,9 +8,9 @@ fit: offline builds, a system-installed Wasmtime, unsupported platforms.
 `rebar3 compile` runs `scripts/build-nif.sh` as a pre-hook, which:
 
 1. Calls `scripts/fetch-wasmtime.sh`. It picks the archive for your
-   platform (`wasmtime-<version>-<arch>-<os>-c-api.tar.xz`): Wasmtime's own
-   release on macOS, this repository's on Linux (glibc and musl) and
-   FreeBSD, built with the patches in `scripts/wasmtime-patches`. It
+   platform (`wasmtime-<version>-<arch>-<os>-c-api.tar.xz`) from this
+   repository's releases, built with the patches in
+   `scripts/wasmtime-patches`. It
    downloads it into `_build/wasmtime/<version>-r<revision>/`, checks its
    sha256 against `scripts/wasmtime.sha256`, and extracts it.
 2. Compiles `c_src/wasmtime_nif.c` and links `libwasmtime.a` statically into
@@ -145,23 +145,24 @@ provides what it needs.
 
 `.github/workflows/wasmtime-runtime.yml` builds the runtime-only library on
 native runners for macOS (arm64, x86_64), Linux glibc and musl (arm64,
-x86_64) and FreeBSD (x86_64, in a VM), plus the full library for Linux and
-FreeBSD, with `scripts/build-wasmtime.sh`, and attaches them to the release
+x86_64) and FreeBSD (x86_64, in a VM), and the full library for the same
+platforms, with `scripts/build-wasmtime.sh`, and attaches them to the release
 `wasmtime-runtime-<version>-r<revision>` (`scripts/wasmtime-runtime.rev`,
 bumped for a rebuild so pinned assets are never replaced). Its checksums go into
 `scripts/wasmtime-runtime.sha256` and the `-c-api` lines of
 `scripts/wasmtime.sha256` by hand, reviewed like any other change.
 
-The full Linux library is this project's rather than Wasmtime's because of
+The libraries are this project's rather than Wasmtime's because of
 `scripts/wasmtime-patches`: Wasmtime's C API cannot turn on the
 `PAGEMAP_SCAN` slot reset that pooled, pre-initialized instances need on
-Linux. The macOS archives stay Wasmtime's: the reset is Linux-only.
+Linux, nor TCP and UDP for a guest. A library without the patches still
+links; `features/0` says what it lacks.
 
 ## Upgrade Wasmtime
 
 See [RELEASING.md](../RELEASING.md): the pinned version ties together the
-upstream archives, this repo's archives, the CLI that compiles the WASI
-shims and the precompiled fixtures.
+this repo's archives, the CLI that compiles the WASI shims and the
+precompiled fixtures.
 
 ## Sanitizers
 

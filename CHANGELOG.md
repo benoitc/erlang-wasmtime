@@ -8,6 +8,7 @@
   now compile.
 - A runtime-only library built from source on macOS with some Rust releases
   could not be linked. Fixed.
+- Components built for WASI 0.3 run, with the same `wasi` options as 0.2.
 - Components can export and import `async func`. Streams and futures cannot
   cross yet.
 - `timeout`, `interrupt/1` and a dead caller now stop a component that waits

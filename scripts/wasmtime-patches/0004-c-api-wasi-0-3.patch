@@ -1,0 +1,81 @@
+diff --git a/crates/c-api/Cargo.toml b/crates/c-api/Cargo.toml
+index 3c1318d..56ad8b4 100644
+--- a/crates/c-api/Cargo.toml
++++ b/crates/c-api/Cargo.toml
+@@ -63,7 +63,13 @@ debug-builtins = ['wasmtime/debug-builtins']
+ wat = ['dep:wat', 'wasmtime/wat']
+ pooling-allocator = ["wasmtime/pooling-allocator"]
+ component-model = ["wasmtime/component-model"]
+-component-model-async = ["component-model", "async", "wasmtime/component-model-async"]
++component-model-async = [
++  "component-model",
++  "async",
++  "wasmtime/component-model-async",
++  "wasmtime-wasi?/p3",
++  "wasmtime-wasi-http?/p3",
++]
+ pulley = ["wasmtime/pulley"]
+ all-arch = ["wasmtime/all-arch"]
+ # ... if you add a line above this be sure to change the other locations
+diff --git a/crates/c-api/include/wasmtime/component/linker.h b/crates/c-api/include/wasmtime/component/linker.h
+index 305a939..75c06ac 100644
+--- a/crates/c-api/include/wasmtime/component/linker.h
++++ b/crates/c-api/include/wasmtime/component/linker.h
+@@ -222,6 +222,28 @@ wasmtime_component_linker_instance_add_resource(
+ WASM_API_EXTERN void wasmtime_component_linker_instance_delete(
+     wasmtime_component_linker_instance_t *linker_instance);
+ 
++#if defined(WASMTIME_FEATURE_COMPONENT_MODEL_ASYNC) &&                         \
++    defined(WASMTIME_FEATURE_WASI)
++/**
++ * \brief Adds the WASI 0.3 hosts to this linker.
++ *
++ * Calls into the instances it creates must use the async or blocking forms.
++ */
++WASM_API_EXTERN wasmtime_error_t *
++wasmtime_component_linker_add_wasip3(wasmtime_component_linker_t *linker);
++#endif
++
++#if defined(WASMTIME_FEATURE_COMPONENT_MODEL_ASYNC) &&                         \
++    defined(WASMTIME_FEATURE_WASI_HTTP)
++/**
++ * \brief Adds the `wasi:http` 0.3 client to this linker.
++ *
++ * Requires WASI to be added first via #wasmtime_component_linker_add_wasip3.
++ */
++WASM_API_EXTERN wasmtime_error_t *
++wasmtime_component_linker_add_wasi_http_p3(wasmtime_component_linker_t *linker);
++#endif
++
+ #ifdef WASMTIME_FEATURE_COMPONENT_MODEL_ASYNC
+ 
+ /**
+diff --git a/crates/c-api/src/component/linker.rs b/crates/c-api/src/component/linker.rs
+index 7e1c3ec..265068b 100644
+--- a/crates/c-api/src/component/linker.rs
++++ b/crates/c-api/src/component/linker.rs
+@@ -298,6 +298,24 @@ pub unsafe extern "C" fn wasmtime_component_linker_add_wasi_http_async(
+     crate::handle_result(result, |_| ())
+ }
+ 
++#[unsafe(no_mangle)]
++#[cfg(all(feature = "wasi", feature = "component-model-async"))]
++pub unsafe extern "C" fn wasmtime_component_linker_add_wasip3(
++    linker: &mut wasmtime_component_linker_t,
++) -> Option<Box<wasmtime_error_t>> {
++    let result = wasmtime_wasi::p3::add_to_linker(&mut linker.linker);
++    crate::handle_result(result, |_| ())
++}
++
++#[unsafe(no_mangle)]
++#[cfg(all(feature = "wasi-http", feature = "component-model-async"))]
++pub unsafe extern "C" fn wasmtime_component_linker_add_wasi_http_p3(
++    linker: &mut wasmtime_component_linker_t,
++) -> Option<Box<wasmtime_error_t>> {
++    let result = wasmtime_wasi_http::p3::add_to_linker(&mut linker.linker);
++    crate::handle_result(result, |_| ())
++}
++
+ #[unsafe(no_mangle)]
+ pub unsafe extern "C" fn wasmtime_component_linker_define_unknown_imports_as_traps(
+     linker: &mut wasmtime_component_linker_t,

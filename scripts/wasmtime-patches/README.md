@@ -20,6 +20,10 @@ upstream made it unnecessary.
   `wasmtime_call_future_poll` polls with no waker and outside Tokio, where a
   WASI timer panics.
 
+- `0004-c-api-wasi-0-3.patch`: the C API links only the WASI 0.2 hosts. Adds
+  the 0.3 ones, `wasi:http` included, and builds `wasmtime-wasi` and
+  `wasmtime-wasi-http` with their `p3` features.
+
 Wasmtime 51 continues the reset scan past a full result buffer itself, which
 a second patch did for 48.
 

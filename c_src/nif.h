@@ -117,6 +117,10 @@ __attribute__((weak)) wasmtime_error_t *
 wasmtime_component_linker_instance_add_func_concurrent_blocking(
     wasmtime_component_linker_instance_t *linker_instance, const char *name, size_t name_len,
     wasmtime_component_func_callback_t callback, void *data, void (*finalizer)(void *));
+__attribute__((weak)) wasmtime_error_t *
+wasmtime_component_linker_add_wasip3(wasmtime_component_linker_t *linker);
+__attribute__((weak)) wasmtime_error_t *
+wasmtime_component_linker_add_wasi_http_p3(wasmtime_component_linker_t *linker);
 #else
 #define NIF_HAVE_ASYNC_API 0
 #endif
@@ -416,6 +420,7 @@ wasmtime_error_t *component_host_callback(void *envp, wasmtime_context_t *ctx,
 int is_component_binary(const uint8_t *data, size_t size);
 int sockets_available(void);
 int async_available(void);
+int wasi3_available(void);
 void cvalues_init(ErlNifEnv *env);
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
 #define NOT_CROSSING "this type cannot cross yet (stream, future, error-context)"

@@ -51,11 +51,11 @@ precompiled fixtures.
    feature macros, the `wasmtime_val_t` layout, the reference API
    (`*_unroot` signatures), `wasi.h` stdio hooks, the component value
    conversions (which strings and chars they unwrap). `docs/design.md`
-   lists what the code relies on. Set `WALL_CLOCK` in
-   `c_src/nif_component.c` to the `wasi:clocks` version the new Wasmtime
-   defines (`crates/wasi/src/p2/wit/deps/clocks.wit`);
-   `wasi_clocks_component` in the tests fails when it no longer shadows
-   Wasmtime's.
+   lists what the code relies on. Set `WALL_CLOCK` and `SYSTEM_CLOCK` in
+   `c_src/nif_component.c` to the `wasi:clocks` versions the new Wasmtime
+   defines (`crates/wasi/src/p2/wit/deps/clocks.wit` and the `p3` one);
+   `wasi_clocks_component` and `wall_clock_refused` in the tests fail when
+   a name no longer shadows Wasmtime's.
 7. `rebar3 compile && rebar3 ct` on a full build, then the runtime-only
    recipe with fresh fixtures from `scripts/precompile-fixtures.escript`.
    The runtime-only CI job proves the full and runtime builds still

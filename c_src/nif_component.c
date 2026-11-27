@@ -41,11 +41,13 @@ static bool instance_export_nth(const wasmtime_component_instance_type_t *it,
   return take_item(found, x, item);
 }
 
-/* The WASI 0.2 wall clock Wasmtime defines, which `clocks => monotonic`
- * replaces. Tied to the Wasmtime version: a bump must check it
- * (RELEASING.md, "Bump Wasmtime"); wasi_clocks_component in the tests
- * fails if the name no longer shadows Wasmtime's. */
+/* The wall clocks Wasmtime defines, which `clocks => monotonic` replaces:
+ * WASI 0.2's and 0.3's, with the name of each one's second function. Tied to
+ * the Wasmtime version: a bump must check them (RELEASING.md, "Bump
+ * Wasmtime"); wasi_clocks_component and wall_clock_refused in the tests fail if a
+ * name no longer shadows Wasmtime's. */
 #define WALL_CLOCK "wasi:clocks/wall-clock@0.2.12"
+#define SYSTEM_CLOCK "wasi:clocks/system-clock@0.3.0"
 
 static wasmtime_error_t *wall_clock_refused(void *envp, wasmtime_context_t *ctx,
                                             const wasmtime_component_func_type_t *ty,
@@ -56,20 +58,21 @@ static wasmtime_error_t *wall_clock_refused(void *envp, wasmtime_context_t *ctx,
    * kind => clock_refused (outcome) */
   instance_t *inst = wasmtime_context_get_data(ctx);
   inst->clock_refused = 1;
-  return wasmtime_error_new("clock_refused: wasi:clocks/wall-clock (clocks => monotonic)");
+  return wasmtime_error_new("clock_refused: the wall clock (clocks => monotonic)");
 }
 
-static wasmtime_error_t *refuse_wall_clock(wasmtime_component_linker_t *l) {
+static wasmtime_error_t *refuse_clock(wasmtime_component_linker_t *l, const char *iface,
+                                      const char *resolution) {
   wasmtime_component_linker_allow_shadowing(l, true);
-  wasmtime_component_linker_instance_t *root = wasmtime_component_linker_root(l), *wc = NULL;
+  wasmtime_component_linker_instance_t *root = wasmtime_component_linker_root(l), *c = NULL;
   wasmtime_error_t *e =
-      wasmtime_component_linker_instance_add_instance(root, WALL_CLOCK, strlen(WALL_CLOCK), &wc);
+      wasmtime_component_linker_instance_add_instance(root, iface, strlen(iface), &c);
   if (!e)
-    e = wasmtime_component_linker_instance_add_func(wc, "now", 3, wall_clock_refused, NULL, NULL);
+    e = wasmtime_component_linker_instance_add_func(c, "now", 3, wall_clock_refused, NULL, NULL);
   if (!e)
-    e = wasmtime_component_linker_instance_add_func(wc, "resolution", 10, wall_clock_refused, NULL,
-                                                    NULL);
-  if (wc) wasmtime_component_linker_instance_delete(wc);
+    e = wasmtime_component_linker_instance_add_func(c, resolution, strlen(resolution),
+                                                    wall_clock_refused, NULL, NULL);
+  if (c) wasmtime_component_linker_instance_delete(c);
   wasmtime_component_linker_instance_delete(root);
   wasmtime_component_linker_allow_shadowing(l, false);
   return e;
@@ -347,11 +350,21 @@ static linker_entry_t *build_centry(module_res_t *m, ErlNifEnv *env, ERL_NIF_TER
   if (wasi) {
 #if NIF_HAVE_WASI
     e = add_wasip2(le->clinker);
-    if (!e && monotonic) e = refuse_wall_clock(le->clinker);
+    if (!e && monotonic) e = refuse_clock(le->clinker, WALL_CLOCK, "resolution");
 #ifdef WASMTIME_FEATURE_WASI_HTTP
     /* bit 1 of `wasi`: `http => all` was given (WASI_GRANT_HTTP in
      * nif_instantiate.c, which refuses it on a build without wasi:http) */
     if (!e && (wasi & 2)) e = add_wasi_http(le->clinker);
+#endif
+#if NIF_HAVE_ASYNC_API
+    /* WASI 0.3 beside 0.2: a program built for 0.3 imports both */
+    if (!e && wasi3_available()) {
+      e = wasmtime_component_linker_add_wasip3(le->clinker);
+      if (!e && monotonic) e = refuse_clock(le->clinker, SYSTEM_CLOCK, "get-resolution");
+#ifdef WASMTIME_FEATURE_WASI_HTTP
+      if (!e && (wasi & 2)) e = wasmtime_component_linker_add_wasi_http_p3(le->clinker);
+#endif
+    }
 #endif
     if (e) *err = error_to_term(out, e, "wasi");
 #else

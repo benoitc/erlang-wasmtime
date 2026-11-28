@@ -108,7 +108,8 @@ typedef struct {
   const char *text, *cls, *kind, *msg;
 } trap_row_t;
 
-/* clang-format off: releases disagree on a braced macro body */
+/* Formatters of different releases disagree on a braced macro body. */
+/* clang-format off */
 #define T(code, text, kind, msg) {code, text, "trap", kind, msg}
 #define X(code, text, kind, msg) {code, text, "exhaustion", kind, msg}
 /* clang-format on */

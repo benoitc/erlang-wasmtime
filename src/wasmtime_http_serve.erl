@@ -5,7 +5,7 @@
 %% in parts, in this process, while the guest makes it; stream/4 hands them on
 %% and run/3 collects them.
 
--export([run/3, stream/4]).
+-export([run/3, stream/4, check/2]).
 
 -export_type([request/0, result/0, part/0]).
 
@@ -78,6 +78,29 @@ response(Version, #{head := {Status, Headers}, body := Body, trailers := Trailer
         _ -> {ok, Status, Headers, Bytes}
     end.
 
+%% Whether requests can be served with these options, by instantiating once,
+%% and the handler's WASI version: for the listener, which streams a 0.3
+%% response.
+-spec check(binary() | wasmtime_component:prepared(), map()) ->
+    {ok, p2 | p3} | {error, term()}.
+check(Component, Options) ->
+    maybe
+        ok ?= available(),
+        wasmtime_wasi_preview2:with_instance(
+            Component,
+            Options,
+            fun linked_wasi/1,
+            fun(Module, _) ->
+                case is_p2(Module) of
+                    true -> {ok, p2};
+                    false -> {ok, p3}
+                end
+            end
+        )
+    end.
+
+linked_wasi(Wasi) -> Wasi#{http => linked(maps:get(network, Wasi))}.
+
 %% {served, p2 | p3} | stopped | {error, _}
 serve(Component, Request, Options, Take) ->
     maybe
@@ -86,7 +109,7 @@ serve(Component, Request, Options, Take) ->
         wasmtime_wasi_preview2:with_instance(
             Component,
             Options,
-            fun(Wasi) -> Wasi#{http => linked(maps:get(network, Wasi))} end,
+            fun linked_wasi/1,
             fun(Module, Inst) -> handle(Module, Inst, Wire, Take) end
         )
     end.

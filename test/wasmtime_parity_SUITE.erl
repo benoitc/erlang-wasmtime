@@ -25,7 +25,8 @@
     memory_size_in_pages/1,
     error_constructors/1,
     same_errors_on_both_runtimes/1,
-    same_responses_on_both_runtimes/1
+    same_responses_on_both_runtimes/1,
+    same_listener_on_both_runtimes/1
 ]).
 
 %% Called as a {Module, Function} host function.
@@ -52,7 +53,11 @@ groups() ->
             memory_size_in_pages,
             error_constructors
         ]},
-        {both, [], [same_errors_on_both_runtimes, same_responses_on_both_runtimes]}
+        {both, [], [
+            same_errors_on_both_runtimes,
+            same_responses_on_both_runtimes,
+            same_listener_on_both_runtimes
+        ]}
     ].
 
 init_per_suite(Config) -> Config.
@@ -65,6 +70,11 @@ init_per_group(both, Config) ->
         false ->
             {skip, "set ERLANG_WASM_DIR to a built erlang_wasm checkout"};
         Ebin ->
+            %% the HTTP libraries erlang_wasm's listener runs on
+            [
+                true = code:add_pathz(filename:join([Ebin, "..", "..", App, "ebin"]))
+             || App <- ["h1", "h2"]
+            ],
             true = code:add_pathz(Ebin),
             wasmtime_test:needs([compiler, wat], Config)
     end;
@@ -211,8 +221,7 @@ manifest() ->
                 {run_serve_stream, 5}
             ],
             {deferred, "WASI import maps"}},
-        {wasi_http_listener, [{address, 1}, {start, 1}, {stop, 1}],
-            {phase, 4, wasmtime_http_listener}},
+        {wasi_http_listener, [{address, 1}, {start, 1}, {stop, 1}], {here, wasmtime_http_listener}},
         {wasi_http_transport, [{deadline, 1}, {over_limit, 2}, {tls_opts, 2}, {within, 2}],
             {here, wasmtime_http_transport}},
         {wasi_http_h1, [{request, 2}], {deferred, "built-in HTTP client"}},
@@ -609,3 +618,73 @@ outcome({error, {Code, _}}) ->
     {error, Code};
 outcome({error, Reason}) ->
     {error, Reason}.
+
+%% The same requests over a socket to both listeners.
+same_listener_on_both_runtimes(Config) ->
+    case wasmtime:features() of
+        #{wasi_http_serve := true} -> listen_both(Config);
+        #{wasi_http_serve := false} -> {skip, "this library cannot serve HTTP requests"}
+    end.
+
+listen_both(Config) ->
+    {ok, _} = application:ensure_all_started(wasm),
+    Dir = string:replace(?config(data_dir, Config), "parity_SUITE", "serve_SUITE"),
+    Get = "GET / HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n",
+    Post =
+        "POST / HTTP/1.1\r\nhost: localhost\r\nfoo: bar\r\ncontent-length: 5\r\n"
+        "connection: close\r\n\r\nhello",
+    Large =
+        "POST / HTTP/1.1\r\nhost: localhost\r\ncontent-length: 100\r\n"
+        "connection: close\r\n\r\n",
+    Cases = [
+        {"p2_cli_serve_hello_world", #{}, Get},
+        {"p3_cli_serve_hello_world", #{}, Get},
+        {"p3_http_echo", #{}, Post},
+        {"p2_cli_serve_trap_before_set", #{}, Get},
+        {"p3_cli_serve_sleep", #{request_timeout => 500}, Get},
+        {"p3_http_echo", #{max_body_bytes => 10}, Large}
+    ],
+    Serve = fun(Listener) ->
+        [
+            begin
+                File = filename:join(unicode:characters_to_list(Dir), Name ++ ".component.wasm"),
+                {ok, Bin} = file:read_file(File),
+                {ok, Server} = Listener:start(Options#{component => Bin}),
+                [_, Port] = binary:split(Listener:address(Server), ~":"),
+                Answer = answered(binary_to_integer(Port), Request),
+                ok = Listener:stop(Server),
+                {Name, Answer}
+            end
+         || {Name, Options, Request} <- Cases
+        ]
+    end,
+    Theirs = Serve(wasi_http_listener),
+    ?assertEqual(Theirs, Serve(wasmtime_http_listener)).
+
+%% The status and the body, however it was delimited.
+answered(Port, Request) ->
+    {ok, Socket} = gen_tcp:connect({127, 0, 0, 1}, Port, [binary, {active, false}]),
+    ok = gen_tcp:send(Socket, Request),
+    Reply = drain(Socket, <<>>),
+    <<"HTTP/1.1 ", Status:3/binary, _/binary>> = Reply,
+    [Head, Body] = binary:split(Reply, ~"\r\n\r\n"),
+    case binary:match(string:lowercase(Head), ~"transfer-encoding: chunked") of
+        nomatch -> {Status, Body};
+        _ -> {Status, dechunked(Body)}
+    end.
+
+drain(Socket, Acc) ->
+    case gen_tcp:recv(Socket, 0, 10000) of
+        {ok, Data} -> drain(Socket, <<Acc/binary, Data/binary>>);
+        {error, closed} -> Acc
+    end.
+
+dechunked(Bytes) ->
+    [Line, Rest] = binary:split(Bytes, ~"\r\n"),
+    case binary_to_integer(Line, 16) of
+        0 ->
+            <<>>;
+        Size ->
+            <<Data:Size/binary, "\r\n", More/binary>> = Rest,
+            <<Data/binary, (dechunked(More))/binary>>
+    end.

@@ -31,6 +31,7 @@ thread, but never from two at once.
 | Change what `clocks => monotonic` allows | `c_src/nif_clock.c` (preview 1), `refuse_wall_clock` in `c_src/nif_component.c` (WASI 0.2) |
 | Change how components link, call or serve imports | `c_src/nif_component.c` |
 | Change how a component is served HTTP requests | `src/wasmtime_http_serve.erl`, `c_src/nif_http.c`, `scripts/wasmtime-patches/0006-*` |
+| Change the HTTP listener | `src/wasmtime_http_listener.erl` (processes, responses), `src/wasmtime_http1.erl` (reading), `src/wasmtime_http1_writer.erl` (writing), then "The HTTP listener" |
 | Change how a component's own requests reach a transport | `src/wasmtime_http_transport.erl`, `c_src/nif_http.c`, `scripts/wasmtime-patches/0007-*` |
 | Change network grants or the limits on what a component asks of the host | `src/wasmtime_net.erl` (the grant), `c_src/nif_net.c`, `scripts/wasmtime-patches/0005-*` (the checks) |
 | Change how WIT values map to terms | `c_src/nif_cvalues.c` |
@@ -358,6 +359,28 @@ Rules a change must keep:
 - A grant without `resolve` refuses host names. A library that cannot is not
   given the grant.
 
+## The HTTP listener
+
+A keeper process owns the listening socket and watches the starter; the
+acceptor linked to it owns one process per connection; a connection runs each
+request's guest in a linked process it can kill at the deadline. Killing the
+acceptor ends everything below it.
+
+The peer is not trusted. Rules a change must keep (RFC 9112, RFC 9110, RFC
+9931):
+
+- A request's framing is read one way or the request is refused: no
+  `Content-Length` beside `Transfer-Encoding`, no repeated length, no coding
+  but `chunked`, CRLF only, no folded lines, no space before a colon.
+- After a refusal the connection is closed; nothing already received is read
+  as another request. `CONNECT` is refused this way.
+- Every line, head, field count, chunk line, trailer section and body has a
+  bound, every read and write a deadline, and connections a count.
+- Only ASCII is case-folded: field values may hold any byte above it.
+- A guest's status and fields are checked before a byte is written, framing
+  fields are dropped, and the body is held to a declared length.
+- A response cut after its head ends in a reset, never a clean close.
+
 ## Engines and precompiled modules
 
 One engine per distinct compile option set, in a registry keyed by
@@ -606,6 +629,8 @@ Decisions and their reasons:
 | 32 values | `MAX_VALS` | stack arrays for arguments and results | signatures wider than this are `unsupported_type` |
 | 30 s host timeout | `DEFAULT_HOST_TIMEOUT` | a guest parked forever behind a dead handler would pin its thread | how long a slow host fun may take before the guest traps |
 | 16 MB inbox, 16 MB per captured stream | `DEFAULT_INBOX_LIMIT`, `DEFAULT_OUTPUT_LIMIT` | bound what a guest or a sender can queue without anyone reading | `inbox_full` and the dropped counters |
+| Listener: 60 s per request, 8 MiB body, 256 connections, 100 requests each | `?REQUEST_TIMEOUT` and the rest in `wasmtime_http_listener.erl` | the first two are erlang_wasm's; a connection may hold an instance, which is a thread, and a body | how much a client population can hold of the node |
+| Listener: 8 KiB request and field lines, 64 KiB head, 100 fields, 4 KiB chunk line, 4 empty lines | `wasmtime_http1.erl` | RFC 9112 asks for 8000 octets of request line; the rest bounds what one request makes the node keep | which clients are refused with 414 or 431 |
 | 8 MiB HTTP body | `?DEFAULT_HTTP_BODY_LIMIT` in `wasmtime_wasi_config.erl` | erlang_wasm's bound on a request's body and a response's, so a guest meets the same one on both | the largest download or upload without `http_max_body_bytes` |
 | 256 MB memory limit | `DEFAULT_MEMORY_LIMIT` | a guest is isolated by default; growing past this traps | the memory a guest may claim |
 | 10 instances, 100 tables, 10 M elements | limits in `nif_options/3` | store limiter defaults matching Wasmtime's own | resource caps per store |

@@ -262,6 +262,46 @@ and destroys the instance. The component is compiled once while the
 Serving needs a full build with this project's patches (`features/0`,
 `wasi_http_serve`).
 
+### Run an HTTP server
+
+`wasmtime_http_listener` accepts connections and answers each request with the
+component, one instance per request:
+
+```erlang
+{ok, Bin} = file:read_file("hello.component.wasm"),
+{ok, Listener} = wasmtime_http_listener:start(#{component => Bin, port => 8080}),
+~"127.0.0.1:8080" = wasmtime_http_listener:address(Listener),
+ok = wasmtime_http_listener:stop(Listener).
+```
+
+| Option | Meaning | Default |
+|---|---|---|
+| `component` | the handler's bytes, or a component from `wasmtime_component:prepare/1` | required |
+| `ip` | the address to listen on; `{0, 0, 0, 0}` is every interface | `{127, 0, 0, 1}` |
+| `port` | the port; `0` picks one | `0` |
+| `scheme` | the scheme the guest is told | `~"http"` |
+| `serve_opts` | the options of `run_serve/3` for each request | `#{}` |
+| `request_timeout` | milliseconds from a request's head to the end of its answer; also how long a connection may stay idle | `60000` |
+| `max_body_bytes` | the largest request body | 8 MiB |
+| `max_connections` | connections at once | `256` |
+
+- The component is compiled once, when the listener starts. Options it cannot
+  be run with are refused then.
+- A WASI 0.3 response is sent as the guest writes it, so a client that reads
+  slowly makes the guest wait, and `http_max_body_bytes` does not limit it. A
+  0.2 response is sent once complete, with a `content-length`.
+- A handler that fails before its response is answered 500, one still running
+  at `request_timeout` 504. A response that fails once it has started resets
+  the connection, so the client does not take it for complete.
+- A request that is too large is answered 413, one that is too slow 408, and
+  neither reaches the guest. A request that HTTP/1.1 does not allow, or that
+  two servers could read differently, is refused and its connection closed.
+- Each connection may hold an instance and a request body: at the defaults,
+  size the node for 256 of each, or lower `max_connections`.
+- It speaks cleartext HTTP/1.1 only. Put TLS, HTTP/2 and rate limits in a
+  proxy in front of it.
+- The listener ends with `stop/1`, or when the process that started it ends.
+
 ### Grant the network
 
 `wasi:sockets` is denied by default: every network operation answers

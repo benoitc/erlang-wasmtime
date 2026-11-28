@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `wasmtime_http_listener` serves HTTP/1.1 with a component, streaming WASI
+  0.3 responses as the guest writes them.
 - You can send a component's outgoing HTTP requests with your own module
   (`http_transport`), as on erlang_wasm.
 - Breaking: an HTTP request naming a host now needs `resolve => allow` in the

@@ -33,7 +33,7 @@ function neither lists. Update both together.
 | `wasi_preview2`, `wasi_preview3`: import maps and `_with` runners | none | refused: Wasmtime implements WASI |
 | `wasi_http_transport` | `wasmtime_http_transport` | done |
 | `wasi_http_h1` | none | refused: Wasmtime sends requests itself |
-| `wasi_http_listener` | `wasmtime_http_listener` | phase 4 |
+| `wasi_http_listener` | `wasmtime_http_listener` | done; HTTP/1.1 only. Extra: `max_connections`, strict request parsing; ends with its starter; a component that cannot run fails `start/1` |
 | `wasi_http_h2` | none | refused: no HTTP/2 |
 | `wasi_nn` | `wasmtime_wasi_nn` | phase 7 |
 | `wasm_instance_worker` | `wasmtime_instance_worker` | done |
@@ -92,7 +92,7 @@ runs the same failing calls on both runtimes.
 3. Done: resource and size limits, `initial_cwd`, address grants for sockets
    and HTTP. The fast path for `list<u8>` is refused: it needs changes in
    Wasmtime itself.
-4. Patch batch B: serving HTTP.
+4. Done: serving HTTP, the transport and the listener.
 5. Workers: reactor snapshot adapters, `restore_ahead`, reaper (with the
    sweep of leftover request directories), result channel, conformance kit.
 6. Patch batch C: streams and futures.

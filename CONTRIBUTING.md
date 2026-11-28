@@ -91,6 +91,7 @@ The order the code enforces, with one file per step:
    | `wasmtime_grant_SUITE` | network grants, HTTP rules and limits, `initial_cwd`, component limits |
    | `wasmtime_serve_SUITE` | `run_serve`, WASI 0.2 and 0.3 handlers, streamed responses |
    | `wasmtime_transport_SUITE` | `http_transport`, the address checks made before it |
+   | `wasmtime_listener_SUITE` | `wasmtime_http_listener` over raw sockets: responses, limits, requests it refuses |
    | `wasmtime_actor_SUITE` | `wasmtime_actor`, with erlang_wasm's suite and guest |
    | `wasmtime_parity_SUITE` | what erlang_wasm offers and where it stands here; set `ERLANG_WASM_DIR` to a built erlang_wasm checkout to compare the two |
    | `wasmtime_wasi3_SUITE` | WASI 0.3 commands, with Wasmtime's own test programs |

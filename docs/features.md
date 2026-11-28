@@ -29,6 +29,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Network grants | erlang_wasm's `wasi_net` form: `connect` and `listen` rules by address prefix and port, `resolve`, `tcp`, `udp`; checked by Wasmtime on every address, and an HTTP request connects to the address that passed; on libraries with this project's patches (`features/0`, `wasi_limits`) |
 | Serving HTTP | `wasmtime_wasi_preview2:run_serve/3` (and preview3's): one request to a `wasi:http` handler, 0.2 or 0.3, with trailers and a bounded response body; full builds with this project's patches (`features/0`, `wasi_http_serve`) |
 | HTTP transport | `http_transport => Module` (`wasmtime_http_transport`) sends a component's outgoing requests after the grant check, with `http_tls` passed to it; full builds with this project's patches (`features/0`, `wasi_http_transport`) |
+| HTTP listener | `wasmtime_http_listener`: an HTTP/1.1 server answering each request with a handler component, 0.3 responses streamed, request size, time and connection limits; full builds with this project's patches |
 | Component limits | `resource_limit` (host and WASI resource handles), `transfer_limit` (bytes copied to the host per call), `http_max_body_bytes` (8 MiB by default), `http_max_field_bytes` |
 | Host functions in a dedicated process | `host => Pid` at instantiate, `handle_host_call/2` in that process |
 | Non-blocking calls | `call_async/3` and `await/2,3` |
@@ -146,6 +147,7 @@ Errors have erlang_wasm's shape, `#{class, kind, msg, ctx}`; see
 | An `http_transport` that raises or answers something else | `trap`, `host_error` |
 | A transport calling the instance it serves | `link`, `reentrant` |
 | `run_serve/3` on a library that cannot serve; a request that is not one | `link`, `unavailable` or `badarg` |
+| `wasmtime_http_listener:start/1` with `transport => h2` or an unknown option; a value it cannot take | `link`, `unsupported_option` or `badarg` |
 | A host resource past `resource_limit` | `trap`, `resource_limit_reached` |
 | More data from a component in one call than `transfer_limit` | `exhaustion`, `hostcall_fuel` |
 | A `profile` other than `plugin` or `script` | `link`, `unknown_profile` |
@@ -230,8 +232,11 @@ Errors have erlang_wasm's shape, `#{class, kind, msg, ctx}`; see
 - **Other script worker options.** `restore_ahead`, `compiled`, the heap
   floors, a result channel apart from stdout, and the conformance kit
   module are erlang_wasm's and have no counterpart yet.
-- **An HTTP listener.** There is no `wasi_http_listener` yet to serve
-  connections; erlang_wasm has one.
+- **`transport => h2` and TLS in the listener.** `wasmtime_http_listener`
+  speaks cleartext HTTP/1.1 only; erlang_wasm's also speaks cleartext
+  HTTP/2.
+- **Tunnels in the listener.** `CONNECT` is answered 501 and `Upgrade` is
+  ignored.
 - **A built-in HTTP client.** erlang_wasm's `wasi_http_h1` transport has no
   counterpart: Wasmtime sends a request unless you give a transport, and a
   transport of yours cannot hand it back to Wasmtime.

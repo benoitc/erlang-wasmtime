@@ -211,7 +211,7 @@ Keep this code on one runtime:
 | a component's raw host function, taking flat values | erlang_wasm's receives the core values; here a two-argument fun receives terms. Use `import_fun/2` |
 | component snapshots and live streams | not available here |
 | WASI import maps you change or wrap | Wasmtime implements WASI itself |
-| `wasi_http_h1`, the HTTP listener, HTTP rules by host name, `wasi:nn` | not available here |
+| `wasi_http_h1`, HTTP/2, HTTP rules by host name, `wasi:nn` | not available here |
 | `max_sockets` or `timeout` in a network grant | refused here |
 | snapshot script adapters, the reaper, the conformance kit | not available here |
 

@@ -30,6 +30,11 @@ upstream made it unnecessary.
   resources, copied data, header size and HTTP bodies. The one patch that
   changes more than the C API: `wasmtime-wasi-http` gains the filtered send.
 
+- `0006-c-api-wasi-http-serve.patch`: one request given to a `wasi:http`
+  handler, WASI 0.3 or 0.2, its response handed to callbacks as the guest
+  makes it. A request an address rule refuses now fails with
+  `HTTP-request-denied`.
+
 Wasmtime 51 continues the reset scan past a full result buffer itself, which
 a second patch did for 48.
 

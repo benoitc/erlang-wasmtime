@@ -13,9 +13,11 @@ The component may use WASI 0.2 or 0.3. It is given what you name in the
 options and nothing else.
 """.
 
--export([run_command/2, run_command/3]).
+-export([run_command/2, run_command/3, run_serve/3]).
+%% for wasmtime_http_serve
+-export([with_instance/4]).
 
--export_type([command_options/0, command_result/0]).
+-export_type([command_options/0, command_result/0, serve_request/0, serve_result/0]).
 
 -doc """
 - `args`, `env`: what the program sees.
@@ -53,6 +55,21 @@ erlang_wasm's `stdout_limit` and `stdin_dir` are refused with
     {ok, #{stdout := binary(), stderr := binary(), exit_code := integer()}}
     | {error, no_run_export | wasmtime_error:error()}.
 
+-type serve_request() :: #{
+    method := binary(),
+    path := binary(),
+    scheme => binary(),
+    authority => binary(),
+    headers => [{binary(), binary()}],
+    body => iodata(),
+    trailers => [{binary(), binary()}]
+}.
+
+-type serve_result() ::
+    {ok, 0..65535, [{binary(), binary()}], binary()}
+    | {ok, 0..65535, [{binary(), binary()}], binary(), [{binary(), binary()}]}
+    | {error, no_incoming_handler | no_response | term()}.
+
 -doc #{equiv => run_command(Component, Stdin, #{})}.
 -spec run_command(binary() | wasmtime_component:prepared(), binary()) -> command_result().
 run_command(Component, Stdin) -> run_command(Component, Stdin, #{}).
@@ -65,13 +82,59 @@ program's status is 1.
 -spec run_command(binary() | wasmtime_component:prepared(), binary(), command_options()) ->
     command_result().
 run_command(Component, Stdin, Options) when is_binary(Stdin), is_map(Options) ->
+    Captured = fun(Wasi) ->
+        Wasi#{stdin => {binary, Stdin}, stdout => capture, stderr => capture}
+    end,
+    with_instance(Component, Options, Captured, fun(_, Inst) ->
+        Result = wasmtime:run(Inst),
+        {ok, {Out, Err, _Dropped}} = wasmtime:read_output(Inst),
+        outcome(Result, #{stdout => Out, stderr => Err})
+    end).
+
+-doc """
+Give the component one request through its `wasi:http` handler, and answer the
+response: `{ok, Status, Headers, Body}`, with the trailers as a fifth element
+when a WASI 0.3 handler sets some. Each call instantiates the component and
+destroys the instance.
+
+`Request` has `method` and `path`, and may have `scheme` (`~"http"`),
+`authority` (`~"localhost"`), `headers`, `body` and `trailers`. `Options` are
+those of `run_command/3`; without `network` the handler's own requests are
+refused. `http_max_body_bytes` also bounds the response body, 8 MiB when left
+out.
+
+`{error, no_incoming_handler}` when the component exports no handler,
+`{error, no_response}` when it returns, or a 0.2 one traps, without a
+response, and `{error, {Code, Payload}}` for a `wasi:http` error code. A
+library without this project's patches (`wasmtime:features/0`,
+`wasi_http_serve`) answers `kind => unavailable`.
+""".
+-spec run_serve(
+    binary() | wasmtime_component:prepared(), serve_request(), command_options()
+) -> serve_result().
+run_serve(Component, Request, Options) when is_map(Request), is_map(Options) ->
+    wasmtime_http_serve:run(Component, Request, Options).
+
+%% Check the options of a run, instantiate the component with the WASI they
+%% describe, as Adjust leaves it, call Use, and destroy the instance.
+-doc false.
+-spec with_instance(
+    binary() | wasmtime_component:prepared(),
+    map(),
+    fun((map()) -> map()),
+    fun((wasmtime:module_ref(), wasmtime:instance()) -> Result)
+) -> Result | wasmtime:error().
+with_instance(Component, Options, Adjust, Use) ->
     Known =
         [args, env, preopen, writable, preopens, network, initial_cwd, compile] ++
             [http_max_body_bytes],
     Limits = [timeout, fuel, max_memory_pages, resource_limit],
     case maps:keys(maps:without(Known ++ Limits, Options)) of
-        [] -> run(Component, Stdin, Options, maps:with(Limits, Options));
-        Keys -> unsupported(Keys)
+        [] ->
+            Wasi = Adjust(wasi(Options)),
+            instantiated(Component, Options, (maps:with(Limits, Options))#{wasi => Wasi}, Use);
+        Keys ->
+            unsupported(Keys)
     end.
 
 unsupported(Keys) ->
@@ -79,35 +142,34 @@ unsupported(Keys) ->
         keys => Keys
     }).
 
-run(Component, Stdin, Options, Limits) ->
+wasi(Options) ->
     Grant = maps:get(network, Options, none),
-    Wasi = (maps:with([initial_cwd, http_max_body_bytes], Options))#{
+    (maps:with([initial_cwd, http_max_body_bytes], Options))#{
         args => maps:get(args, Options, []),
         env => maps:get(env, Options, []),
         dirs => mounts(Options),
-        stdin => {binary, Stdin},
-        stdout => capture,
-        stderr => capture,
         network => Grant,
         http => http(Grant)
-    },
+    }.
+
+instantiated(Component, Options, Opts, Use) ->
     maybe
         {ok, Module} ?= module(Component, Options),
         %% the cache claim goes back however the run ends
         try
-            run_module(Module, Limits#{wasi => Wasi})
+            case wasmtime:instantiate(Module, #{}, Opts) of
+                {ok, Inst} ->
+                    try
+                        Use(Module, Inst)
+                    after
+                        ok = wasmtime:destroy(Inst)
+                    end;
+                {error, _} = Error ->
+                    Error
+            end
         after
             ok = release(Component, Options, Module)
         end
-    end.
-
-run_module(Module, Opts) ->
-    maybe
-        {ok, Inst} ?= wasmtime:instantiate(Module, #{}, Opts),
-        Result = wasmtime:run(Inst),
-        {ok, {Out, Err, _Dropped}} = wasmtime:read_output(Inst),
-        ok = wasmtime:destroy(Inst),
-        outcome(Result, #{stdout => Out, stderr => Err})
     end.
 
 outcome(ok, Output) ->

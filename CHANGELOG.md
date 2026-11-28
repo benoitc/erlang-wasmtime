@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `run_serve` gives a component that serves HTTP, WASI 0.2 or 0.3, one request
+  and returns its response.
+- A request an address grant refuses now fails for the guest with
+  `HTTP-request-denied`, as on erlang_wasm.
 - Components can be granted the network and outgoing HTTP address by address,
   in erlang_wasm's `net` form, instead of all or nothing.
 - Breaking: the body of an HTTP request a component sends, and of a response

@@ -182,8 +182,42 @@ left out; a guest that goes past it traps):
 
 Without the grant a component that imports `wasi:http` does not link. A
 runtime-only build has no `wasi:http` (`features/0`, `wasi_http`) and answers
-`kind => unavailable`. Serving requests (`wasi:http/incoming-handler`) is not
-available.
+`kind => unavailable`.
+
+### Serve a request
+
+A component that exports `wasi:http/incoming-handler` (WASI 0.2) or
+`wasi:http/handler` (WASI 0.3) answers requests. Give it one:
+
+```erlang
+{ok, Bin} = file:read_file("hello.component.wasm"),
+Request = #{method => ~"GET", path => ~"/", headers => [], body => <<>>},
+{ok, Status, Headers, Body} = wasmtime_wasi_preview2:run_serve(Bin, Request, #{}).
+```
+
+Each call instantiates the component, calls its handler, reads the response
+and destroys the instance. The component is compiled once while the
+`erlang_wasmtime` application runs.
+
+- `Request` also takes `scheme` (`~"http"`), `authority` (`~"localhost"`) and
+  `trailers`. Headers a guest may not set, `host` and `connection` among them,
+  do not reach it.
+- A WASI 0.3 response with trailers is `{ok, Status, Headers, Body,
+  Trailers}`.
+- The options are those of `run_command/3`: `env`, `preopen`, `network`,
+  `timeout`, `fuel` and the rest. Without `network` the handler's own
+  requests are refused.
+- The response body is bounded to 8 MiB; `http_max_body_bytes` changes that.
+
+| Result | Means |
+|---|---|
+| `{error, no_incoming_handler}` | the component exports no handler |
+| `{error, no_response}` | the handler returned, or a 0.2 one trapped, without a response |
+| `{error, {Code, Payload}}` | a `wasi:http` error code, such as `{~"HTTP-response-body-size", {some, 8388608}}` |
+| `{error, #{kind := _}}` | the call failed, as any call does: a trap, `timeout`, `out_of_fuel` |
+
+Serving needs a full build with this project's patches (`features/0`,
+`wasi_http_serve`).
 
 ### Grant the network
 

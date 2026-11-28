@@ -53,7 +53,8 @@ component importing `wasi:http` does not link.
 - `timeout`, `interrupt/1` and a dead caller stop a program wherever it
   waits; the instance cannot be entered again.
 - Work still running when `run` returns is not driven further.
-- Serving HTTP (`wasi:http/handler`) is not available.
+- `run_serve/3` gives a `wasi:http/handler` component a request; see
+  [WASI](wasi.md#serve-a-request).
 - Streams and futures stay between the guest and the WASI hosts. A function
   of yours cannot take or return one (see [components](components.md)).
 - erlang_wasm's `wasi_preview3:run_command/3` is `instantiate/2`, `run/1,2`

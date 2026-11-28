@@ -27,6 +27,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Host resources | a `resource` in an interface the import map serves is the host's: `wasmtime_component:host_new/2,3`, `host_get/1`, `host_update/2`, `host_drop/1`, `host_live/0`; the guest's drop removes the entry, or calls your `[resource-drop]<name>` fun |
 | WASI 0.2 | for components with a `wasi` option: the same keys as preview 1, `run/1,2`, streamed stdin and stdout, `clocks => monotonic` traps the wall clock (`kind => clock_refused`); `http` grants `wasi:http/outgoing-handler`, to any server or to listed addresses, on full builds; `network` grants `wasi:sockets` the same way; `initial_cwd` |
 | Network grants | erlang_wasm's `wasi_net` form: `connect` and `listen` rules by address prefix and port, `resolve`, `tcp`, `udp`; checked by Wasmtime on every address, and an HTTP request connects to the address that passed; on libraries with this project's patches (`features/0`, `wasi_limits`) |
+| Serving HTTP | `wasmtime_wasi_preview2:run_serve/3` (and preview3's): one request to a `wasi:http` handler, 0.2 or 0.3, with trailers and a bounded response body; full builds with this project's patches (`features/0`, `wasi_http_serve`) |
 | Component limits | `resource_limit` (host and WASI resource handles), `transfer_limit` (bytes copied to the host per call), `http_max_body_bytes` (8 MiB by default), `http_max_field_bytes` |
 | Host functions in a dedicated process | `host => Pid` at instantiate, `handle_host_call/2` in that process |
 | Non-blocking calls | `call_async/3` and `await/2,3` |
@@ -141,6 +142,7 @@ Errors have erlang_wasm's shape, `#{class, kind, msg, ctx}`; see
 | An HTTP limit that is no positive integer | `link`, `wasi_config` |
 | A network grant that cannot be read | raises `{bad_net_grant, Term}` |
 | Headers past `http_max_field_bytes`; a body past `http_max_body_bytes` | `trap` for headers (`wasi:http` has no error for it); the guest's request fails for a body |
+| `run_serve/3` on a library that cannot serve; a request that is not one | `link`, `unavailable` or `badarg` |
 | A host resource past `resource_limit` | `trap`, `resource_limit_reached` |
 | More data from a component in one call than `transfer_limit` | `exhaustion`, `hostcall_fuel` |
 | A `profile` other than `plugin` or `script` | `link`, `unknown_profile` |
@@ -225,10 +227,13 @@ Errors have erlang_wasm's shape, `#{class, kind, msg, ctx}`; see
 - **Other script worker options.** `restore_ahead`, `compiled`, the heap
   floors, a result channel apart from stdout, and the conformance kit
   module are erlang_wasm's and have no counterpart yet.
-- **Serving HTTP, and your own HTTP transport.** Wasmtime sends the
-  requests, and the C API has no way to supply the transport or to build an
-  incoming request, so `wasi:http/incoming-handler` cannot be called.
-  erlang_wasm has both.
+- **Your own HTTP transport, and an HTTP listener.** Wasmtime sends the
+  guest's requests: there is no `http_transport` to replace it and no
+  `wasi_http_listener` to serve connections yet. erlang_wasm has both.
+- **erlang_wasm's `run_serve/4`.** It takes an import map built beforehand;
+  here the imports are Wasmtime's.
+- **Error code payloads.** A `wasi:http` error code that carries a record,
+  such as `DNS-error`, has `undefined` as its payload.
 - **`max_sockets` and `timeout` in a network grant.** Wasmtime's sockets
   take neither. `resource_limit` bounds how many WASI resources a component
   holds, sockets among them, and the call's `timeout` stops a waiting guest.

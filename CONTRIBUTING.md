@@ -89,6 +89,7 @@ The order the code enforces, with one file per step:
    | `wasmtime_component_async_SUITE` | component async, stopping a waiting guest, types that cannot cross |
    | `wasmtime_runner_SUITE` | erlang_wasm's WASI runners and component calls, output sinks, `random`, worker and cache limits |
    | `wasmtime_grant_SUITE` | network grants, HTTP rules and limits, `initial_cwd`, component limits |
+   | `wasmtime_serve_SUITE` | `run_serve`, WASI 0.2 and 0.3 handlers, streamed responses |
    | `wasmtime_actor_SUITE` | `wasmtime_actor`, with erlang_wasm's suite and guest |
    | `wasmtime_parity_SUITE` | what erlang_wasm offers and where it stands here; set `ERLANG_WASM_DIR` to a built erlang_wasm checkout to compare the two |
    | `wasmtime_wasi3_SUITE` | WASI 0.3 commands, with Wasmtime's own test programs |

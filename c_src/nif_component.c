@@ -380,7 +380,7 @@ static linker_entry_t *build_centry(module_res_t *m, ErlNifEnv *env, ERL_NIF_TER
  * the stop: either the epoch trapped the guest or the cancel dropped the
  * call, possibly with the guest suspended. Report it as an interrupt, and
  * run no more guest code in this store. */
-static void note_cancel(instance_t *inst, const wasmtime_error_t *e) {
+void note_cancel(instance_t *inst, const wasmtime_error_t *e) {
   if (!e || !__atomic_load_n(&inst->interrupt, __ATOMIC_ACQUIRE)) return;
   inst->interrupted_fired = 1;
   inst->wasm.cancelled = 1;
@@ -489,6 +489,22 @@ static ERL_NIF_TERM drop_resource(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM
                                             : result;
 }
 
+/* The request's fuel and the epoch deadline, before guest code runs. 0, or
+ * the error to answer with. */
+ERL_NIF_TERM component_arm(instance_t *inst, req_t *req, ErlNifEnv *out) {
+  ErlNifUInt64 fuel;
+  if (fuel_of(req->env, req->opts, inst->wasm.mod->engine, &fuel)) {
+    wasmtime_error_t *e = wasmtime_context_set_fuel(inst->wasm.ctx, fuel);
+    if (e) {
+      wasmtime_error_delete(e);
+      return mk_error_s(out, "link", "fuel_disabled",
+                        "the component was not compiled with fuel metering");
+    }
+  }
+  wasmtime_context_set_epoch_deadline(inst->wasm.ctx, 1);
+  return 0;
+}
+
 /* {ok, Value}: `undefined` for a function without result, as erlang_wasm. */
 ERL_NIF_TERM component_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
   ErlNifEnv *env = req->env;
@@ -501,6 +517,9 @@ ERL_NIF_TERM component_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
   if (enif_get_tuple(env, req->name, &dar, &dt) && dar == 2 &&
       enif_is_identical(dt[0], mk_atom(env, "drop")))
     return drop_resource(inst, env, dt[1], out);
+  if (enif_get_tuple(env, req->name, &dar, &dt) && dar == 2 &&
+      enif_is_identical(dt[0], mk_atom(env, "serve")))
+    return serve_component(inst, req, dt[1], out);
   if (!enif_inspect_iolist_as_binary(env, req->name, &name))
     return mk_error_s(out, "link", "badarg", "export name must be a binary");
   wasmtime_component_export_index_t *idx = find_export(inst, (const char *)name.data, name.size);
@@ -545,17 +564,7 @@ ERL_NIF_TERM component_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
       goto done;
     }
   }
-  ErlNifUInt64 fuel;
-  if (fuel_of(env, req->opts, inst->wasm.mod->engine, &fuel)) {
-    wasmtime_error_t *fe = wasmtime_context_set_fuel(inst->wasm.ctx, fuel);
-    if (fe) {
-      wasmtime_error_delete(fe);
-      result = mk_error_s(out, "link", "fuel_disabled",
-                          "the component was not compiled with fuel metering");
-      goto done;
-    }
-  }
-  wasmtime_context_set_epoch_deadline(inst->wasm.ctx, 1);
+  if ((result = component_arm(inst, req, out))) goto done;
   wasmtime_component_val_t res;
   memset(&res, 0, sizeof res);
   res.kind = WASMTIME_COMPONENT_BOOL;

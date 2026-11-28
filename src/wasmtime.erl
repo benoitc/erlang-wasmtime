@@ -109,7 +109,7 @@ on an instance at a time; concurrent callers are queued.
     preinit_call/0,
     preinit_options/0
 ]).
--export([handle/1]).
+-export([handle/1, serve_http/3]).
 
 -define(DEFAULT_MEMORY_LIMIT, 256 * 1024 * 1024).
 -define(DEFAULT_HOST_TIMEOUT, 30000).
@@ -208,7 +208,8 @@ components.md). See building.md, "Runtime-only builds".
     wasi_sockets := boolean(),
     component_async := boolean(),
     wasi_p3 := boolean(),
-    wasi_limits := boolean()
+    wasi_limits := boolean(),
+    wasi_http_serve := boolean()
 }.
 
 -doc """
@@ -1247,6 +1248,20 @@ call(Inst, Name, Args, Opts) when is_list(Args), is_map(Opts) ->
         ok ?= check_call_limits(Opts),
         do_call(Inst, iolist_to_binary(Name), Args, Opts)
     end.
+
+%% One request for a component's `wasi:http` handler (wasmtime_http_serve).
+%% Take gets each part of the response in this process, while the guest waits,
+%% and answers whether to go on.
+-doc false.
+-spec serve_http(instance(), tuple(), fun((term()) -> boolean())) ->
+    {ok, {atom(), p2 | p3, binary()}} | error().
+serve_http(#instance{kind = component, imports = Imports} = Inst, Request, Take) ->
+    Part = fun(_, [Part]) -> {ok, [Take(Part)]} end,
+    Serving = Inst#instance{imports = Imports#{{~"$http", ~"response"} => Part}},
+    do_call(Serving, {serve, Request}, [], #{});
+serve_http(#instance{}, _, _) ->
+    %% a core module exports no component interface
+    {ok, {no_handler, p2, <<>>}}.
 
 -doc #{equiv => call_ref(Inst, Ref, Args, #{})}.
 -spec call_ref(instance(), ref(), [value()]) -> {ok, [value()]} | error().

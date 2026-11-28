@@ -1,0 +1,620 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 40d1ad2..d0dbcea 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -4652,6 +4652,9 @@ dependencies = [
+  "bytes",
+  "env_logger 0.11.5",
+  "futures",
++ "http",
++ "http-body",
++ "http-body-util",
+  "log",
+  "tokio",
+  "tracing",
+diff --git a/crates/c-api/Cargo.toml b/crates/c-api/Cargo.toml
+index 56ad8b4..24afed2 100644
+--- a/crates/c-api/Cargo.toml
++++ b/crates/c-api/Cargo.toml
+@@ -35,6 +35,9 @@ wasmtime-wasi-http = { workspace = true, optional = true, features = ["p2", "def
+ wasmtime-wasi-io = { workspace = true, optional = true, features = ["std"] }
+ async-trait = { workspace = true, optional = true }
+ bytes = { workspace = true, optional = true }
++http = { workspace = true, optional = true }
++http-body = { workspace = true, optional = true }
++http-body-util = { workspace = true, optional = true }
+ 
+ # Optional dependencies for the `async` feature
+ futures = { workspace = true, optional = true }
+@@ -46,7 +49,7 @@ profiling = ["wasmtime/profiling"]
+ cache = ["wasmtime/cache"]
+ parallel-compilation = ['wasmtime/parallel-compilation']
+ wasi = ['wasmtime-wasi', 'wasmtime-wasi-io', 'tokio', 'async-trait', 'bytes']
+-wasi-http = ['wasi', 'wasmtime-wasi-http']
++wasi-http = ['wasi', 'wasmtime-wasi-http', 'dep:http', 'dep:http-body', 'dep:http-body-util']
+ logging = ['dep:env_logger']
+ disable-logging = ["log/max_level_off", "tracing/max_level_off"]
+ coredump = ["wasmtime/coredump"]
+@@ -69,6 +72,7 @@ component-model-async = [
+   "wasmtime/component-model-async",
+   "wasmtime-wasi?/p3",
+   "wasmtime-wasi-http?/p3",
++  "wasmtime-wasi-http?/component-model-async",
+ ]
+ pulley = ["wasmtime/pulley"]
+ all-arch = ["wasmtime/all-arch"]
+diff --git a/crates/c-api/include/wasmtime/component.h b/crates/c-api/include/wasmtime/component.h
+index 96060f3..572598e 100644
+--- a/crates/c-api/include/wasmtime/component.h
++++ b/crates/c-api/include/wasmtime/component.h
+@@ -6,6 +6,7 @@
+ #include <wasmtime/component/func.h>
+ #include <wasmtime/component/instance.h>
+ #include <wasmtime/component/linker.h>
++#include <wasmtime/component/serve.h>
+ #include <wasmtime/component/types.h>
+ #include <wasmtime/component/val.h>
+ 
+diff --git a/crates/c-api/include/wasmtime/component/serve.h b/crates/c-api/include/wasmtime/component/serve.h
+new file mode 100644
+index 0000000..a7c8527
+--- /dev/null
++++ b/crates/c-api/include/wasmtime/component/serve.h
+@@ -0,0 +1,114 @@
++/**
++ * \file wasmtime/component/serve.h
++ *
++ * \brief Giving one HTTP request to a `wasi:http` handler component.
++ */
++
++#ifndef WASMTIME_COMPONENT_SERVE_H
++#define WASMTIME_COMPONENT_SERVE_H
++
++#include <wasmtime/conf.h>
++
++#if defined(WASMTIME_FEATURE_COMPONENT_MODEL_ASYNC) &&                         \
++    defined(WASMTIME_FEATURE_WASI_HTTP)
++
++#include <wasm.h>
++#include <wasmtime/component/blocking.h>
++#include <wasmtime/component/instance.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/// \brief One header or trailer field.
++typedef struct wasmtime_http_field_t {
++  const uint8_t *name;
++  size_t name_len;
++  const uint8_t *value;
++  size_t value_len;
++} wasmtime_http_field_t;
++
++/// \brief A request for a handler. Every pointer is borrowed for the call.
++typedef struct wasmtime_http_request_t {
++  const uint8_t *method;
++  size_t method_len;
++  const uint8_t *scheme;
++  size_t scheme_len;
++  const uint8_t *authority;
++  size_t authority_len;
++  /// The path and query, starting with `/`, or `*`.
++  const uint8_t *path;
++  size_t path_len;
++  const wasmtime_http_field_t *headers;
++  size_t headers_len;
++  const uint8_t *body;
++  size_t body_len;
++  const wasmtime_http_field_t *trailers;
++  size_t trailers_len;
++} wasmtime_http_request_t;
++
++/**
++ * \brief Where a response goes, as the guest makes it: `head` once, `chunk`
++ * for each piece of the body, `done` once.
++ *
++ * The callbacks run on the calling thread. The guest does not run while one
++ * does, so a callback that waits for its consumer holds one chunk and slows
++ * the guest. One that returns false ends the call.
++ */
++typedef struct wasmtime_http_sink_t {
++  void *data;
++  bool (*head)(void *data, uint16_t status, const wasmtime_http_field_t *headers,
++               size_t headers_len);
++  bool (*chunk)(void *data, const uint8_t *bytes, size_t len);
++  bool (*done)(void *data, const wasmtime_http_field_t *trailers,
++               size_t trailers_len);
++} wasmtime_http_sink_t;
++
++/// \brief How serving a request ended, when the call itself did not fail.
++typedef enum wasmtime_http_outcome_t {
++  /// `done` was called: the whole response was delivered.
++  WASMTIME_HTTP_SERVED = 0,
++  /// The component exports no `wasi:http` handler.
++  WASMTIME_HTTP_NO_HANDLER,
++  /// The handler returned without a response.
++  WASMTIME_HTTP_NO_RESPONSE,
++  /// The guest answered with an error, or the response body failed; `detail`
++  /// is the error code as Rust prints it.
++  WASMTIME_HTTP_ERROR_CODE,
++  /// A sink callback returned false.
++  WASMTIME_HTTP_STOPPED,
++  /// The request cannot be one; `detail` says why.
++  WASMTIME_HTTP_BAD_REQUEST,
++} wasmtime_http_outcome_t;
++
++/// \brief The result of serving a request.
++typedef struct wasmtime_http_result_t {
++  wasmtime_http_outcome_t outcome;
++  /// Whether the handler is a WASI 0.3 one.
++  bool p3;
++  /// Text for the outcomes that have some, empty otherwise; delete it with
++  /// #wasm_byte_vec_delete.
++  wasm_byte_vec_t detail;
++} wasmtime_http_result_t;
++
++/**
++ * \brief Gives `request` to the instance's `wasi:http` handler, 0.3 or else
++ * 0.2, delivers the response to `sink`, then lets the guest finish what it
++ * still has running.
++ *
++ * The store needs a WASI context and #wasmtime_context_set_wasi_http. Errors,
++ * traps among them, are returned; otherwise `result` is filled. Blocks the
++ * calling thread; `cancel` ends it from another one.
++ */
++WASM_API_EXTERN wasmtime_error_t *wasmtime_component_serve_http_blocking(
++    wasmtime_context_t *context, const wasmtime_component_instance_t *instance,
++    const wasmtime_http_request_t *request, const wasmtime_http_sink_t *sink,
++    const wasmtime_cancel_t *cancel, wasmtime_http_result_t *result);
++
++#ifdef __cplusplus
++} // extern "C"
++#endif
++
++#endif // WASMTIME_FEATURE_COMPONENT_MODEL_ASYNC && WASMTIME_FEATURE_WASI_HTTP
++
++#endif // WASMTIME_COMPONENT_SERVE_H
+diff --git a/crates/c-api/src/component/blocking.rs b/crates/c-api/src/component/blocking.rs
+index 61f0a77..450b6c5 100644
+--- a/crates/c-api/src/component/blocking.rs
++++ b/crates/c-api/src/component/blocking.rs
+@@ -38,7 +38,7 @@ pub extern "C" fn wasmtime_cancel_fire(cancel: &wasmtime_cancel_t) {
+ #[unsafe(no_mangle)]
+ pub extern "C" fn wasmtime_cancel_delete(_cancel: Box<wasmtime_cancel_t>) {}
+ 
+-fn block<T>(
++pub(super) fn block<T>(
+     cancel: &wasmtime_cancel_t,
+     work: impl Future<Output = wasmtime::Result<T>>,
+ ) -> wasmtime::Result<T> {
+diff --git a/crates/c-api/src/component/mod.rs b/crates/c-api/src/component/mod.rs
+index ef8a9e9..a665f60 100644
+--- a/crates/c-api/src/component/mod.rs
++++ b/crates/c-api/src/component/mod.rs
+@@ -4,6 +4,8 @@ mod component;
+ mod func;
+ mod instance;
+ mod linker;
++#[cfg(all(feature = "wasi-http", feature = "component-model-async"))]
++mod serve;
+ mod types;
+ mod val;
+ 
+@@ -13,5 +15,7 @@ pub use component::*;
+ pub use func::*;
+ pub use instance::*;
+ pub use linker::*;
++#[cfg(all(feature = "wasi-http", feature = "component-model-async"))]
++pub use serve::*;
+ pub use types::*;
+ pub use val::*;
+diff --git a/crates/c-api/src/component/serve.rs b/crates/c-api/src/component/serve.rs
+new file mode 100644
+index 0000000..3317f3f
+--- /dev/null
++++ b/crates/c-api/src/component/serve.rs
+@@ -0,0 +1,380 @@
++//! One HTTP request given to a `wasi:http` handler, its response delivered to
++//! the embedder as the guest makes it.
++
++use super::blocking::{block, wasmtime_cancel_t};
++use crate::{WasmtimeStoreContextMut, WasmtimeStoreData, wasm_byte_vec_t, wasmtime_error_t};
++use bytes::Bytes;
++use futures::future::{Either, select};
++use http_body_util::{BodyExt, Full};
++use std::ffi::c_void;
++use std::fmt::Debug;
++use std::pin::pin;
++use tokio::sync::oneshot;
++use wasmtime::component::Instance;
++use wasmtime::{AsContextMut, Result};
++use wasmtime_wasi_http::p2::bindings::http::types as p2_types;
++use wasmtime_wasi_http::{FieldMap, WasiHttpCtxView, WasiHttpView, p2, p3};
++
++#[repr(C)]
++pub struct wasmtime_http_field_t {
++    name: *const u8,
++    name_len: usize,
++    value: *const u8,
++    value_len: usize,
++}
++
++#[repr(C)]
++pub struct wasmtime_http_request_t {
++    method: *const u8,
++    method_len: usize,
++    scheme: *const u8,
++    scheme_len: usize,
++    authority: *const u8,
++    authority_len: usize,
++    path: *const u8,
++    path_len: usize,
++    headers: *const wasmtime_http_field_t,
++    headers_len: usize,
++    body: *const u8,
++    body_len: usize,
++    trailers: *const wasmtime_http_field_t,
++    trailers_len: usize,
++}
++
++#[repr(C)]
++pub struct wasmtime_http_sink_t {
++    data: *mut c_void,
++    head: extern "C" fn(*mut c_void, u16, *const wasmtime_http_field_t, usize) -> bool,
++    chunk: extern "C" fn(*mut c_void, *const u8, usize) -> bool,
++    done: extern "C" fn(*mut c_void, *const wasmtime_http_field_t, usize) -> bool,
++}
++
++// The callbacks run on the thread that blocks in the call.
++unsafe impl Sync for wasmtime_http_sink_t {}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++pub enum wasmtime_http_outcome_t {
++    Served,
++    NoHandler,
++    NoResponse,
++    ErrorCode,
++    Stopped,
++    BadRequest,
++}
++
++#[repr(C)]
++pub struct wasmtime_http_result_t {
++    outcome: wasmtime_http_outcome_t,
++    p3: bool,
++    detail: wasm_byte_vec_t,
++}
++
++type Outcome = (wasmtime_http_outcome_t, String);
++
++fn outcome(kind: wasmtime_http_outcome_t) -> Outcome {
++    (kind, String::new())
++}
++
++fn error_code(code: impl Debug) -> Outcome {
++    (wasmtime_http_outcome_t::ErrorCode, format!("{code:?}"))
++}
++
++/// A request body: the bytes, then the trailers when there are any.
++type RequestBody = http_body_util::combinators::UnsyncBoxBody<Bytes, wasmtime_wasi_http::Error>;
++
++struct Incoming {
++    method: http::Method,
++    scheme: http::uri::Scheme,
++    authority: http::uri::Authority,
++    path: http::uri::PathAndQuery,
++    headers: http::HeaderMap,
++    body: RequestBody,
++}
++
++unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
++    unsafe { crate::slice_from_raw_parts(ptr, len) }
++}
++
++unsafe fn field_map(
++    fields: *const wasmtime_http_field_t,
++    len: usize,
++) -> Result<http::HeaderMap, &'static str> {
++    let mut map = http::HeaderMap::new();
++    for field in unsafe { crate::slice_from_raw_parts(fields, len) } {
++        let name = unsafe { bytes(field.name, field.name_len) };
++        let value = unsafe { bytes(field.value, field.value_len) };
++        let name = http::HeaderName::from_bytes(name).map_err(|_| "invalid field name")?;
++        let value = http::HeaderValue::from_bytes(value).map_err(|_| "invalid field value")?;
++        // `append` panics past the map's capacity
++        map.try_append(name, value).map_err(|_| "too many fields")?;
++    }
++    Ok(map)
++}
++
++impl Incoming {
++    unsafe fn new(request: &wasmtime_http_request_t) -> Result<Incoming, &'static str> {
++        let (method, scheme, authority, path, body) = unsafe {
++            (
++                bytes(request.method, request.method_len),
++                bytes(request.scheme, request.scheme_len),
++                bytes(request.authority, request.authority_len),
++                bytes(request.path, request.path_len),
++                bytes(request.body, request.body_len),
++            )
++        };
++        let headers = unsafe { field_map(request.headers, request.headers_len)? };
++        let trailers = unsafe { field_map(request.trailers, request.trailers_len)? };
++        let trailers = (!trailers.is_empty()).then_some(Ok(trailers));
++        let body = Full::new(Bytes::copy_from_slice(body))
++            .with_trailers(std::future::ready(trailers))
++            .map_err(|e: std::convert::Infallible| match e {})
++            .boxed_unsync();
++        Ok(Incoming {
++            method: http::Method::from_bytes(method).map_err(|_| "invalid method")?,
++            scheme: http::uri::Scheme::try_from(scheme).map_err(|_| "invalid scheme")?,
++            authority: http::uri::Authority::try_from(authority)
++                .map_err(|_| "invalid authority")?,
++            path: http::uri::PathAndQuery::try_from(path).map_err(|_| "invalid path")?,
++            headers,
++            body,
++        })
++    }
++}
++
++fn view(data: &mut WasmtimeStoreData) -> WasiHttpCtxView<'_> {
++    data.http()
++}
++
++fn fields(map: &http::HeaderMap) -> Vec<wasmtime_http_field_t> {
++    map.iter()
++        .map(|(name, value)| wasmtime_http_field_t {
++            name: name.as_str().as_ptr(),
++            name_len: name.as_str().len(),
++            value: value.as_bytes().as_ptr(),
++            value_len: value.as_bytes().len(),
++        })
++        .collect()
++}
++
++async fn deliver<B>(response: http::Response<B>, sink: &wasmtime_http_sink_t) -> Outcome
++where
++    B: http_body::Body<Data = Bytes>,
++    B::Error: Debug,
++{
++    let (parts, body) = response.into_parts();
++    let headers = fields(&parts.headers);
++    if !(sink.head)(
++        sink.data,
++        parts.status.as_u16(),
++        headers.as_ptr(),
++        headers.len(),
++    ) {
++        return outcome(wasmtime_http_outcome_t::Stopped);
++    }
++    let mut body = pin!(body);
++    let mut trailers = http::HeaderMap::new();
++    while let Some(frame) = body.frame().await {
++        let frame = match frame {
++            Ok(frame) => frame,
++            Err(e) => return error_code(e),
++        };
++        match frame.into_data() {
++            Ok(data) => {
++                if !data.is_empty() && !(sink.chunk)(sink.data, data.as_ptr(), data.len()) {
++                    return outcome(wasmtime_http_outcome_t::Stopped);
++                }
++            }
++            Err(frame) => {
++                if let Ok(map) = frame.into_trailers() {
++                    trailers = map;
++                }
++            }
++        }
++    }
++    let trailers = fields(&trailers);
++    if !(sink.done)(sink.data, trailers.as_ptr(), trailers.len()) {
++        return outcome(wasmtime_http_outcome_t::Stopped);
++    }
++    outcome(wasmtime_http_outcome_t::Served)
++}
++
++async fn serve_p2(
++    mut store: WasmtimeStoreContextMut<'_>,
++    proxy: p2::bindings::Proxy,
++    request: Incoming,
++    sink: &wasmtime_http_sink_t,
++) -> Result<Outcome> {
++    let scheme = match request.scheme.as_str() {
++        "http" => p2_types::Scheme::Http,
++        "https" => p2_types::Scheme::Https,
++        other => p2_types::Scheme::Other(other.to_string()),
++    };
++    let uri = http::Uri::builder()
++        .scheme(request.scheme)
++        .authority(request.authority)
++        .path_and_query(request.path)
++        .build()?;
++    let mut incoming = http::Request::new(request.body);
++    *incoming.method_mut() = request.method;
++    *incoming.uri_mut() = uri;
++    *incoming.headers_mut() = request.headers;
++
++    let (tx, mut rx) = oneshot::channel();
++    let incoming = view(store.data_mut()).new_incoming_request(scheme, incoming)?;
++    let outparam = view(store.data_mut()).new_response_outparam(tx)?;
++    let call = proxy
++        .wasi_http_incoming_handler()
++        .func_handle()
++        .start_call_concurrent(store.as_context_mut(), (incoming, outparam))?;
++
++    store
++        .run_concurrent(async move |accessor| -> Result<Outcome> {
++            let mut handle = pin!(
++                proxy
++                    .wasi_http_incoming_handler()
++                    .func_handle()
++                    .finish_call_concurrent(accessor, call)
++            );
++            // The guest may set the response long before it returns.
++            let (response, returned) = match select(handle.as_mut(), &mut rx).await {
++                Either::Left((result, rx)) => {
++                    result?;
++                    match rx.try_recv() {
++                        Ok(response) => (response, true),
++                        Err(_) => return Ok(outcome(wasmtime_http_outcome_t::NoResponse)),
++                    }
++                }
++                Either::Right((Ok(response), _)) => (response, false),
++                Either::Right((Err(_), _)) => {
++                    handle.await?;
++                    return Ok(outcome(wasmtime_http_outcome_t::NoResponse));
++                }
++            };
++            let served = match response {
++                Err(code) => {
++                    if !returned {
++                        handle.await?;
++                    }
++                    return Ok(error_code(code));
++                }
++                Ok(response) if returned => deliver(response, sink).await,
++                Ok(response) => {
++                    let body = pin!(deliver(response, sink));
++                    match select(handle, body).await {
++                        Either::Left((result, body)) => {
++                            result?;
++                            body.await
++                        }
++                        Either::Right((served, handle)) => {
++                            if matches!(served.0, wasmtime_http_outcome_t::Served) {
++                                handle.await?;
++                            }
++                            served
++                        }
++                    }
++                }
++            };
++            finish(accessor, served).await
++        })
++        .await?
++}
++
++/// Runs what the guest still has going once its response is out.
++async fn finish(
++    accessor: &wasmtime::component::Accessor<WasmtimeStoreData>,
++    served: Outcome,
++) -> Result<Outcome> {
++    if matches!(served.0, wasmtime_http_outcome_t::Served) {
++        std::future::poll_fn(|cx| accessor.poll_no_interesting_tasks(cx)).await;
++    }
++    Ok(served)
++}
++
++async fn serve_p3(
++    mut store: WasmtimeStoreContextMut<'_>,
++    service: p3::bindings::Service,
++    request: Incoming,
++    sink: &wasmtime_http_sink_t,
++) -> Result<Outcome> {
++    let headers = FieldMap::new_immutable(view(store.data_mut()).hooks, request.headers);
++    let (incoming, request_io) = p3::Request::new(
++        request.method,
++        Some(request.scheme),
++        Some(request.authority),
++        Some(request.path),
++        headers,
++        None,
++        request.body,
++    );
++    let incoming = view(store.data_mut()).table.push(incoming)?;
++    let call = service
++        .wasi_http_handler()
++        .func_handle()
++        .start_call_concurrent(store.as_context_mut(), (incoming,))?;
++
++    store
++        .run_concurrent(async move |accessor| -> Result<Outcome> {
++            let response = service
++                .wasi_http_handler()
++                .func_handle()
++                .finish_call_concurrent(accessor, call)
++                .await?
++                .0;
++            let response = match response {
++                Ok(response) => response,
++                Err(code) => return Ok(error_code(code)),
++            };
++            let response = accessor.with(|mut access| {
++                let response = view(access.get()).table.delete(response)?;
++                response.into_http_with_getter(&mut access, request_io, view)
++            })?;
++            let served = deliver(response, sink).await;
++            finish(accessor, served).await
++        })
++        .await?
++}
++
++async fn serve(
++    mut store: WasmtimeStoreContextMut<'_>,
++    instance: Instance,
++    request: Incoming,
++    sink: &wasmtime_http_sink_t,
++    p3_out: &mut bool,
++) -> Result<Outcome> {
++    if let Ok(service) = p3::bindings::Service::new(store.as_context_mut(), &instance) {
++        *p3_out = true;
++        return serve_p3(store, service, request, sink).await;
++    }
++    match p2::bindings::Proxy::new(store.as_context_mut(), &instance) {
++        Ok(proxy) => serve_p2(store, proxy, request, sink).await,
++        Err(_) => Ok(outcome(wasmtime_http_outcome_t::NoHandler)),
++    }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn wasmtime_component_serve_http_blocking(
++    mut context: WasmtimeStoreContextMut<'_>,
++    instance: &Instance,
++    request: &wasmtime_http_request_t,
++    sink: &wasmtime_http_sink_t,
++    cancel: &wasmtime_cancel_t,
++    result: &mut wasmtime_http_result_t,
++) -> Option<Box<wasmtime_error_t>> {
++    let data = context.data_mut();
++    // the view of the store panics without either
++    if data.wasi.is_none() || data.wasi_http.is_none() {
++        let err = wasmtime::format_err!("the store has no wasi:http context");
++        return Some(Box::new(wasmtime_error_t::from(err)));
++    }
++    let mut p3 = false;
++    let served = match unsafe { Incoming::new(request) } {
++        Ok(incoming) => block(cancel, serve(context, *instance, incoming, sink, &mut p3)),
++        Err(why) => Ok((wasmtime_http_outcome_t::BadRequest, why.to_string())),
++    };
++    crate::handle_result(served, |(kind, detail)| {
++        result.outcome = kind;
++        result.p3 = p3;
++        result.detail = wasm_byte_vec_t::from(detail.into_bytes());
++    })
++}
+diff --git a/crates/wasi-http/src/default_send_request.rs b/crates/wasi-http/src/default_send_request.rs
+index 3359fae..9c46357 100644
+--- a/crates/wasi-http/src/default_send_request.rs
++++ b/crates/wasi-http/src/default_send_request.rs
+@@ -51,8 +51,7 @@ pub type AddressFilter = std::sync::Arc<dyn Fn(std::net::SocketAddr) -> bool + S
+ ///
+ /// The authority is resolved once and the connection is made to one of the
+ /// accepted addresses themselves, so what was checked is what is reached. A
+-/// request with no accepted address fails with
+-/// [`Error::DestinationIpProhibited`]. The TLS server name is still the one in
++/// request with no accepted address fails with [`Error::HttpRequestDenied`]. The TLS server name is still the one in
+ /// the authority.
+ pub async fn default_send_request_to(
+     mut req: Request<impl Body<Data = Bytes, Error = Error> + Send + 'static>,
+@@ -98,7 +97,7 @@ pub async fn default_send_request_to(
+                     .map_err(Error::Connect)?;
+                 let accepted: Vec<_> = found.filter(|addr| allow(*addr)).collect();
+                 if accepted.is_empty() {
+-                    return Err(Error::DestinationIpProhibited);
++                    return Err(Error::HttpRequestDenied);
+                 }
+                 TcpStream::connect(&accepted[..]).await
+             }

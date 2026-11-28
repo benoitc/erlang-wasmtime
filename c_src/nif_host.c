@@ -106,7 +106,7 @@ enum host_status host_exchange(instance_t *inst, hostfn_t *fn, ErlNifEnv *menv, 
   /* A dedicated handler serves calls; the start section at instantiate
    * time goes to the caller, which is the only process that has the
    * instance at that point. */
-  inst->host.target = inst->host.has_pid && inst->queue.current->kind == REQ_CALL
+  inst->host.target = inst->host.has_pid && !fn->event && inst->queue.current->kind == REQ_CALL
                           ? inst->host.pid
                           : inst->queue.current->caller;
   enif_clear_env(inst->host.reply_env);
@@ -126,7 +126,11 @@ enum host_status host_exchange(instance_t *inst, hostfn_t *fn, ErlNifEnv *menv, 
     struct timespec deadline;
     add_ms(&deadline, inst->host.timeout_ms);
     while (!inst->host.has_reply && !inst->host.abort) {
-      if (pthread_cond_timedwait(&inst->cv, &inst->mu, &deadline) == ETIMEDOUT) {
+      if (fn->event) {
+        /* a slow reader is the caller's own business; its call's timeout and
+         * its death end the wait */
+        pthread_cond_wait(&inst->cv, &inst->mu);
+      } else if (pthread_cond_timedwait(&inst->cv, &inst->mu, &deadline) == ETIMEDOUT) {
         if (!inst->host.has_reply && !inst->host.abort) *fail = "host_timeout";
         break;
       }

@@ -1,0 +1,512 @@
+diff --git a/crates/c-api/include/wasi.h b/crates/c-api/include/wasi.h
+index 5bcbabb..28e5902 100644
+--- a/crates/c-api/include/wasi.h
++++ b/crates/c-api/include/wasi.h
+@@ -83,6 +83,44 @@ WASI_API_EXTERN void wasi_config_allow_tcp(wasi_config_t *config, bool enable);
+  */
+ WASI_API_EXTERN void wasi_config_allow_udp(wasi_config_t *config, bool enable);
+ 
++/** This library has #wasi_net_rule_t and the functions that take it. */
++#define WASI_HAS_NET_RULES 1
++
++/**
++ * \brief One rule on the addresses a guest's sockets or HTTP requests may use.
++ *
++ * `addr` holds four bytes for IPv4 and sixteen for IPv6, in network order;
++ * `prefix` is how many leading bits of it must match.
++ */
++typedef struct wasi_net_rule_t {
++  uint8_t udp;      ///< UDP rather than TCP
++  uint8_t listen;   ///< listening or binding rather than connecting or sending
++  uint8_t is_v6;    ///< `addr` is IPv6
++  uint8_t prefix;   ///< prefix length in bits
++  uint16_t port_lo; ///< first port
++  uint16_t port_hi; ///< last port
++  uint8_t addr[16];
++} wasi_net_rule_t;
++
++/**
++ * \brief Allow `wasi:sockets` only the addresses one of `rules` matches.
++ *
++ * Connecting and sending need a connect rule; listening, and binding a port
++ * other than zero, a listen rule. IPv4-mapped IPv6 addresses match IPv4
++ * rules. Replaces #wasi_config_inherit_network.
++ */
++WASI_API_EXTERN void wasi_config_set_net_rules(wasi_config_t *config,
++                                               const wasi_net_rule_t *rules,
++                                               size_t len);
++
++/**
++ * \brief Sets what `wasi:cli/environment` answers for the initial directory.
++ *
++ * Returns false when `path` is not UTF-8.
++ */
++WASI_API_EXTERN bool wasi_config_set_initial_cwd(wasi_config_t *config,
++                                                 const char *path);
++
+ /**
+  * \brief Sets the argv list for this configuration object.
+  *
+diff --git a/crates/c-api/include/wasmtime/store.h b/crates/c-api/include/wasmtime/store.h
+index 668fe30..da11a4a 100644
+--- a/crates/c-api/include/wasmtime/store.h
++++ b/crates/c-api/include/wasmtime/store.h
+@@ -208,8 +208,41 @@ wasmtime_context_set_wasi(wasmtime_context_t *context, wasi_config_t *wasi);
+ WASM_API_EXTERN void
+ wasmtime_context_set_wasi_http(wasmtime_context_t *context);
+ 
++/**
++ * \brief Limits the requests `wasi:http` sends and the fields it holds.
++ *
++ * With `use_rules`, a request connects only to an address a TCP connect rule
++ * matches, and to that address. `max_field_bytes` bounds one set of headers
++ * or trailers the guest builds, `max_body` the body of a request and that of
++ * a response; zero keeps the default or leaves it unlimited. Returns false
++ * before
++ * #wasmtime_context_set_wasi_http.
++ */
++WASM_API_EXTERN bool wasmtime_context_limit_wasi_http(
++    wasmtime_context_t *context, const wasi_net_rule_t *rules, size_t len,
++    bool use_rules, size_t max_field_bytes, uint64_t max_body);
++
+ #endif // WASMTIME_FEATURE_WASI_HTTP
+ 
++#if defined(WASMTIME_FEATURE_COMPONENT_MODEL) && defined(WASMTIME_FEATURE_WASI)
++/**
++ * \brief Caps the entries of the resource table WASI's resources live in.
++ * Returns false before #wasmtime_context_set_wasi.
++ */
++WASM_API_EXTERN bool
++wasmtime_context_set_max_wasi_resources(wasmtime_context_t *context,
++                                        size_t max);
++#endif
++
++#ifdef WASMTIME_FEATURE_COMPONENT_MODEL
++/**
++ * \brief Sets how much data one call between host and component may copy to
++ * the host (`Store::set_hostcall_fuel`; 128 MiB by default).
++ */
++WASM_API_EXTERN void
++wasmtime_context_set_hostcall_fuel(wasmtime_context_t *context, size_t fuel);
++#endif
++
+ /**
+  * \brief Configures the relative deadline at which point WebAssembly code will
+  * trap or invoke the callback function.
+diff --git a/crates/c-api/src/store.rs b/crates/c-api/src/store.rs
+index 3b3c514..ddfbe0e 100644
+--- a/crates/c-api/src/store.rs
++++ b/crates/c-api/src/store.rs
+@@ -86,6 +86,8 @@ pub struct WasmtimeStoreData {
+     pub(crate) wasi: Option<wasmtime_wasi::p1::WasiP1Ctx>,
+     #[cfg(feature = "wasi-http")]
+     pub(crate) wasi_http: Option<wasmtime_wasi_http::WasiHttpCtx>,
++    #[cfg(feature = "wasi-http")]
++    pub(crate) http_hooks: Option<wasmtime_wasi_http::LimitedHooks>,
+ 
+     /// Temporary storage for usage during a wasm->host call to store values
+     /// in a slice we pass to the C API.
+@@ -112,11 +114,11 @@ impl wasmtime_wasi_http::WasiHttpView for WasmtimeStoreData {
+         use wasmtime_wasi::WasiView;
+         let ctx = self.wasi_http.as_mut().unwrap();
+         let table = self.wasi.as_mut().unwrap().ctx().table;
+-        wasmtime_wasi_http::WasiHttpCtxView {
+-            ctx,
+-            table,
+-            hooks: wasmtime_wasi_http::default_hooks(),
+-        }
++        let hooks: &mut dyn wasmtime_wasi_http::WasiHttpHooks = match &mut self.http_hooks {
++            Some(hooks) => hooks,
++            None => wasmtime_wasi_http::default_hooks(),
++        };
++        wasmtime_wasi_http::WasiHttpCtxView { ctx, table, hooks }
+     }
+ }
+ 
+@@ -135,6 +137,8 @@ pub extern "C" fn wasmtime_store_new(
+                 wasi: None,
+                 #[cfg(feature = "wasi-http")]
+                 wasi_http: None,
++                #[cfg(feature = "wasi-http")]
++                http_hooks: None,
+                 hostcall_val_storage: Vec::new(),
+                 wasm_val_storage: Vec::new(),
+                 store_limits: StoreLimits::default(),
+@@ -248,6 +252,68 @@ pub extern "C" fn wasmtime_context_set_wasi_http(mut context: WasmtimeStoreConte
+     context.data_mut().wasi_http = Some(wasmtime_wasi_http::WasiHttpCtx::new());
+ }
+ 
++/// Limits the requests `wasi:http` sends and the fields it holds. Call after
++/// `wasmtime_context_set_wasi_http`; returns false without it.
++#[cfg(feature = "wasi-http")]
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn wasmtime_context_limit_wasi_http(
++    mut context: WasmtimeStoreContextMut<'_>,
++    rules: *const crate::wasi_net_rule_t,
++    len: usize,
++    use_rules: bool,
++    max_field_bytes: usize,
++    max_body: u64,
++) -> bool {
++    let data = context.data_mut();
++    let Some(ctx) = data.wasi_http.as_mut() else {
++        return false;
++    };
++    if max_field_bytes > 0 {
++        ctx.set_field_size_limit(max_field_bytes);
++    }
++    let mut hooks = wasmtime_wasi_http::LimitedHooks::default();
++    if use_rules {
++        let rules = std::sync::Arc::new(crate::wasi::rules_vec(rules, len));
++        hooks.allow = Some(std::sync::Arc::new(move |addr| {
++            crate::wasi::any_allows(&rules, false, false, addr)
++        }));
++    }
++    if max_body > 0 {
++        hooks.max_body = Some(max_body);
++    }
++    data.http_hooks = Some(hooks);
++    true
++}
++
++/// Caps the entries of the resource table WASI's resources live in. Call after
++/// `wasmtime_context_set_wasi`; returns false without it.
++#[cfg(all(feature = "component-model", feature = "wasi"))]
++#[unsafe(no_mangle)]
++pub extern "C" fn wasmtime_context_set_max_wasi_resources(
++    mut context: WasmtimeStoreContextMut<'_>,
++    max: usize,
++) -> bool {
++    use wasmtime_wasi::WasiView;
++    match context.data_mut().wasi.as_mut() {
++        Some(wasi) => {
++            wasi.ctx().table.set_max_capacity(max);
++            true
++        }
++        None => false,
++    }
++}
++
++/// Sets how much data one call between host and component may copy to the
++/// host: `Store::set_hostcall_fuel`.
++#[cfg(feature = "component-model")]
++#[unsafe(no_mangle)]
++pub extern "C" fn wasmtime_context_set_hostcall_fuel(
++    mut context: WasmtimeStoreContextMut<'_>,
++    fuel: usize,
++) {
++    context.set_hostcall_fuel(fuel);
++}
++
+ #[unsafe(no_mangle)]
+ #[cfg(feature = "gc")]
+ pub extern "C" fn wasmtime_context_gc(
+diff --git a/crates/c-api/src/wasi.rs b/crates/c-api/src/wasi.rs
+index a2f6e5e..7a5a2e9 100644
+--- a/crates/c-api/src/wasi.rs
++++ b/crates/c-api/src/wasi.rs
+@@ -4,13 +4,16 @@ use crate::wasm_byte_vec_t;
+ use bytes::Bytes;
+ use std::ffi::{CStr, c_char, c_void};
+ use std::fs::File;
++use std::net::{IpAddr, SocketAddr};
+ use std::path::Path;
+ use std::pin::Pin;
++use std::sync::Arc;
+ use std::task::{Context, Poll};
+ use tokio::io::{self, AsyncWrite};
+ use wasmtime::Result;
+ use wasmtime_wasi::WasiCtxBuilder;
+ use wasmtime_wasi::p1::WasiP1Ctx;
++use wasmtime_wasi::sockets::SocketAddrUse;
+ use wasmtime_wasi_io::streams::StreamError;
+ 
+ unsafe fn cstr_to_path<'a>(path: *const c_char) -> Option<&'a Path> {
+@@ -54,6 +57,111 @@ pub unsafe extern "C" fn wasi_config_inherit_network(config: &mut wasi_config_t)
+     config.builder.inherit_network();
+ }
+ 
++/// One address rule: a transport, a direction, an address prefix and a port
++/// range. IPv4 addresses use the first four bytes of `addr`.
++#[repr(C)]
++#[derive(Clone, Copy)]
++pub struct wasi_net_rule_t {
++    udp: u8,
++    listen: u8,
++    is_v6: u8,
++    prefix: u8,
++    port_lo: u16,
++    port_hi: u16,
++    addr: [u8; 16],
++}
++
++impl wasi_net_rule_t {
++    fn allows(&self, udp: bool, listen: bool, addr: SocketAddr) -> bool {
++        if (self.udp != 0) != udp || (self.listen != 0) != listen {
++            return false;
++        }
++        if addr.port() < self.port_lo || addr.port() > self.port_hi {
++            return false;
++        }
++        // an IPv4-mapped IPv6 address reaches the IPv4 host
++        match addr.ip().to_canonical() {
++            IpAddr::V4(ip) if self.is_v6 == 0 => {
++                prefix_matches(&ip.octets(), &self.addr[..4], self.prefix)
++            }
++            IpAddr::V6(ip) if self.is_v6 != 0 => {
++                prefix_matches(&ip.octets(), &self.addr, self.prefix)
++            }
++            _ => false,
++        }
++    }
++}
++
++fn prefix_matches(addr: &[u8], net: &[u8], prefix: u8) -> bool {
++    let mut left = usize::from(prefix);
++    for (a, n) in addr.iter().zip(net) {
++        if left == 0 {
++            return true;
++        }
++        let bits = left.min(8);
++        let mask = !0u8 << (8 - bits);
++        if a & mask != n & mask {
++            return false;
++        }
++        left -= bits;
++    }
++    true
++}
++
++pub(crate) fn any_allows(
++    rules: &[wasi_net_rule_t],
++    udp: bool,
++    listen: bool,
++    addr: SocketAddr,
++) -> bool {
++    rules.iter().any(|rule| rule.allows(udp, listen, addr))
++}
++
++pub(crate) unsafe fn rules_vec(rules: *const wasi_net_rule_t, len: usize) -> Vec<wasi_net_rule_t> {
++    if len == 0 {
++        Vec::new()
++    } else {
++        std::slice::from_raw_parts(rules, len).to_vec()
++    }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn wasi_config_set_net_rules(
++    config: &mut wasi_config_t,
++    rules: *const wasi_net_rule_t,
++    len: usize,
++) {
++    let rules = Arc::new(rules_vec(rules, len));
++    config.builder.socket_addr_check(move |addr, reason| {
++        let allowed = match reason {
++            SocketAddrUse::TcpConnect => any_allows(&rules, false, false, addr),
++            SocketAddrUse::UdpSend => any_allows(&rules, true, false, addr),
++            SocketAddrUse::TcpListen => any_allows(&rules, false, true, addr),
++            // binding a port the system chooses gives nothing away; naming a
++            // port is claiming it, which takes a listen rule
++            SocketAddrUse::TcpBind => addr.port() == 0 || any_allows(&rules, false, true, addr),
++            SocketAddrUse::UdpBind => addr.port() == 0 || any_allows(&rules, true, true, addr),
++            // inbound on a socket whose listening or binding was allowed
++            SocketAddrUse::TcpAccept | SocketAddrUse::UdpReceive => true,
++        };
++        Box::pin(async move { allowed })
++    });
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn wasi_config_set_initial_cwd(
++    config: &mut wasi_config_t,
++    path: *const c_char,
++) -> bool {
++    match cstr_to_str(path) {
++        Some(path) => {
++            config.builder.initial_cwd(path);
++            true
++        }
++        None => false,
++    }
++}
++
+ #[unsafe(no_mangle)]
+ pub extern "C" fn wasi_config_allow_tcp(config: &mut wasi_config_t, enable: bool) {
+     config.builder.allow_tcp(enable);
+diff --git a/crates/wasi-http/src/ctx.rs b/crates/wasi-http/src/ctx.rs
+index a9d50c7..1d28f06 100644
+--- a/crates/wasi-http/src/ctx.rs
++++ b/crates/wasi-http/src/ctx.rs
+@@ -162,6 +162,110 @@ pub type WasiBody = UnsyncBoxBody<Bytes, Error>;
+ /// store.
+ pub type ForbiddenHeaderFilter = Arc<dyn Fn(&HeaderName) -> bool + Send + Sync>;
+ 
++/// Hooks sending requests as the default does, within limits.
++#[cfg(feature = "default-send-request")]
++#[derive(Clone, Default)]
++pub struct LimitedHooks {
++    /// The addresses requests may connect to; any when `None`.
++    pub allow: Option<crate::AddressFilter>,
++    /// The most bytes of data in the body of a request, and in that of a
++    /// response.
++    pub max_body: Option<u64>,
++}
++
++#[cfg(feature = "default-send-request")]
++impl WasiHttpHooks for LimitedHooks {
++    fn send_request(
++        &mut self,
++        request: http::Request<WasiBody>,
++        options: Option<RequestOptions>,
++        fut: Box<dyn Future<Output = Result<(), Error>> + Send>,
++    ) -> Box<
++        dyn Future<
++                Output = Result<(
++                    http::Response<WasiBody>,
++                    Box<dyn Future<Output = Result<(), Error>> + Send>,
++                )>,
++            > + Send,
++    > {
++        _ = fut;
++        let allow = self.allow.clone();
++        let max = self.max_body;
++        Box::new(async move {
++            use http_body_util::BodyExt;
++
++            let request =
++                request.map(|body| CappedBody::wrap(body, max, Error::HttpRequestBodySize));
++            let (res, io) = crate::default_send_request_to(request, options, allow).await?;
++            let res = res.map(|body| {
++                CappedBody::wrap(body.boxed_unsync(), max, Error::HttpResponseBodySize)
++            });
++            Ok((res, Box::new(io) as Box<dyn Future<Output = _> + Send>))
++        })
++    }
++}
++
++/// A body which fails once more than `max` bytes of data have come through.
++#[cfg(feature = "default-send-request")]
++struct CappedBody {
++    inner: WasiBody,
++    max: u64,
++    left: u64,
++    error: fn(Option<u64>) -> Error,
++}
++
++#[cfg(feature = "default-send-request")]
++impl CappedBody {
++    fn wrap(body: WasiBody, max: Option<u64>, error: fn(Option<u64>) -> Error) -> WasiBody {
++        use http_body_util::BodyExt;
++
++        match max {
++            None => body,
++            Some(max) => CappedBody {
++                inner: body,
++                max,
++                left: max,
++                error,
++            }
++            .boxed_unsync(),
++        }
++    }
++}
++
++#[cfg(feature = "default-send-request")]
++impl http_body::Body for CappedBody {
++    type Data = Bytes;
++    type Error = Error;
++
++    fn poll_frame(
++        mut self: core::pin::Pin<&mut Self>,
++        cx: &mut core::task::Context<'_>,
++    ) -> core::task::Poll<Option<Result<http_body::Frame<Bytes>, Error>>> {
++        use core::task::Poll;
++
++        let frame = core::task::ready!(core::pin::Pin::new(&mut self.inner).poll_frame(cx));
++        if let Some(Ok(frame)) = &frame {
++            if let Some(data) = frame.data_ref() {
++                let len = data.len() as u64;
++                if len > self.left {
++                    let error = (self.error)(Some(self.max));
++                    return Poll::Ready(Some(Err(error)));
++                }
++                self.left -= len;
++            }
++        }
++        Poll::Ready(frame)
++    }
++
++    fn is_end_stream(&self) -> bool {
++        self.inner.is_end_stream()
++    }
++
++    fn size_hint(&self) -> http_body::SizeHint {
++        self.inner.size_hint()
++    }
++}
++
+ /// A trait which provides hooks into internal WASI HTTP operations.
+ ///
+ /// Note that when using this type if state is needed to implement the methods
+diff --git a/crates/wasi-http/src/default_send_request.rs b/crates/wasi-http/src/default_send_request.rs
+index de42d34..3359fae 100644
+--- a/crates/wasi-http/src/default_send_request.rs
++++ b/crates/wasi-http/src/default_send_request.rs
+@@ -32,8 +32,32 @@ impl<T> TokioStream for T where T: AsyncRead + AsyncWrite + Send + Sync + Unpin
+ ///
+ /// This function performs no `Content-Length` validation.
+ pub async fn default_send_request(
++    req: Request<impl Body<Data = Bytes, Error = Error> + Send + 'static>,
++    options: Option<RequestOptions>,
++) -> Result<
++    (
++        Response<impl Body<Data = Bytes, Error = Error>>,
++        impl Future<Output = Result<(), Error>> + Send,
++    ),
++    Error,
++> {
++    default_send_request_to(req, options, None).await
++}
++
++/// A predicate on the address an outgoing request is about to connect to.
++pub type AddressFilter = std::sync::Arc<dyn Fn(std::net::SocketAddr) -> bool + Send + Sync>;
++
++/// [`default_send_request`], connecting only to addresses `allow` accepts.
++///
++/// The authority is resolved once and the connection is made to one of the
++/// accepted addresses themselves, so what was checked is what is reached. A
++/// request with no accepted address fails with
++/// [`Error::DestinationIpProhibited`]. The TLS server name is still the one in
++/// the authority.
++pub async fn default_send_request_to(
+     mut req: Request<impl Body<Data = Bytes, Error = Error> + Send + 'static>,
+     options: Option<RequestOptions>,
++    allow: Option<AddressFilter>,
+ ) -> Result<
+     (
+         Response<impl Body<Data = Bytes, Error = Error>>,
+@@ -66,9 +90,20 @@ pub async fn default_send_request(
+     // `connect_timeout` covers everything up to a usable connection: the TCP
+     // connect, the TLS handshake, and the HTTP handshake.
+     let connect = async {
+-        let stream = TcpStream::connect(&authority)
+-            .await
+-            .map_err(Error::Connect)?;
++        let stream = match &allow {
++            None => TcpStream::connect(&authority).await,
++            Some(allow) => {
++                let found = tokio::net::lookup_host(&authority)
++                    .await
++                    .map_err(Error::Connect)?;
++                let accepted: Vec<_> = found.filter(|addr| allow(*addr)).collect();
++                if accepted.is_empty() {
++                    return Err(Error::DestinationIpProhibited);
++                }
++                TcpStream::connect(&accepted[..]).await
++            }
++        }
++        .map_err(Error::Connect)?;
+         let stream = if use_tls {
+             // derived from https://github.com/rustls/rustls/blob/main/examples/src/bin/simpleclient.rs
+             let root_cert_store = rustls::RootCertStore {

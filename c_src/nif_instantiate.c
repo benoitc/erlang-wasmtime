@@ -14,6 +14,13 @@ static char *bin_to_cstr(ErlNifEnv *env, ERL_NIF_TERM t) {
   return s;
 }
 
+#if NIF_HAVE_WASI
+static size_t strlen_of(ErlNifEnv *env, ERL_NIF_TERM t) {
+  ErlNifBinary b;
+  return enif_inspect_iolist_as_binary(env, t, &b) ? b.size : 0;
+}
+#endif
+
 /* Configures the store's WASI context: everything per instance (arguments,
  * environment, preopens, stdio). What the linker needs to know of it, the
  * clocks and the shadowed stdio functions, goes to *monotonic and the
@@ -27,35 +34,22 @@ static char *bin_to_cstr(ErlNifEnv *env, ERL_NIF_TERM t) {
  * stdout, stderr :: none | inherit | stream | {file, Path} | capture
  * dirs  :: [{GuestPath, HostPath, read | write}]
  * clocks :: all | monotonic
- * network, http :: none | all. Both are explicit grants and all or
- * nothing: the C API has no hook on an address or an outgoing request.
- * `network => all` opens the address check, TCP, UDP and name lookup, for
- * WASI 0.2 sockets; it needs the two switches this project adds to the C
- * API (scripts/wasmtime-patches) and is refused without them.
+ * network, http :: none | all | {rules, ...}, see wasmtime_net. `network`
+ * opens wasi:sockets and needs this project's patches
+ * (scripts/wasmtime-patches), as do rules, initial_cwd and the HTTP limits.
  * *grants gets WASI_GRANT_HTTP and WASI_GRANT_NETWORK. */
 #define WASI_GRANT_HTTP 2
 #define WASI_GRANT_NETWORK 4
 
-#if NIF_HAVE_WASI
-/* Weak: null with a library built without the patch. Wasmtime's own
- * builder leaves TCP and UDP off. */
-extern void wasi_config_allow_tcp(wasi_config_t *, bool) __attribute__((weak));
-extern void wasi_config_allow_udp(wasi_config_t *, bool) __attribute__((weak));
-#endif
-
-int sockets_available(void) {
-#if NIF_HAVE_WASI && defined(WASMTIME_FEATURE_COMPONENT_MODEL)
-  return wasi_config_allow_tcp != NULL && wasi_config_allow_udp != NULL;
-#else
-  return 0;
-#endif
-}
-
-static int grant_of(ErlNifEnv *env, ERL_NIF_TERM wasi, const char *key, int *granted) {
-  ERL_NIF_TERM v;
-  if (!enif_get_map_value(env, wasi, mk_atom(env, key), &v)) return 0;
-  *granted = enif_is_identical(v, atom_all);
-  return *granted || enif_is_identical(v, atom_none);
+/* initial_cwd :: undefined | binary(), and the two HTTP limits, 0 for none.
+ * 0 when a key is missing or of the wrong type. */
+static int wasi_limits_of(ErlNifEnv *env, ERL_NIF_TERM wasi, ERL_NIF_TERM *cwd, ErlNifUInt64 *field,
+                          ErlNifUInt64 *body) {
+  ERL_NIF_TERM f, b;
+  return enif_get_map_value(env, wasi, mk_atom(env, "initial_cwd"), cwd) &&
+         enif_get_map_value(env, wasi, mk_atom(env, "http_max_field_bytes"), &f) &&
+         enif_get_map_value(env, wasi, mk_atom(env, "http_max_body_bytes"), &b) &&
+         enif_get_uint64(env, f, field) && enif_get_uint64(env, b, body);
 }
 
 static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *out,
@@ -67,30 +61,43 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
   for (int i = 0; i < 8; i++)
     if (!enif_get_map_value(env, wasi, keys[i], &t[i]))
       return mk_error_s(out, "link", "wasi_config", "wasi option is malformed");
-  int network = 0, http = 0;
-  if (!grant_of(env, wasi, "network", &network) || !grant_of(env, wasi, "http", &http))
-    return mk_error_s(out, "link", "wasi_config", "wasi network and http must be none or all");
 #if !NIF_HAVE_WASI
+  (void)inst, (void)monotonic, (void)grants;
   return mk_error_s(out, "link", "unavailable", "this build of erlang_wasmtime has no WASI");
 #else
+  net_grant_t network, http;
+  ERL_NIF_TERM v, cwd;
+  ErlNifUInt64 max_field, max_body;
+  if (!wasi_limits_of(env, wasi, &cwd, &max_field, &max_body) ||
+      !enif_get_map_value(env, wasi, mk_atom(env, "network"), &v) || !net_grant(env, v, &network))
+    return mk_error_s(out, "link", "wasi_config", "wasi network or limits are malformed");
+  if (!enif_get_map_value(env, wasi, mk_atom(env, "http"), &v) || !net_grant(env, v, &http)) {
+    net_grant_free(&network);
+    return mk_error_s(out, "link", "wasi_config", "wasi http grant is malformed");
+  }
+  const char *unavailable = NULL;
 #ifndef WASMTIME_FEATURE_WASI_HTTP
-  if (http)
-    return mk_error_s(out, "link", "unavailable", "this build of erlang_wasmtime has no wasi:http");
+  if (http.kind != NET_NONE) unavailable = "this build of erlang_wasmtime has no wasi:http";
 #endif
-  if (network && !sockets_available())
-    return mk_error_s(out, "link", "unavailable",
-                      "this build of erlang_wasmtime cannot open sockets to a guest");
-  *grants = (http ? WASI_GRANT_HTTP : 0) | (network ? WASI_GRANT_NETWORK : 0);
+  if (network.kind != NET_NONE && !sockets_available())
+    unavailable = "this build of erlang_wasmtime cannot open sockets to a guest";
+  if ((network.kind == NET_RULES || http.kind == NET_RULES ||
+       !enif_is_identical(cwd, atom_undefined) || max_field || max_body) &&
+      !limits_available())
+    unavailable = "this library cannot limit what WASI grants";
+  if (unavailable) {
+    net_grant_free(&network);
+    net_grant_free(&http);
+    return mk_error_s(out, "link", "unavailable", unavailable);
+  }
+  *grants = (http.kind != NET_NONE ? WASI_GRANT_HTTP : 0) |
+            (network.kind != NET_NONE ? WASI_GRANT_NETWORK : 0);
 
   wasi_config_t *cfg = wasi_config_new();
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
-  if (network) {
-    wasi_config_inherit_network(cfg);
-    wasi_config_allow_ip_name_lookup(cfg, true);
-    wasi_config_allow_tcp(cfg, true);
-    wasi_config_allow_udp(cfg, true);
-  }
+  net_grant_sockets(cfg, &network);
 #endif
+  net_grant_free(&network);
   const char *err = NULL;
   unsigned n;
   ERL_NIF_TERM l, h;
@@ -236,19 +243,37 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
     goto done;
   }
 
+  if (!enif_is_identical(cwd, atom_undefined)) {
+    char *path = bin_to_cstr(env, cwd);
+    /* a NUL would cut the path short */
+    if (!path || strlen(path) != strlen_of(env, cwd) || !initial_cwd(cfg, path))
+      err = "wasi initial_cwd must be UTF-8 without NUL";
+    enif_free(path);
+  }
+
 done:
   if (err) {
     wasi_config_delete(cfg);
+    net_grant_free(&http);
     return mk_error_s(out, "link", "wasi_config", err);
   }
   wasmtime_error_t *werr = wasmtime_context_set_wasi(inst->wasm.ctx, cfg); /* consumes cfg */
   if (werr) {
     wasmtime_error_delete(werr);
+    net_grant_free(&http);
     return mk_error_s(out, "link", "wasi_config", "wasi could not be configured");
   }
+  int limited = 1;
 #ifdef WASMTIME_FEATURE_WASI_HTTP
-  if (http) wasmtime_context_set_wasi_http(inst->wasm.ctx);
+  if (http.kind != NET_NONE) {
+    wasmtime_context_set_wasi_http(inst->wasm.ctx);
+    limited = limit_http(inst->wasm.ctx, &http, max_field, max_body);
+  }
 #endif
+  net_grant_free(&http);
+  /* checked above: a library with the patches does not refuse */
+  if (!limited)
+    return mk_error_s(out, "link", "unavailable", "this library cannot limit what WASI grants");
   return 0;
 #endif
 }
@@ -260,7 +285,8 @@ typedef struct {
   ERL_NIF_TERM wasi;    /* none | map, see configure_wasi */
   ERL_NIF_TERM shim;    /* binary() | undefined: the precompiled stdin shim */
   ErlNifSInt64 memory_limit, max_tables, max_table_elements, max_instances; /* -1: unlimited */
-  ERL_NIF_TERM fuel; /* integer() | infinity | undefined */
+  ERL_NIF_TERM fuel;                           /* integer() | infinity | undefined */
+  ErlNifSInt64 resource_limit, transfer_limit; /* a component's, -1: Wasmtime's */
 } opts_t;
 
 static ERL_NIF_TERM opt_error(ErlNifEnv *out, const char *key) {
@@ -282,11 +308,13 @@ static ERL_NIF_TERM parse_options(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM
     ERL_NIF_TERM key;
     const char *name;
     ErlNifSInt64 *dst;
-  } limits[4] = {{atom_memory_limit, "memory_limit", &o->memory_limit},
+  } limits[6] = {{atom_memory_limit, "memory_limit", &o->memory_limit},
                  {atom_max_tables, "max_tables", &o->max_tables},
                  {atom_max_table_elements, "max_table_elements", &o->max_table_elements},
-                 {atom_max_instances, "max_instances", &o->max_instances}};
-  for (int i = 0; i < 4; i++)
+                 {atom_max_instances, "max_instances", &o->max_instances},
+                 {mk_atom(env, "resource_limit"), "resource_limit", &o->resource_limit},
+                 {mk_atom(env, "transfer_limit"), "transfer_limit", &o->transfer_limit}};
+  for (int i = 0; i < 6; i++)
     if (!enif_get_map_value(env, map, limits[i].key, &v) || !enif_get_int64(env, v, limits[i].dst))
       return opt_error(out, limits[i].name);
   if (!enif_get_map_value(env, map, atom_host_timeout, &v) ||
@@ -587,6 +615,8 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
     /* `wasi` carries WASI_GRANT_HTTP to the linker: wasi:http is linked only
      * when it was granted, so the linker cache keys on it */
     wasi |= grants & WASI_GRANT_HTTP;
+    if (!limit_component_store(inst->wasm.ctx, wasi, o.resource_limit, o.transfer_limit))
+      return mk_error_s(out, "link", "unavailable", "this library cannot limit a component");
     if ((err = component_instantiate(inst, env, o.imports, wasi, monotonic, out))) return err;
     take_init_fuel(inst, env, o.fuel);
     stdin_pump_start(inst);

@@ -153,6 +153,8 @@ guest drops its handle the entry is removed. To be told, add a fun under
   what `host_live/0` lists, or let the process end.
 - A host function that takes an owned handle back (a `close`) calls
   `host_drop/1` itself. A second drop of the same handle changes nothing.
+- `resource_limit` at instantiate bounds the handles live in the serving
+  process; see [WASI](wasi.md#bound-what-a-component-asks-of-the-host).
 - One component may define 32 host resources.
 
 ## WASI 0.2

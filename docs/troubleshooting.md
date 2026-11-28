@@ -71,7 +71,7 @@ import in `ctx.host` and the reason in `ctx.reason`.
 | `badarg` on a call | a value does not fit the WIT type (bad UTF-8, an unknown case or flag, a missing field, a number out of range), or a resource handle is dropped or unknown | check `exports/1` and the mapping in [components](components.md) |
 | `component` or `no_memory` | a core-module function (globals, tables, memory) used on a component instance | call the component's exports instead |
 | `kind => cannot_enter_component` on every call after a trap | the Component Model forbids re-entering an instance that trapped | instantiate a new one |
-| `class => link` naming `wasi:http/types` | the component makes HTTP requests and was not granted them | `wasi => #{http => all}`, if it may call any server |
+| `class => link` naming `wasi:http/types` | the component makes HTTP requests and was not granted them | `wasi => #{http => Grant}` naming the addresses it may call, or `http => all` |
 | `clock_refused` | the guest read the wall clock under `clocks => monotonic` | drop the option, or keep the guest off the wall clock |
 | streamed stdout arrives late or in one piece | a component's stdout is never a terminal, so its C library buffers it | flush in the guest |
 

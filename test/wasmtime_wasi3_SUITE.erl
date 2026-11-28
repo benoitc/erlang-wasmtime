@@ -18,6 +18,7 @@
     sockets/1,
     sockets_denied/1,
     http/1,
+    http_rules/1,
     http_denied/1,
     wall_clock_refused/1,
     interrupt_waiting_program/1,
@@ -37,6 +38,7 @@ all() ->
         sockets,
         sockets_denied,
         http,
+        http_rules,
         http_denied,
         wall_clock_refused,
         interrupt_waiting_program,
@@ -192,6 +194,26 @@ http(Config) ->
             ok;
         #{wasi_http := false} ->
             {skip, "this library has no wasi:http"}
+    end.
+
+%% The address rules hold for a 0.3 request too.
+http_rules(Config) ->
+    case wasmtime:features() of
+        #{wasi_http := true, wasi_limits := true} ->
+            {Server, Addr} = http_server(),
+            [_, Port] = string:split(Addr, ":"),
+            Get = fun(Allowed) ->
+                run(Config, "p3_http_outbound_request_get", #{
+                    http => #{connect => [{tcp, ~"127.0.0.1", Allowed}]},
+                    env => [{"HTTP_SERVER", Addr}]
+                })
+            end,
+            {ok, _, _} = Get(list_to_integer(Port)),
+            {{error, #{class := trap}}, _, _} = Get(1),
+            exit(Server, kill),
+            ok;
+        #{} ->
+            {skip, "this library cannot limit what wasi:http reaches"}
     end.
 
 %% `wasi:http` is linked only when granted.

@@ -17,16 +17,15 @@ AddressSanitizer and the runtime-only build. Run the two extra ones
 yourself when you touch the NIF:
 
 ```sh
-# AddressSanitizer, Linux
-WASMTIME_NIF_SANITIZE=address rebar3 compile
+# AddressSanitizer, Linux. Keep the variable on both commands: `rebar3 ct`
+# compiles too, and would put the plain NIF back
+export WASMTIME_NIF_SANITIZE=address
+rebar3 compile
 LD_PRELOAD="$(gcc -print-file-name=libasan.so)" \
 ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:alloc_dealloc_mismatch=0" rebar3 ct
-
-# AddressSanitizer, macOS
-WASMTIME_NIF_SANITIZE=address rebar3 compile
-ASAN_RT="$(ls "$(dirname "$(xcrun -f clang)")"/../lib/clang/*/lib/darwin/libclang_rt.asan_osx_dynamic.dylib | head -1)"
-DYLD_INSERT_LIBRARIES="$ASAN_RT" \
-ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:alloc_dealloc_mismatch=0" rebar3 ct
+unset WASMTIME_NIF_SANITIZE
+# on macOS the runtime cannot be preloaded through rebar3, whose shell
+# wrappers drop DYLD_INSERT_LIBRARIES: run this on Linux, as CI does
 
 # Runtime-only library (no compiler): fixtures come from a full build
 escript scripts/precompile-fixtures.escript test/wasmtime_runtime_only_SUITE_data /tmp/cwasm
@@ -89,6 +88,7 @@ The order the code enforces, with one file per step:
    | `wasmtime_component_SUITE` | components: WIT values, host imports, resources, WASI 0.2 |
    | `wasmtime_component_async_SUITE` | component async, stopping a waiting guest, types that cannot cross |
    | `wasmtime_runner_SUITE` | erlang_wasm's WASI runners and component calls, output sinks, `random`, worker and cache limits |
+   | `wasmtime_grant_SUITE` | network grants, HTTP rules and limits, `initial_cwd`, component limits |
    | `wasmtime_actor_SUITE` | `wasmtime_actor`, with erlang_wasm's suite and guest |
    | `wasmtime_parity_SUITE` | what erlang_wasm offers and where it stands here; set `ERLANG_WASM_DIR` to a built erlang_wasm checkout to compare the two |
    | `wasmtime_wasi3_SUITE` | WASI 0.3 commands, with Wasmtime's own test programs |

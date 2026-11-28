@@ -128,6 +128,8 @@ on an instance at a time; concurrent callers are queued.
     defaults = #{} :: #{timeout => timeout(), fuel => non_neg_integer()},
     %% made with `snapshotable => true`: what snapshot/2 needs
     snap :: undefined | map(),
+    %% live host resources the process serving its host calls may hold
+    resource_limit = infinity :: non_neg_integer() | infinity,
     %% `stdout` and `stderr` given as a pid, device or fun, and the `stream`
     %% process for what has no sink
     sinks = #{} :: wasmtime_wasi_config:sinks(),
@@ -205,7 +207,8 @@ components.md). See building.md, "Runtime-only builds".
     wasi_http := boolean(),
     wasi_sockets := boolean(),
     component_async := boolean(),
-    wasi_p3 := boolean()
+    wasi_p3 := boolean(),
+    wasi_limits := boolean()
 }.
 
 -doc """
@@ -319,16 +322,27 @@ WASI configuration. Nothing is granted by default.
   reads the host's monotonic clock and every other clock (wall time,
   process and thread CPU time) answers `ENOTCAPABLE`, so it cannot learn the
   date or time of day.
-- `http`: `none` (the default) or `all`. With `all` a component gets
-  `wasi:http/outgoing-handler` and may send requests to any server;
-  Wasmtime makes the request, and there is no rule per address. Full builds
-  only (`features/0`, `wasi_http`). A core module answers `kind =>
+- `http`: whether a component gets `wasi:http/outgoing-handler`. `none`
+  (the default), `all` for any server, or a grant like `network`'s whose
+  `connect` rules for `tcp` say which addresses a request may reach: the name
+  is resolved once and the connection goes to an address that passed. Full
+  builds only (`features/0`, `wasi_http`). A core module answers `kind =>
   unsupported`.
-- `network`: `none` (the default) or `all`. With `all` a component may use
-  `wasi:sockets`: TCP, UDP and name lookup, to or from any address the node
-  can reach, the loopback included. A library without this project's
-  patches (`features/0`, `wasi_sockets`) answers `kind => unavailable`; a
-  core module answers `kind => unsupported`.
+- `http_max_field_bytes`, `http_max_body_bytes` (components): the most one
+  set of headers the guest builds may take, 128 KiB when left out, and the
+  most bytes the body of a request, and of a response, may have, 8 MiB when
+  left out.
+- `initial_cwd` (components): the directory `wasi:cli/environment` says the
+  program starts in.
+- `network`: what a component may do with `wasi:sockets`. `none` (the
+  default); `all`, TCP, UDP and name lookup to or from any address the node
+  can reach, the loopback included; or a grant as erlang_wasm's `net`:
+  `#{connect => [Rule], listen => [Rule], resolve => allow | deny, tcp =>
+  boolean(), udp => boolean()}`, a `Rule` being `{tcp | udp, Address, Port |
+  {First, Last} | any}` and an `Address` a tuple or a binary with an optional
+  prefix length, such as `~"10.0.0.0/8"`. A library without this project's
+  patches (`features/0`, `wasi_sockets` and `wasi_limits`) answers `kind =>
+  unavailable`; a core module answers `kind => unsupported`.
 """.
 -type sink() :: pid() | atom() | fun((binary()) -> term()).
 
@@ -342,8 +356,11 @@ WASI configuration. Nothing is granted by default.
     random => strong | none | {seed, integer()},
     output_limit => pos_integer(),
     clocks => all | monotonic | [monotonic | realtime],
-    network => none | all,
-    http => none | all
+    network => none | all | map(),
+    http => none | all | map(),
+    initial_cwd => iodata(),
+    http_max_field_bytes => pos_integer(),
+    http_max_body_bytes => pos_integer()
 }.
 
 -doc """
@@ -374,6 +391,8 @@ A value type, spelled as erlang_wasm does. A reference to a concrete
     snapshotable => boolean(),
     host_timeout => timeout(),
     host => pid(),
+    resource_limit => non_neg_integer() | infinity,
+    transfer_limit => non_neg_integer() | infinity,
     stream => pid(),
     inbox_limit => pos_integer()
 }.
@@ -848,6 +867,13 @@ memory at most. Options:
   byte of data. A metered module instantiated without `fuel` is initialized
   on 10,000,000 units plus one per byte of `memory_limit`, and then holds
   none.
+- `resource_limit` (components): how many host resource handles may be
+  live in the process serving host calls, past which `host_new` traps with
+  `kind => resource_limit_reached`, and how many resources WASI may hold for
+  the instance.
+- `transfer_limit` (components): how many bytes one call may copy from the
+  component to the host, 128 MiB when left out; past it,
+  `kind => hostcall_fuel`. A list of bytes counts about 32 per byte.
 - `profile`: `plugin` or `script`, erlang_wasm's compile tiers. Accepted and
   without effect: Wasmtime has one tier.
 - `snapshotable`: `true` to allow `snapshot/1,2` on the instance. The module
@@ -879,9 +905,9 @@ Instantiate a module with its imports, as erlang_wasm's `wasm:instantiate/3`.
 and the map does not provide fails with `class => link`. `Opts` are the
 options of `instantiate/2`; an `imports` key in it is ignored.
 
-erlang_wasm's `link`, `snapshot_hooks`, `compile`, `compile_quality`,
-`compile_after` and `resource_limit` have no equivalent here and are refused
-with `kind => unsupported_option`.
+erlang_wasm's `link`, `snapshot_hooks`, `compile`, `compile_quality` and
+`compile_after` have no equivalent here and are refused with
+`kind => unsupported_option`.
 
 ```erlang
 Log = fun(_Ctx, [N]) -> logger:info("got ~p", [N]), {ok, []} end,
@@ -894,6 +920,7 @@ instantiate(Mod, Imports0, Opts0) when is_map(Imports0), is_map(Opts0) ->
         {ok, Imports1, Opts} ?= wasmtime_wasi_config:take_imports(Imports0, Opts0),
         Imports = root_imports(Mod, Imports1),
         ok ?= check_options(Opts),
+        ok ?= check_component_limits(module_kind(Mod), Opts),
         {ok, Linked} ?= link_externs(Mod, Imports),
         ok ?= check_imports(Linked),
         maybe_snapshotable(Mod, Linked, page_limit(Opts))
@@ -906,7 +933,7 @@ check_options(#{profile := Profile}) when Profile =/= plugin, Profile =/= script
         profile => Profile
     });
 check_options(Opts) ->
-    Unsupported = [link, snapshot_hooks, compile, compile_quality, compile_after, resource_limit],
+    Unsupported = [link, snapshot_hooks, compile, compile_quality, compile_after],
     case maps:keys(maps:with(Unsupported, Opts)) of
         [] -> check_limits(Opts);
         Keys -> unsupported_option(Keys)
@@ -930,6 +957,20 @@ check_call_limits(Opts) ->
     case maps:keys(maps:with([max_depth, max_heap_words, max_host_calls], Opts)) of
         [] -> ok;
         Keys -> invalid_limits(Keys)
+    end.
+
+%% `resource_limit` and `transfer_limit` bound what a component asks of the
+%% host; a core module has neither.
+check_component_limits(Kind, Opts) ->
+    Given = maps:with([resource_limit, transfer_limit], Opts),
+    Count = fun
+        (infinity) -> true;
+        (N) -> is_integer(N) andalso N >= 0
+    end,
+    case {Kind, [Key || Key := Value <- Given, not Count(Value)]} of
+        {module, _} when map_size(Given) > 0 -> unsupported_option(maps:keys(Given));
+        {_, []} -> ok;
+        {_, Bad} -> invalid_limits(lists:sort(Bad))
     end.
 
 invalid_limits(Keys) ->
@@ -1033,7 +1074,8 @@ do_instantiate(Mod, Imports, Opts, Wasi, Sinks) ->
                 module = Mod,
                 defaults = call_defaults(Opts),
                 sinks = Sinks,
-                stream = StreamPid
+                stream = StreamPid,
+                resource_limit = maps:get(resource_limit, Opts, infinity)
             },
             %% `timeout` bounds the start section too
             case wait_result(Inst, Id, maps:get(timeout, Opts, infinity)) of
@@ -1084,6 +1126,8 @@ nif_options(Mod, Imports, Opts, Wasi) ->
         host => HostPid,
         inbox_limit => InboxLimit,
         shim => stdin_shim(Mod, Wasi),
+        resource_limit => component_limit(resource_limit, Opts),
+        transfer_limit => component_limit(transfer_limit, Opts),
         fuel => maps:get(fuel, Opts, undefined)
     }.
 
@@ -1145,6 +1189,13 @@ default_instances(Mod) ->
     case module_kind(Mod) of
         component -> 100;
         module -> 10
+    end.
+
+%% -1: Wasmtime's own
+component_limit(Key, Opts) ->
+    case maps:get(Key, Opts, infinity) of
+        infinity -> -1;
+        N -> N
     end.
 
 limit(Key, Opts, Default) ->
@@ -1375,6 +1426,7 @@ run_host(Imports, {_, <<"[resource-drop]", _/binary>>} = Key, _Inst, [Handle]) w
     ok = wasmtime_component:host_drop(Handle),
     {ok, undefined};
 run_host(Imports, Key, #instance{kind = Kind} = Inst, Args) ->
+    _ = Kind =:= component andalso wasmtime_component:host_limit(Inst#instance.resource_limit),
     try apply_host(maps:get(Key, Imports), Kind, #{instance => Inst}, Args) of
         {typed, Value} ->
             {ok, Value};

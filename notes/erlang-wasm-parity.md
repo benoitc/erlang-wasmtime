@@ -52,10 +52,12 @@ function neither lists. Update both together.
 | `instantiate`: `fuel`, `max_memory_pages`, `timeout`, `profile`, `snapshotable` | same | done |
 | `instantiate`: `max_host_calls`, `max_heap_words` | workers | done on workers; refused on instances (`invalid_limits`) |
 | `instantiate`: `max_depth` | none | refused (`invalid_limits`) |
-| `instantiate`: `link`, `snapshot_hooks`, `compile*`, `resource_limit` | none | refused (`unsupported_option`); `resource_limit` in phase 3 |
+| `instantiate`: `link`, `snapshot_hooks`, `compile*` | none | refused (`unsupported_option`) |
+| `instantiate`: `resource_limit` | same | done for components; refused for core modules. `transfer_limit` is only here |
 | WASI: `args`, `env`, `dirs`, `clocks`, `stdin`, `stdout`, `stderr` | same | done; a `stdin` fun is refused |
 | WASI: `random => {seed, N} \| none` | same | done for core modules |
-| WASI: `net`, HTTP allow and deny, `initial_cwd` | same | phase 3; refused now |
+| WASI: `network`, `http` grants, `initial_cwd`, `http_max_body_bytes` | same | done for components, 8 MiB body default; `net` for core modules refused; `max_sockets` and `timeout` in a grant refused |
+| HTTP allow and deny by host name | none | refused: grants are by address |
 | cache env caps | same names | done, unlimited unless set |
 
 ## Errors
@@ -85,8 +87,9 @@ runs the same failing calls on both runtimes.
 
 ## Phases
 
-3. Patch batch A: resource and size limits, `initial_cwd`, address grants for
-   sockets and HTTP, fast path for `list<u8>`.
+3. Done: resource and size limits, `initial_cwd`, address grants for sockets
+   and HTTP. The fast path for `list<u8>` is refused: it needs changes in
+   Wasmtime itself.
 4. Patch batch B: serving HTTP.
 5. Workers: reactor snapshot adapters, `restore_ahead`, reaper (with the
    sweep of leftover request directories), result channel, conformance kit.

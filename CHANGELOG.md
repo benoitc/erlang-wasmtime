@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Components can be granted the network and outgoing HTTP address by address,
+  in erlang_wasm's `net` form, instead of all or nothing.
+- Breaking: the body of an HTTP request a component sends, and of a response
+  it gets, are now limited to 8 MiB each. Pass `http_max_body_bytes` for larger
+  ones.
+- New limits for components: `resource_limit`, `transfer_limit` and
+  `http_max_field_bytes`. A component can also be given `initial_cwd`.
+- Breaking: a `network` or `http` value that is not a grant raises
+  `{bad_net_grant, Term}` instead of answering an error.
+- Copying too much data out of a component in one call reported the wrong
+  error. It is now `hostcall_fuel`.
 - Breaking: errors now have erlang_wasm's shape, `class`, `kind`, `msg` and
   `ctx`, with its five classes and its kind names. `message`, `trace` and
   `status` are gone: use `msg`, `ctx.trace` and `ctx.wasi_exit`. Script

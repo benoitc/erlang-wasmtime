@@ -108,6 +108,10 @@ jobs:
   asan:
     name: AddressSanitizer
     runs-on: ubuntu-24.04
+    # for every step: `rebar3 ct` compiles too, and rebuilds the NIF without
+    # the sanitizer when it does not see this
+    env:
+      WASMTIME_NIF_SANITIZE: address
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
@@ -120,7 +124,7 @@ jobs:
           path: _build/wasmtime
           key: wasmtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/wasmtime.version', 'scripts/wasmtime-runtime.rev', 'scripts/wasmtime-patches/*') }}
       - name: Build the NIF under ASan
-        run: WASMTIME_NIF_SANITIZE=address rebar3 compile
+        run: rebar3 compile
       # The runtime must be in the emulator before the NIF loads. Leak
       # checking is off: the emulator's own exit-time state would drown the
       # report; every other class of error aborts the run.
@@ -131,6 +135,8 @@ jobs:
           LD_PRELOAD="$ASAN_RT" \
           ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:alloc_dealloc_mismatch=0" \
           rebar3 ct
+      - name: Check the suites ran the instrumented NIF
+        run: nm priv/wasmtime_nif.so | grep -q __asan
       - name: Upload CT logs
         if: failure()
         uses: actions/upload-artifact@v4

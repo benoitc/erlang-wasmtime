@@ -288,9 +288,9 @@ run_command_refusals(Config) ->
             {error, #{class := link, kind := unsupported_option}} =
                 wasmtime_wasi_preview2:run_command(Upper, <<>>, Options)
         end,
-        Refused(#{initial_cwd => ~"/"}),
-        Refused(#{resource_limit => 1}),
-        Refused(#{network => #{connect => []}})
+        Refused(#{stdout_limit => 1}),
+        Refused(#{stdin_dir => ~"/"}),
+        Refused(#{network => #{connect => [], max_sockets => 1}})
     end).
 
 %% erlang_wasm names a component's own functions under "$root".

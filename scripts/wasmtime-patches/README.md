@@ -24,6 +24,12 @@ upstream made it unnecessary.
   the 0.3 ones, `wasi:http` included, and builds `wasmtime-wasi` and
   `wasmtime-wasi-http` with their `p3` features.
 
+- `0005-c-api-wasi-limits-and-rules.patch`: address rules for
+  `wasi:sockets` and for outgoing `wasi:http` (which connects to the address
+  it checked), the initial directory, and the store's limits on WASI
+  resources, copied data, header size and HTTP bodies. The one patch that
+  changes more than the C API: `wasmtime-wasi-http` gains the filtered send.
+
 Wasmtime 51 continues the reset scan past a full result buffer itself, which
 a second patch did for 48.
 

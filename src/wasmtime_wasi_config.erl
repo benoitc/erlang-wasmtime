@@ -12,6 +12,8 @@
 -type sinks() :: #{stdout => sink(), stderr => sink()}.
 
 -define(DEFAULT_OUTPUT_LIMIT, 16 * 1024 * 1024).
+%% erlang_wasm's bound on the body of an HTTP request and of a response
+-define(DEFAULT_HTTP_BODY_LIMIT, 8 * 1024 * 1024).
 %% what wasmtime_wasi:imports/1 puts in an import map
 -define(MARKER, {~"$wasi", ~"config"}).
 -define(PREVIEW1, ~"wasi_snapshot_preview1").
@@ -44,19 +46,13 @@ take_imports(Imports, Opts) ->
 options(none, _Kind) ->
     {ok, none, #{sinks => #{}, imports => #{}}};
 options(Wasi, Kind) when is_map(Wasi) ->
-    Known = [args, env, dirs, stdin, stdout, stderr, output_limit, clocks, network, http, random],
-    %% erlang_wasm's defaults, which are what happens anyway
-    Refused = maps:filter(
-        fun
-            (net, none) -> false;
-            (Key, _) -> not lists:member(Key, Known)
-        end,
-        Wasi
-    ),
+    Refused = refused_keys(Wasi, Kind),
     Clocks = clocks(maps:get(clocks, Wasi, all)),
     Random = random(maps:get(random, Wasi, strong), Kind),
+    Grants = [{Key, wasmtime_net:grant(maps:get(Key, Wasi, none))} || Key <- [network, http]],
     Bad =
-        maps:keys(Refused) ++
+        Refused ++
+            [Key || {_, {unsupported, Keys}} <- Grants, Key <- Keys] ++
             [clocks || Clocks =:= unsupported] ++
             [random || Random =:= unsupported] ++
             [Key || Key <- [stdout, stderr], stdio(Key, Wasi) =:= unsupported],
@@ -66,7 +62,11 @@ options(Wasi, Kind) when is_map(Wasi) ->
                 {Key, Sink}
              || Key <- [stdout, stderr], {sink, Sink} <- [stdio(Key, Wasi)]
             ]),
-            {ok, nif_options(Wasi, Clocks), #{sinks => Sinks, imports => Random}};
+            Options = maps:merge(
+                nif_options(Wasi, Clocks),
+                maps:from_list([{Key, Grant} || {Key, {ok, Grant}} <- Grants])
+            ),
+            {ok, Options, #{sinks => Sinks, imports => Random}};
         _ ->
             wasmtime_error:new(
                 link, unsupported_option, ~"this runtime does not support the option", #{
@@ -74,6 +74,18 @@ options(Wasi, Kind) when is_map(Wasi) ->
                 }
             )
     end.
+
+refused_keys(Wasi, Kind) ->
+    Known = [args, env, dirs, stdin, stdout, stderr, output_limit, clocks, network, http, random],
+    %% only a component has a place for these
+    Component = [initial_cwd, http_max_field_bytes, http_max_body_bytes],
+    Taken =
+        case Kind of
+            component -> Known ++ Component;
+            module -> Known
+        end,
+    %% `net => none` is erlang_wasm's default, which is what happens anyway
+    maps:keys(maps:without(Taken, maps:filter(fun(Key, V) -> {Key, V} =/= {net, none} end, Wasi))).
 
 nif_options(Wasi, Clocks) ->
     #{
@@ -94,18 +106,35 @@ nif_options(Wasi, Clocks) ->
         stderr => mode(stdio(stderr, Wasi)),
         output_limit => maps:get(output_limit, Wasi, ?DEFAULT_OUTPUT_LIMIT),
         clocks => Clocks,
-        network => grant(maps:get(network, Wasi, none)),
-        http => grant(maps:get(http, Wasi, none))
+        initial_cwd =>
+            case maps:find(initial_cwd, Wasi) of
+                {ok, Cwd} -> bin(Cwd);
+                error -> undefined
+            end,
+        http_max_field_bytes => byte_limit(http_max_field_bytes, Wasi, 0),
+        http_max_body_bytes => byte_limit(http_max_body_bytes, Wasi, default_body_limit())
     }.
+
+%% A byte limit; 0 keeps what Wasmtime does by itself. Anything but a positive
+%% integer is passed on as the NIF refuses it.
+byte_limit(Key, Wasi, Default) ->
+    case maps:find(Key, Wasi) of
+        {ok, N} when is_integer(N), N > 0 -> N;
+        {ok, _} -> invalid;
+        error -> Default
+    end.
+
+%% A library without this project's patches cannot bound a body.
+default_body_limit() ->
+    case wasmtime:features() of
+        #{wasi_limits := true} -> ?DEFAULT_HTTP_BODY_LIMIT;
+        #{wasi_limits := false} -> 0
+    end.
 
 dir({Guest, Host}) ->
     dir({Guest, Host, read});
 dir({Guest, Host, Access}) when Access =:= read; Access =:= write ->
     {bin(Guest), bin(Host), Access}.
-
-%% Grants are all or nothing: see `t:wasmtime:wasi_options/0`.
-grant(none) -> none;
-grant(all) -> all.
 
 %% `all` or `monotonic`, also as erlang_wasm's list of clocks.
 clocks(all) ->

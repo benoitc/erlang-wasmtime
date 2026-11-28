@@ -86,11 +86,13 @@ if [ ! -f "$SRC/crates/c-api/CMakeLists.txt" ]; then
     git clone -q --depth 1 --branch "$VERSION" https://github.com/bytecodealliance/wasmtime "$SRC"
 fi
 
-# This project's changes to Wasmtime, applied once to the clone (a patch
-# that reverses cleanly is already there). See scripts/wasmtime-patches.
+# This project's changes to Wasmtime, applied in order to a clean tree: the
+# clone is reset first, since whether a patch is already there cannot be told
+# once a later one touches the same lines. Build outputs are ignored files
+# and stay. See scripts/wasmtime-patches.
+git -C "$SRC" checkout -q -- . && git -C "$SRC" clean -qfd
 for p in "$ROOT"/scripts/wasmtime-patches/*.patch; do
     [ -f "$p" ] || continue
-    git -C "$SRC" apply --reverse --check "$p" 2>/dev/null && continue
     git -C "$SRC" apply "$p" || { echo "wasmtime: $p does not apply to $VERSION" >&2; exit 1; }
 done
 echo "wasmtime: building the $VARIANT C API from source (this takes a few minutes)" >&2

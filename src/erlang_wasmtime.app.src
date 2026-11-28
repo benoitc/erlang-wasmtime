@@ -2,7 +2,7 @@
     {description,
         "Wasmtime bindings for Erlang: run WebAssembly natively, call Erlang from the guest"},
     {vsn, "0.3.0"},
-    {registered, [wasmtime_sup, wasmtime_module_cache]},
+    {registered, [wasmtime_sup, wasmtime_module_cache, wasmtime_actor_registry]},
     {mod, {wasmtime_app, []}},
     {applications, [kernel, stdlib, crypto]},
     {env, []},

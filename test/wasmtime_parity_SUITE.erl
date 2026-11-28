@@ -116,7 +116,8 @@ manifest() ->
                 {write_memory, 3}
             ],
             {here, wasmtime}},
-        {wasm, [{call_func, 3}, {extern, 2}], {phase, 2, wasmtime}},
+        {wasm, [{extern, 2}], {here, wasmtime}},
+        {wasm, [{encode, 1}], {deferred, "`wasm:encode/1`"}},
         {wasm_error,
             [
                 {add_context, 2},
@@ -166,23 +167,17 @@ manifest() ->
                 {instantiate, 3},
                 {prepare, 1}
             ],
-            {phase, 2, wasmtime_component}},
+            {here, wasmtime_component}},
         {wasm_component, [{pump, 2}, {start_async, 4}, {start_async, 5}],
             {phase, 6, wasmtime_component}},
         {wasm_component, [{acquire, 1}, {release, 1}, {restore, 3}, {snapshot, 2}],
             {deferred, "`preinit/3` for components"}},
-        {wasi, [{imports, 1}, {run, 1}, {run, 2}], {phase, 2, wasmtime_wasi}},
-        {wasi_preview1, [{exit_code, 1}], {phase, 2, wasmtime_wasi_preview1}},
-        {wasi_preview1,
-            [
-                {close_all, 1},
-                {default_config, 0},
-                {imports, 1},
-                {imports, 2},
-                {snapshot_hook, 0}
-            ],
+        {wasi, [{imports, 1}, {run, 1}, {run, 2}], {here, wasmtime_wasi}},
+        {wasi_preview1, [{exit_code, 1}], {here, wasmtime_wasi_preview1}},
+        {wasi_preview1, [{imports, 1}], {here, wasmtime_wasi_preview1}},
+        {wasi_preview1, [{close_all, 1}, {default_config, 0}, {imports, 2}, {snapshot_hook, 0}],
             {deferred, "WASI import maps"}},
-        {wasi_preview2, [{run_command, 2}, {run_command, 3}], {phase, 2, wasmtime_wasi_preview2}},
+        {wasi_preview2, [{run_command, 2}, {run_command, 3}], {here, wasmtime_wasi_preview2}},
         {wasi_preview2, [{run_serve, 3}], {phase, 4, wasmtime_wasi_preview2}},
         {wasi_preview2,
             [
@@ -202,7 +197,7 @@ manifest() ->
                 {run_serve_with, 5}
             ],
             {deferred, "WASI import maps"}},
-        {wasi_preview3, [{run_command, 3}], {phase, 2, wasmtime_wasi_preview3}},
+        {wasi_preview3, [{run_command, 3}], {here, wasmtime_wasi_preview3}},
         {wasi_preview3, [{run_serve, 3}, {run_serve, 4}], {phase, 4, wasmtime_wasi_preview3}},
         {wasi_preview3,
             [
@@ -223,7 +218,7 @@ manifest() ->
         {wasm_instance_worker,
             [{call, 3}, {call, 4}, {info, 1}, {start_link, 1}, {start_link, 2}, {stop, 1}],
             {here, wasmtime_instance_worker}},
-        {wasm_actor, [{send, 2}, {start_link, 2}], {phase, 2, wasmtime_actor}},
+        {wasm_actor, [{send, 2}, {start_link, 2}], {here, wasmtime_actor}},
         {wasm_script_worker,
             [
                 {await, 3},
@@ -275,8 +270,9 @@ adapter() ->
     ].
 
 %% Exports of a supported module that are not part of its supported surface.
+%% call_func/3 is erlang_wasm's own plumbing, not documented there.
 internal(wasm) ->
-    [{check_module_bytes, 1}, {extern_sibling, 2}];
+    [{call_func, 3}, {check_module_bytes, 1}, {extern_sibling, 2}];
 internal(wasm_engine) ->
     all_but([{page_limit, 0}, {pages_in_use, 0}, {set_page_limit, 1}, {stats, 0}]);
 internal(wasm_component) ->
@@ -377,7 +373,7 @@ unlisted(Ebin, Module) ->
 
 erlang_wasm_ebin() ->
     case os:getenv("ERLANG_WASM_DIR") of
-        false -> false;
+        Unset when Unset =:= false; Unset =:= "" -> false;
         Dir -> filename:join([Dir, "_build", "default", "lib", "wasm", "ebin"])
     end.
 
@@ -493,7 +489,7 @@ ignored_options_are_refused(_) ->
         Refused(unsupported_option, #{Key => true})
      || Key <- [link, snapshot_hooks, compile, compile_quality, compile_after, resource_limit]
     ],
-    Refused(unsupported_option, #{wasi => #{random => {seed, 1}}}),
+    Refused(unsupported_option, #{wasi => #{random => weak}}),
     Refused(unsupported_option, #{wasi => #{net => #{connect => []}}}),
     Refused(unsupported_option, #{wasi => #{clocks => [realtime]}}),
     Refused(unsupported_option, #{wasi => #{preopens => []}}),

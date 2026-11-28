@@ -90,6 +90,7 @@ it: a release starts it for you, a shell needs
 - [WASI](docs/wasi.md)
 - [Streams](docs/streams.md): talk to a guest while it runs
 - [Workers](docs/worker.md): one instance in a process, a deadline per request
+- [Actors](docs/actors.md): a component as a process that handles typed messages
 - [Hosting scripts](docs/scripting.md): run your users' JavaScript and Python, one sandbox per request
 - [References](docs/references.md): funcref, externref and GC values as terms
 - [Precompiled modules](docs/precompiled.md): compile once, load in milliseconds

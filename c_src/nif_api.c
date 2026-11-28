@@ -759,7 +759,7 @@ static ERL_NIF_TERM nif_features(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
 #else
   ERL_NIF_TERM http = atom_false;
 #endif
-  ERL_NIF_TERM keys[10] = {atom_compiler,
+  ERL_NIF_TERM keys[11] = {atom_compiler,
                            atom_wat,
                            atom_wasi,
                            mk_atom(env, "components"),
@@ -768,8 +768,9 @@ static ERL_NIF_TERM nif_features(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
                            mk_atom(env, "component_async"),
                            mk_atom(env, "wasi_p3"),
                            mk_atom(env, "wasi_limits"),
-                           mk_atom(env, "wasi_http_serve")};
-  ERL_NIF_TERM vals[10] = {NIF_HAVE_COMPILER ? atom_true : atom_false,
+                           mk_atom(env, "wasi_http_serve"),
+                           mk_atom(env, "wasi_http_transport")};
+  ERL_NIF_TERM vals[11] = {NIF_HAVE_COMPILER ? atom_true : atom_false,
                            NIF_HAVE_WAT ? atom_true : atom_false,
                            NIF_HAVE_WASI ? atom_true : atom_false,
                            components,
@@ -778,9 +779,10 @@ static ERL_NIF_TERM nif_features(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
                            async_available() ? atom_true : atom_false,
                            wasi3_available() ? atom_true : atom_false,
                            limits_available() ? atom_true : atom_false,
-                           serve_available() ? atom_true : atom_false};
+                           serve_available() ? atom_true : atom_false,
+                           transport_available() ? atom_true : atom_false};
   ERL_NIF_TERM map;
-  enif_make_map_from_arrays(env, keys, vals, 10, &map);
+  enif_make_map_from_arrays(env, keys, vals, 11, &map);
   return map;
 }
 
@@ -878,6 +880,8 @@ static int open_resources(ErlNifEnv *env) {
   instance_type = enif_open_resource_type_x(env, "wasmtime_instance", &ii, ERL_NIF_RT_CREATE, NULL);
   handle_type = enif_open_resource_type_x(env, "wasmtime_handle", &hi, ERL_NIF_RT_CREATE, NULL);
   ref_type = enif_open_resource_type_x(env, "wasmtime_ref", &ri, ERL_NIF_RT_CREATE, NULL);
+  ErlNifResourceTypeInit pi = {.dtor = reply_dtor};
+  reply_type = enif_open_resource_type_x(env, "wasmtime_http_reply", &pi, ERL_NIF_RT_CREATE, NULL);
   return module_type && instance_type && handle_type && ref_type;
 }
 
@@ -932,6 +936,7 @@ static ErlNifFunc funcs[] = {
     {"gc", 1, nif_gc, 0},
     {"fuel_remaining", 1, nif_fuel_remaining, 0},
     {"host_reply", 3, nif_host_reply, 0},
+    {"http_reply", 2, nif_http_reply, 0},
     {"send", 2, nif_send, 0},
     {"close", 1, nif_close, 0},
     {"interrupt", 1, nif_interrupt, 0},

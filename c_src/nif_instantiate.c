@@ -68,6 +68,9 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
   net_grant_t network, http;
   ERL_NIF_TERM v, cwd;
   ErlNifUInt64 max_field, max_body;
+  if (!enif_get_map_value(env, wasi, mk_atom(env, "transport"), &v))
+    return mk_error_s(out, "link", "wasi_config", "wasi option is malformed");
+  int transport = enif_is_identical(v, atom_true);
   if (!wasi_limits_of(env, wasi, &cwd, &max_field, &max_body) ||
       !enif_get_map_value(env, wasi, mk_atom(env, "network"), &v) || !net_grant(env, v, &network))
     return mk_error_s(out, "link", "wasi_config", "wasi network or limits are malformed");
@@ -76,6 +79,8 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
     return mk_error_s(out, "link", "wasi_config", "wasi http grant is malformed");
   }
   const char *unavailable = NULL;
+  if (transport && !transport_available())
+    unavailable = "this library cannot hand HTTP requests to a transport";
 #ifndef WASMTIME_FEATURE_WASI_HTTP
   if (http.kind != NET_NONE) unavailable = "this build of erlang_wasmtime has no wasi:http";
 #endif
@@ -268,6 +273,7 @@ done:
   if (http.kind != NET_NONE) {
     wasmtime_context_set_wasi_http(inst->wasm.ctx);
     limited = limit_http(inst->wasm.ctx, &http, max_field, max_body);
+    if (limited && transport) limited = set_transport(inst, &inst->queue.current->caller);
   }
 #endif
   net_grant_free(&http);

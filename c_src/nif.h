@@ -194,7 +194,7 @@ typedef struct {
   char *module, *name;
   wasm_functype_t *type;
   int typed; /* references in the signature: the checked callback serves it */
-  /* not an import: a part of an HTTP response (nif_serve.c), served by the
+  /* not an import: a part of an HTTP response (nif_http.c), served by the
    * request's caller and waited for as long as the request lasts */
   int event;
 } hostfn_t;
@@ -309,6 +309,9 @@ typedef struct instance {
     int owns_entry;        /* the module's cache was full */
     int component;         /* a component instance: cinst, not instance */
     int cancelled;         /* an async operation was dropped: no more guest code */
+    /* Where outgoing HTTP requests go (nif_http.c), NULL without a
+     * transport. Owned by the store: gone when the store is. */
+    struct http_channel *transport;
 #if NIF_HAVE_ASYNC_API
     /* The running request's, under mu: stop_current fires it. */
     wasmtime_cancel_t *cancel;
@@ -374,6 +377,7 @@ typedef struct engine_entry {
 } engine_t;
 
 extern ErlNifResourceType *module_type, *instance_type, *handle_type, *ref_type;
+extern ErlNifResourceType *reply_type;
 
 #if NIF_HAVE_WASI
 /* Env of a custom stdout/stderr callback (capture or stream). */
@@ -456,6 +460,11 @@ int limit_http(wasmtime_context_t *ctx, const net_grant_t *g, uint64_t max_field
 int async_available(void);
 int wasi3_available(void);
 int serve_available(void);
+int transport_available(void);
+int set_transport(instance_t *inst, const ErlNifPid *target);
+void transport_target(instance_t *inst, const ErlNifPid *target);
+void reply_dtor(ErlNifEnv *env, void *obj);
+ERL_NIF_TERM nif_http_reply(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]);
 void cvalues_init(ErlNifEnv *env);
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
 #define NOT_CROSSING "this type cannot cross yet (stream, future, error-context)"

@@ -35,6 +35,10 @@ upstream made it unnecessary.
   makes it. A request an address rule refuses now fails with
   `HTTP-request-denied`.
 
+- `0007-c-api-wasi-http-transport.patch`: outgoing `wasi:http` requests
+  handed to the embedder, answered later from any thread, and a switch that
+  refuses host names. A name that does not resolve is now `DNS-error`.
+
 Wasmtime 51 continues the reset scan past a full result buffer itself, which
 a second patch did for 48.
 

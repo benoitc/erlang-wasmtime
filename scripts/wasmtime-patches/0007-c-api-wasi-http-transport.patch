@@ -1,0 +1,595 @@
+diff --git a/crates/c-api/include/wasmtime/component/serve.h b/crates/c-api/include/wasmtime/component/serve.h
+index a7c8527..9a93d70 100644
+--- a/crates/c-api/include/wasmtime/component/serve.h
++++ b/crates/c-api/include/wasmtime/component/serve.h
+@@ -105,6 +105,83 @@ WASM_API_EXTERN wasmtime_error_t *wasmtime_component_serve_http_blocking(
+     const wasmtime_http_request_t *request, const wasmtime_http_sink_t *sink,
+     const wasmtime_cancel_t *cancel, wasmtime_http_result_t *result);
+ 
++/// \brief Outgoing requests can be handed to the embedder.
++#define WASMTIME_HAS_HTTP_TRANSPORT 1
++
++/// \brief An outgoing request, its body read and its address checked. Every
++/// pointer is borrowed for the callback.
++typedef struct wasmtime_http_outgoing_t {
++  const uint8_t *method;
++  size_t method_len;
++  const uint8_t *scheme;
++  size_t scheme_len;
++  /// The host the request names, without brackets or port.
++  const uint8_t *host;
++  size_t host_len;
++  /// The address to connect to, as text.
++  const uint8_t *address;
++  size_t address_len;
++  uint16_t port;
++  const uint8_t *path;
++  size_t path_len;
++  const wasmtime_http_field_t *headers;
++  size_t headers_len;
++  const uint8_t *body;
++  size_t body_len;
++  /// The guest's timeouts in milliseconds, `UINT64_MAX` when it set none.
++  uint64_t connect_timeout_ms;
++  uint64_t first_byte_timeout_ms;
++  uint64_t between_bytes_timeout_ms;
++} wasmtime_http_outgoing_t;
++
++/// \brief The one answer an outgoing request waits for.
++typedef struct wasmtime_http_responder_t wasmtime_http_responder_t;
++
++/// \brief Sends `request` and answers `responder`, now or later, from any
++/// thread. The callback must not block and owns the responder.
++typedef void (*wasmtime_http_transport_t)(
++    void *data, const wasmtime_http_outgoing_t *request,
++    wasmtime_http_responder_t *responder);
++
++/// \brief Answers with a whole response and consumes the responder.
++WASM_API_EXTERN void wasmtime_http_responder_respond(
++    wasmtime_http_responder_t *responder, uint16_t status,
++    const wasmtime_http_field_t *headers, size_t headers_len,
++    const uint8_t *body, size_t body_len);
++
++/**
++ * \brief Fails the request with a `wasi:http` error code, by its WIT name,
++ * and consumes the responder.
++ *
++ * `size` is the payload of the codes that carry a number and is read when
++ * `has_size`; `text` that of `internal-error`. An unknown name is
++ * `internal-error`.
++ */
++WASM_API_EXTERN void wasmtime_http_responder_fail(
++    wasmtime_http_responder_t *responder, const uint8_t *name, size_t name_len,
++    bool has_size, uint64_t size, const uint8_t *text, size_t text_len);
++
++/// \brief Deletes an unanswered responder; the request fails.
++WASM_API_EXTERN void
++wasmtime_http_responder_delete(wasmtime_http_responder_t *responder);
++
++/**
++ * \brief Sends the store's outgoing `wasi:http` requests through `callback`.
++ *
++ * Call after #wasmtime_context_set_wasi_http, and after
++ * #wasmtime_context_limit_wasi_http when it is used. `finalizer` runs once no
++ * request can reach the callback again. Returns false without a `wasi:http`
++ * context.
++ */
++WASM_API_EXTERN bool wasmtime_context_set_wasi_http_transport(
++    wasmtime_context_t *context, wasmtime_http_transport_t callback, void *data,
++    void (*finalizer)(void *));
++
++/// \brief Makes outgoing requests name an address: a host name is refused.
++/// Returns false without a `wasi:http` context.
++WASM_API_EXTERN bool
++wasmtime_context_deny_wasi_http_names(wasmtime_context_t *context);
++
+ #ifdef __cplusplus
+ } // extern "C"
+ #endif
+diff --git a/crates/c-api/src/component/mod.rs b/crates/c-api/src/component/mod.rs
+index a665f60..aa76014 100644
+--- a/crates/c-api/src/component/mod.rs
++++ b/crates/c-api/src/component/mod.rs
+@@ -6,6 +6,8 @@ mod instance;
+ mod linker;
+ #[cfg(all(feature = "wasi-http", feature = "component-model-async"))]
+ mod serve;
++#[cfg(all(feature = "wasi-http", feature = "component-model-async"))]
++mod transport;
+ mod types;
+ mod val;
+ 
+@@ -17,5 +19,7 @@ pub use instance::*;
+ pub use linker::*;
+ #[cfg(all(feature = "wasi-http", feature = "component-model-async"))]
+ pub use serve::*;
++#[cfg(all(feature = "wasi-http", feature = "component-model-async"))]
++pub use transport::*;
+ pub use types::*;
+ pub use val::*;
+diff --git a/crates/c-api/src/component/serve.rs b/crates/c-api/src/component/serve.rs
+index 3317f3f..80c0ef2 100644
+--- a/crates/c-api/src/component/serve.rs
++++ b/crates/c-api/src/component/serve.rs
+@@ -92,11 +92,11 @@ struct Incoming {
+     body: RequestBody,
+ }
+ 
+-unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
++pub(super) unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
+     unsafe { crate::slice_from_raw_parts(ptr, len) }
+ }
+ 
+-unsafe fn field_map(
++pub(super) unsafe fn field_map(
+     fields: *const wasmtime_http_field_t,
+     len: usize,
+ ) -> Result<http::HeaderMap, &'static str> {
+@@ -146,7 +146,7 @@ fn view(data: &mut WasmtimeStoreData) -> WasiHttpCtxView<'_> {
+     data.http()
+ }
+ 
+-fn fields(map: &http::HeaderMap) -> Vec<wasmtime_http_field_t> {
++pub(super) fn fields(map: &http::HeaderMap) -> Vec<wasmtime_http_field_t> {
+     map.iter()
+         .map(|(name, value)| wasmtime_http_field_t {
+             name: name.as_str().as_ptr(),
+diff --git a/crates/c-api/src/component/transport.rs b/crates/c-api/src/component/transport.rs
+new file mode 100644
+index 0000000..30109bb
+--- /dev/null
++++ b/crates/c-api/src/component/transport.rs
+@@ -0,0 +1,245 @@
++//! Outgoing `wasi:http` requests handed to the embedder, which answers each
++//! later from any thread.
++
++use super::serve::{bytes, field_map, fields, wasmtime_http_field_t};
++use crate::{ForeignData, WasmtimeStoreContextMut};
++use bytes::Bytes;
++use std::ffi::c_void;
++use std::sync::Arc;
++use std::time::Duration;
++use tokio::sync::oneshot;
++use wasmtime_wasi_http::{Error, LimitedHooks, Outgoing};
++
++#[repr(C)]
++pub struct wasmtime_http_outgoing_t {
++    method: *const u8,
++    method_len: usize,
++    scheme: *const u8,
++    scheme_len: usize,
++    host: *const u8,
++    host_len: usize,
++    address: *const u8,
++    address_len: usize,
++    port: u16,
++    path: *const u8,
++    path_len: usize,
++    headers: *const wasmtime_http_field_t,
++    headers_len: usize,
++    body: *const u8,
++    body_len: usize,
++    connect_timeout_ms: u64,
++    first_byte_timeout_ms: u64,
++    between_bytes_timeout_ms: u64,
++}
++
++type Answer = Result<http::Response<Bytes>, Error>;
++
++pub struct wasmtime_http_responder_t {
++    answer: oneshot::Sender<Answer>,
++}
++
++type wasmtime_http_transport_t =
++    extern "C" fn(*mut c_void, *const wasmtime_http_outgoing_t, Box<wasmtime_http_responder_t>);
++
++fn response(status: u16, headers: http::HeaderMap, body: &[u8]) -> Answer {
++    let mut response = http::Response::new(Bytes::copy_from_slice(body));
++    *response.status_mut() =
++        http::StatusCode::from_u16(status).map_err(|_| Error::HttpProtocolError)?;
++    *response.headers_mut() = headers;
++    Ok(response)
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn wasmtime_http_responder_respond(
++    responder: Box<wasmtime_http_responder_t>,
++    status: u16,
++    headers: *const wasmtime_http_field_t,
++    headers_len: usize,
++    body: *const u8,
++    body_len: usize,
++) {
++    let answer = match unsafe { field_map(headers, headers_len) } {
++        Ok(headers) => response(status, headers, unsafe { bytes(body, body_len) }),
++        Err(_) => Err(Error::HttpProtocolError),
++    };
++    _ = responder.answer.send(answer);
++}
++
++fn error_code(name: &[u8], size: Option<u64>, text: Option<String>) -> Error {
++    let short = size.and_then(|n| u32::try_from(n).ok());
++    match name {
++        b"DNS-timeout" => Error::DnsTimeout,
++        b"DNS-error" => Error::DnsError {
++            rcode: None,
++            info_code: None,
++        },
++        b"destination-not-found" => Error::DestinationNotFound,
++        b"destination-unavailable" => Error::DestinationUnavailable,
++        b"destination-IP-prohibited" => Error::DestinationIpProhibited,
++        b"destination-IP-unroutable" => Error::DestinationIpUnroutable,
++        b"connection-refused" => Error::ConnectionRefused,
++        b"connection-terminated" => Error::ConnectionTerminated,
++        b"connection-timeout" => Error::ConnectionTimeout,
++        b"connection-read-timeout" => Error::ConnectionReadTimeout,
++        b"connection-write-timeout" => Error::ConnectionWriteTimeout,
++        b"connection-limit-reached" => Error::ConnectionLimitReached,
++        b"TLS-protocol-error" => Error::TlsProtocolError,
++        b"TLS-certificate-error" => Error::TlsCertificateError,
++        b"TLS-alert-received" => Error::TlsAlertReceived {
++            alert_id: None,
++            alert_message: None,
++        },
++        b"HTTP-request-denied" => Error::HttpRequestDenied,
++        b"HTTP-request-length-required" => Error::HttpRequestLengthRequired,
++        b"HTTP-request-body-size" => Error::HttpRequestBodySize(size),
++        b"HTTP-request-method-invalid" => Error::HttpRequestMethodInvalid,
++        b"HTTP-request-URI-invalid" => Error::HttpRequestUriInvalid,
++        b"HTTP-request-URI-too-long" => Error::HttpRequestUriTooLong,
++        b"HTTP-request-header-section-size" => Error::HttpRequestHeaderSectionSize(short),
++        b"HTTP-request-header-size" => Error::HttpRequestHeaderSize {
++            field_name: None,
++            field_size: short,
++        },
++        b"HTTP-request-trailer-section-size" => Error::HttpRequestTrailerSectionSize(short),
++        b"HTTP-request-trailer-size" => Error::HttpRequestTrailerSize {
++            field_name: None,
++            field_size: short,
++        },
++        b"HTTP-response-incomplete" => Error::HttpResponseIncomplete,
++        b"HTTP-response-header-section-size" => Error::HttpResponseHeaderSectionSize(short),
++        b"HTTP-response-header-size" => Error::HttpResponseHeaderSize {
++            field_name: None,
++            field_size: short,
++        },
++        b"HTTP-response-body-size" => Error::HttpResponseBodySize(size),
++        b"HTTP-response-trailer-section-size" => Error::HttpResponseTrailerSectionSize(short),
++        b"HTTP-response-trailer-size" => Error::HttpResponseTrailerSize {
++            field_name: None,
++            field_size: short,
++        },
++        b"HTTP-response-transfer-coding" => Error::HttpResponseTransferCoding(text),
++        b"HTTP-response-content-coding" => Error::HttpResponseContentCoding(text),
++        b"HTTP-response-timeout" => Error::HttpResponseTimeout,
++        b"HTTP-upgrade-failed" => Error::HttpUpgradeFailed,
++        b"HTTP-protocol-error" => Error::HttpProtocolError,
++        b"loop-detected" => Error::LoopDetected,
++        b"configuration-error" => Error::ConfigurationError,
++        _ => Error::InternalError(text),
++    }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn wasmtime_http_responder_fail(
++    responder: Box<wasmtime_http_responder_t>,
++    name: *const u8,
++    name_len: usize,
++    has_size: bool,
++    size: u64,
++    text: *const u8,
++    text_len: usize,
++) {
++    let name = unsafe { bytes(name, name_len) };
++    let text = unsafe { bytes(text, text_len) };
++    let text = (!text.is_empty()).then(|| String::from_utf8_lossy(text).into_owned());
++    let error = error_code(name, has_size.then_some(size), text);
++    _ = responder.answer.send(Err(error));
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn wasmtime_http_responder_delete(_responder: Box<wasmtime_http_responder_t>) {}
++
++/// Calls the embedder and gives back what it will answer on. Nothing here is
++/// held across an await.
++fn hand_over(
++    callback: wasmtime_http_transport_t,
++    data: *mut c_void,
++    request: &Outgoing,
++) -> oneshot::Receiver<Answer> {
++    let (answer, receiver) = oneshot::channel();
++    let method = request.parts.method.as_str();
++    let scheme = request.parts.uri.scheme_str().unwrap_or("http");
++    let path = request
++        .parts
++        .uri
++        .path_and_query()
++        .map_or("/", |p| p.as_str());
++    let address = request.address.ip().to_string();
++    let headers = fields(&request.parts.headers);
++    let millis = |timeout: Option<Duration>| {
++        timeout.map_or(u64::MAX, |t| {
++            u64::try_from(t.as_millis()).unwrap_or(u64::MAX)
++        })
++    };
++    let options = request.options.unwrap_or_default();
++    let outgoing = wasmtime_http_outgoing_t {
++        method: method.as_ptr(),
++        method_len: method.len(),
++        scheme: scheme.as_ptr(),
++        scheme_len: scheme.len(),
++        host: request.host.as_ptr(),
++        host_len: request.host.len(),
++        address: address.as_ptr(),
++        address_len: address.len(),
++        port: request.address.port(),
++        path: path.as_ptr(),
++        path_len: path.len(),
++        headers: headers.as_ptr(),
++        headers_len: headers.len(),
++        body: request.body.as_ptr(),
++        body_len: request.body.len(),
++        connect_timeout_ms: millis(options.connect_timeout),
++        first_byte_timeout_ms: millis(options.first_byte_timeout),
++        between_bytes_timeout_ms: millis(options.between_bytes_timeout),
++    };
++    callback(
++        data,
++        &outgoing,
++        Box::new(wasmtime_http_responder_t { answer }),
++    );
++    receiver
++}
++
++fn hooks<'a>(context: &'a mut WasmtimeStoreContextMut<'_>) -> Option<&'a mut LimitedHooks> {
++    let data = context.data_mut();
++    data.wasi_http.as_ref()?;
++    Some(data.http_hooks.get_or_insert_default())
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn wasmtime_context_set_wasi_http_transport(
++    mut context: WasmtimeStoreContextMut<'_>,
++    callback: wasmtime_http_transport_t,
++    data: *mut c_void,
++    finalizer: Option<extern "C" fn(*mut c_void)>,
++) -> bool {
++    // dropped, and so finalized, when there is nothing to set it on
++    let foreign = Arc::new(ForeignData { data, finalizer });
++    let Some(hooks) = hooks(&mut context) else {
++        return false;
++    };
++    hooks.transport = Some(Arc::new(move |request| {
++        let foreign = foreign.clone();
++        Box::pin(async move {
++            let answer = hand_over(callback, foreign.data, &request);
++            answer.await.unwrap_or_else(|_| {
++                Err(Error::InternalError(Some(
++                    "the transport gave no answer".to_string(),
++                )))
++            })
++        })
++    }));
++    true
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn wasmtime_context_deny_wasi_http_names(
++    mut context: WasmtimeStoreContextMut<'_>,
++) -> bool {
++    match hooks(&mut context) {
++        Some(hooks) => {
++            hooks.deny_names = true;
++            true
++        }
++        None => false,
++    }
++}
+diff --git a/crates/wasi-http/src/ctx.rs b/crates/wasi-http/src/ctx.rs
+index 1d28f06..518b8ca 100644
+--- a/crates/wasi-http/src/ctx.rs
++++ b/crates/wasi-http/src/ctx.rs
+@@ -171,6 +171,77 @@ pub struct LimitedHooks {
+     /// The most bytes of data in the body of a request, and in that of a
+     /// response.
+     pub max_body: Option<u64>,
++    /// Whether a request must name an address: no host name is looked up.
++    pub deny_names: bool,
++    /// Sends requests in place of the default.
++    pub transport: Option<Transport>,
++}
++
++/// A request for a [`Transport`], its body read to the end and its address
++/// already checked.
++#[cfg(feature = "default-send-request")]
++pub struct Outgoing {
++    /// Method, URI and headers.
++    pub parts: http::request::Parts,
++    /// The whole body.
++    pub body: Bytes,
++    /// The host the request names, without brackets or port.
++    pub host: String,
++    /// The address to connect to.
++    pub address: std::net::SocketAddr,
++    /// The guest's timeouts.
++    pub options: Option<RequestOptions>,
++}
++
++/// Sends one request and answers with the whole response.
++#[cfg(feature = "default-send-request")]
++pub type Transport = Arc<
++    dyn Fn(
++            Outgoing,
++        )
++            -> std::pin::Pin<Box<dyn Future<Output = Result<http::Response<Bytes>, Error>> + Send>>
++        + Send
++        + Sync,
++>;
++
++/// Sends `request` through `transport`.
++#[cfg(feature = "default-send-request")]
++async fn send_through(
++    transport: Transport,
++    request: http::Request<WasiBody>,
++    options: Option<RequestOptions>,
++    allow: Option<crate::AddressFilter>,
++    deny_names: bool,
++) -> Result<http::Response<Bytes>> {
++    use http_body_util::BodyExt;
++
++    let (parts, body) = request.into_parts();
++    let authority = parts.uri.authority().ok_or(Error::HttpRequestUriInvalid)?;
++    let default_port = if parts.uri.scheme() == Some(&http::uri::Scheme::HTTPS) {
++        443
++    } else {
++        80
++    };
++    let host = authority
++        .host()
++        .trim_start_matches('[')
++        .trim_end_matches(']')
++        .to_string();
++    let target = format!(
++        "{}:{}",
++        authority.host(),
++        authority.port_u16().unwrap_or(default_port)
++    );
++    let body = body.collect().await?.to_bytes();
++    let address = crate::resolve_authority(&target, allow.as_ref(), deny_names).await?[0];
++    transport(Outgoing {
++        parts,
++        body,
++        host,
++        address,
++        options,
++    })
++    .await
+ }
+ 
+ #[cfg(feature = "default-send-request")]
+@@ -191,12 +262,26 @@ impl WasiHttpHooks for LimitedHooks {
+         _ = fut;
+         let allow = self.allow.clone();
+         let max = self.max_body;
++        let deny_names = self.deny_names;
++        let transport = self.transport.clone();
+         Box::new(async move {
+             use http_body_util::BodyExt;
+ 
+             let request =
+                 request.map(|body| CappedBody::wrap(body, max, Error::HttpRequestBodySize));
+-            let (res, io) = crate::default_send_request_to(request, options, allow).await?;
++            if let Some(transport) = transport {
++                let res = send_through(transport, request, options, allow, deny_names).await?;
++                let res = res.map(|body| {
++                    let body = http_body_util::Full::new(body)
++                        .map_err(|e: std::convert::Infallible| match e {})
++                        .boxed_unsync();
++                    CappedBody::wrap(body, max, Error::HttpResponseBodySize)
++                });
++                let io = Box::new(async { Ok(()) });
++                return Ok((res, io as Box<dyn Future<Output = _> + Send>));
++            }
++            let (res, io) =
++                crate::default_send_request_to(request, options, allow, deny_names).await?;
+             let res = res.map(|body| {
+                 CappedBody::wrap(body.boxed_unsync(), max, Error::HttpResponseBodySize)
+             });
+diff --git a/crates/wasi-http/src/default_send_request.rs b/crates/wasi-http/src/default_send_request.rs
+index 9c46357..6cefe72 100644
+--- a/crates/wasi-http/src/default_send_request.rs
++++ b/crates/wasi-http/src/default_send_request.rs
+@@ -41,22 +41,63 @@ pub async fn default_send_request(
+     ),
+     Error,
+ > {
+-    default_send_request_to(req, options, None).await
++    default_send_request_to(req, options, None, false).await
+ }
+ 
+ /// A predicate on the address an outgoing request is about to connect to.
+ pub type AddressFilter = std::sync::Arc<dyn Fn(std::net::SocketAddr) -> bool + Send + Sync>;
+ 
++/// The addresses `authority` (`host:port`) may be reached at: resolved once,
++/// then filtered by `allow`.
++///
++/// With `deny_names`, a host that is not an address fails with
++/// [`Error::HttpRequestDenied`] before it is looked up, as does a request with
++/// no accepted address. A lookup that finds nothing is [`Error::DnsError`].
++pub async fn resolve_authority(
++    authority: &str,
++    allow: Option<&AddressFilter>,
++    deny_names: bool,
++) -> Result<Vec<std::net::SocketAddr>, Error> {
++    if deny_names {
++        let host = authority
++            .parse::<http::uri::Authority>()
++            .map_err(|_| Error::HttpRequestUriInvalid)?;
++        let host = host.host().trim_start_matches('[').trim_end_matches(']');
++        if host.parse::<std::net::IpAddr>().is_err() {
++            return Err(Error::HttpRequestDenied);
++        }
++    }
++    let unresolved = || Error::DnsError {
++        rcode: None,
++        info_code: None,
++    };
++    let found: Vec<_> = tokio::net::lookup_host(authority)
++        .await
++        .map_err(|_| unresolved())?
++        .collect();
++    if found.is_empty() {
++        return Err(unresolved());
++    }
++    let accepted: Vec<_> = found
++        .into_iter()
++        .filter(|addr| allow.is_none_or(|allow| allow(*addr)))
++        .collect();
++    if accepted.is_empty() {
++        return Err(Error::HttpRequestDenied);
++    }
++    Ok(accepted)
++}
++
+ /// [`default_send_request`], connecting only to addresses `allow` accepts.
+ ///
+-/// The authority is resolved once and the connection is made to one of the
+-/// accepted addresses themselves, so what was checked is what is reached. A
+-/// request with no accepted address fails with [`Error::HttpRequestDenied`]. The TLS server name is still the one in
+-/// the authority.
++/// The connection is made to one of the addresses [`resolve_authority`]
++/// accepted, so what was checked is what is reached. The TLS server name is
++/// still the one in the authority.
+ pub async fn default_send_request_to(
+     mut req: Request<impl Body<Data = Bytes, Error = Error> + Send + 'static>,
+     options: Option<RequestOptions>,
+     allow: Option<AddressFilter>,
++    deny_names: bool,
+ ) -> Result<
+     (
+         Response<impl Body<Data = Bytes, Error = Error>>,
+@@ -89,20 +130,10 @@ pub async fn default_send_request_to(
+     // `connect_timeout` covers everything up to a usable connection: the TCP
+     // connect, the TLS handshake, and the HTTP handshake.
+     let connect = async {
+-        let stream = match &allow {
+-            None => TcpStream::connect(&authority).await,
+-            Some(allow) => {
+-                let found = tokio::net::lookup_host(&authority)
+-                    .await
+-                    .map_err(Error::Connect)?;
+-                let accepted: Vec<_> = found.filter(|addr| allow(*addr)).collect();
+-                if accepted.is_empty() {
+-                    return Err(Error::HttpRequestDenied);
+-                }
+-                TcpStream::connect(&accepted[..]).await
+-            }
+-        }
+-        .map_err(Error::Connect)?;
++        let accepted = resolve_authority(&authority, allow.as_ref(), deny_names).await?;
++        let stream = TcpStream::connect(&accepted[..])
++            .await
++            .map_err(Error::Connect)?;
+         let stream = if use_tls {
+             // derived from https://github.com/rustls/rustls/blob/main/examples/src/bin/simpleclient.rs
+             let root_cert_store = rustls::RootCertStore {

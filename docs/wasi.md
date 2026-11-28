@@ -165,11 +165,12 @@ Grant = #{connect => [{tcp, ~"10.0.0.0/8", 443}], resolve => allow},
 ok = wasmtime:run(Inst).
 ```
 
-Only the `tcp` rules under `connect` count for HTTP. The host name of a
-request is resolved once, and the connection goes to an address that a rule
-allows; a request with none is refused to the guest. `http => all` allows any
-server the node can reach, the loopback included, so grant it only to code
-you would let call any URL.
+Only the `tcp` rules under `connect` count for HTTP. A request naming a host
+needs `resolve => allow`: the name is resolved once, and the connection goes to
+an address that a rule allows. A refused request fails for the guest with
+`HTTP-request-denied`, a name that resolves to nothing with `DNS-error`.
+`http => all` allows any server the node can reach, the loopback included, so
+grant it only to code you would let call any URL.
 
 The body of a request and the body of a response are each bounded to 8 MiB;
 past that the guest's request fails. `http_max_body_bytes` changes the bound,
@@ -183,6 +184,48 @@ left out; a guest that goes past it traps):
 Without the grant a component that imports `wasi:http` does not link. A
 runtime-only build has no `wasi:http` (`features/0`, `wasi_http`) and answers
 `kind => unavailable`.
+
+### Send requests through your own module
+
+Wasmtime sends the guest's requests over HTTP/1.1. To send them yourself, to
+log them, to add credentials, or to speak another protocol, name a module with
+the `wasmtime_http_transport` behaviour:
+
+```erlang
+-module(my_transport).
+-behaviour(wasmtime_http_transport).
+-export([request/2]).
+
+request(#{method := Method, host := Host, address := Address, port := Port,
+          path := Path, headers := Headers, body := Body} = Request, Timeout) ->
+    logger:info("wasi:http ~s ~s:~p~s", [Method, Host, Port, Path]),
+    %% send it to Address, with Host for the Host header and TLS, then:
+    {ok, 200, [{~"content-type", ~"text/plain"}], ~"hello"}.
+```
+
+```erlang
+#{wasi => #{http => Grant, http_transport => my_transport}}
+```
+
+- The grant is checked before your module runs. Connect to `address`, never
+  resolve `host` again: another answer would be an address nobody checked.
+- The request also carries `scheme`, `tls` (the `http_tls` option, for your
+  TLS client; `wasmtime_http_transport:tls_opts/2` adds the server name), the
+  guest's `connect_timeout`, `first_byte_timeout` and `between_bytes_timeout`
+  in milliseconds or `undefined`, and `max_body_bytes`.
+- `Timeout` is the deadline of the whole exchange, 30 seconds; `deadline/1`
+  and `within/2` split it between your steps.
+- Answer `{ok, Status, Headers, Body}`, or a `wasi:http` error code by its WIT
+  name: `{error, {~"connection-refused", none}}`.
+- The module runs in the process serving the instance's host calls, and the
+  guest waits for it, so a call's `timeout` takes effect once it returns. It
+  cannot call the instance it is serving.
+- A module that raises, or answers something else, fails the call with
+  `kind => host_error`; in a `host` process, which has no call to answer, the
+  call ends as interrupted.
+
+A library without this project's patches (`features/0`,
+`wasi_http_transport`) answers `kind => unavailable`.
 
 ### Serve a request
 

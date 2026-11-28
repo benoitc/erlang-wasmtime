@@ -343,7 +343,7 @@ refused_options(Config) ->
     [
         {error, #{class := link, kind := unsupported_option}} =
             serve(Config, "p2_cli_serve_hello_world", request(), Options)
-     || Options <- [#{stdout => capture}, #{http_transport => some_module}]
+     || Options <- [#{stdout => capture}, #{stdin_dir => ~"/"}]
     ],
     ok.
 

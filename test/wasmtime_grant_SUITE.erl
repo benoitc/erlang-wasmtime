@@ -222,13 +222,18 @@ http_rules(Config) ->
     needs_http(fun() ->
         {Server, Port} = serve(ok_response(~"hi")),
         {ok, ~"200\n"} = get(Config, Port, #{http => loopback(Port)}),
-        %% a name is resolved once, and the address it gave is what is checked
-        {ok, ~"200\n"} = command(
-            Config,
-            "httpget",
-            ["localhost:" ++ integer_to_list(Port), "/"],
-            #{http => loopback(Port)}
-        ),
+        %% a name needs `resolve`, and the address it gives is what is checked
+        Named = fun(Grant) ->
+            command(
+                Config,
+                "httpget",
+                ["localhost:" ++ integer_to_list(Port), "/"],
+                #{http => Grant}
+            )
+        end,
+        {ok, ~"200\n"} = Named((loopback(Port))#{resolve => allow}),
+        {{error, _}, <<"refused: ErrorCode::HttpRequestDenied", _/binary>>} =
+            Named(loopback(Port)),
         [
             {{error, _}, <<"refused: ErrorCode::HttpRequestDenied", _/binary>>} =
                 get(Config, Port, #{http => Grant})

@@ -1,7 +1,7 @@
-b5af60f54f50d1331b2bc547d9f56ae9565c7f64f114ef795907b94e2cabf491  wasmtime-v51.0.0-aarch64-linux-c-api.tar.xz
-4c913e44ae150a1a540da814dbe8500e24af1c6e4b524e1462ea9b872e70d121  wasmtime-v51.0.0-aarch64-macos-c-api.tar.xz
-9d2bfe00fd254a4fcf9b8d106219c1719086a12bea472b4416b803703158da62  wasmtime-v51.0.0-aarch64-musl-c-api.tar.xz
-e1909d368cfc30f11b683f8738dd2e7183e5a500dbc8201ed56c8febcd858643  wasmtime-v51.0.0-x86_64-freebsd-c-api.tar.xz
-3143dee453f8ccc6322e64dccae9f7581ba4d464a132894e46e6f1be94c38b25  wasmtime-v51.0.0-x86_64-linux-c-api.tar.xz
-cee8ce048491cbf6808c95269b2f44d23a83dd4a2b794a3150773eef7f7e1520  wasmtime-v51.0.0-x86_64-macos-c-api.tar.xz
-7e969fcfdfa0ab769d972186149c552fd14de2b18cb53e509685928c6e26b435  wasmtime-v51.0.0-x86_64-musl-c-api.tar.xz
+1009158725dd914a714b1af996c20d9bdc2cecf63d9e2238c88fdd65223565ae  wasmtime-v51.0.0-aarch64-linux-c-api.tar.xz
+15227f6920d5ef0de8d30bbeb41d515e90f9ed3a4d4d40a27559a62723c421d2  wasmtime-v51.0.0-aarch64-macos-c-api.tar.xz
+1dfb11acd6b74c3d402b4b390c1d64de7c1e1bd91da895e825aca71c26bcd9ac  wasmtime-v51.0.0-aarch64-musl-c-api.tar.xz
+b7ae0cb1f25a618374e8556de463c2ca093b2c505f01d969085908ff104b212d  wasmtime-v51.0.0-x86_64-freebsd-c-api.tar.xz
+23f58636caf2582db3242957a78bde84cbc3d2ec39ce829785d84fa07074a510  wasmtime-v51.0.0-x86_64-linux-c-api.tar.xz
+cf1d8b53ea27131e2e4a3658a9bedd08a1371f49de2e309fa73243e7f622bab8  wasmtime-v51.0.0-x86_64-macos-c-api.tar.xz
+a1810119432c29324fd406519bfbcb1fb8818113fa1dde5df28531ac0aee0a7e  wasmtime-v51.0.0-x86_64-musl-c-api.tar.xz

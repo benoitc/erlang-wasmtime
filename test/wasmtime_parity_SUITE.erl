@@ -24,7 +24,8 @@
     proc_exit_is_a_trap/1,
     memory_size_in_pages/1,
     error_constructors/1,
-    same_errors_on_both_runtimes/1
+    same_errors_on_both_runtimes/1,
+    same_responses_on_both_runtimes/1
 ]).
 
 %% Called as a {Module, Function} host function.
@@ -51,7 +52,7 @@ groups() ->
             memory_size_in_pages,
             error_constructors
         ]},
-        {both, [], [same_errors_on_both_runtimes]}
+        {both, [], [same_errors_on_both_runtimes, same_responses_on_both_runtimes]}
     ].
 
 init_per_suite(Config) -> Config.
@@ -178,7 +179,7 @@ manifest() ->
         {wasi_preview1, [{close_all, 1}, {default_config, 0}, {imports, 2}, {snapshot_hook, 0}],
             {deferred, "WASI import maps"}},
         {wasi_preview2, [{run_command, 2}, {run_command, 3}], {here, wasmtime_wasi_preview2}},
-        {wasi_preview2, [{run_serve, 3}], {phase, 4, wasmtime_wasi_preview2}},
+        {wasi_preview2, [{run_serve, 3}], {here, wasmtime_wasi_preview2}},
         {wasi_preview2,
             [
                 {cli_exit, 0},
@@ -198,7 +199,7 @@ manifest() ->
             ],
             {deferred, "WASI import maps"}},
         {wasi_preview3, [{run_command, 3}], {here, wasmtime_wasi_preview3}},
-        {wasi_preview3, [{run_serve, 3}, {run_serve, 4}], {phase, 4, wasmtime_wasi_preview3}},
+        {wasi_preview3, [{run_serve, 3}], {here, wasmtime_wasi_preview3}},
         {wasi_preview3,
             [
                 {cli, 1},
@@ -206,6 +207,7 @@ manifest() ->
                 {command, 1},
                 {random, 0},
                 {serve_imports, 2},
+                {run_serve, 4},
                 {run_serve_stream, 5}
             ],
             {deferred, "WASI import maps"}},
@@ -558,3 +560,50 @@ same_errors_on_both_runtimes(_) ->
     end,
     Theirs = Run(wasm),
     ?assertEqual(Theirs, Run(wasmtime)).
+
+%% The serving suite's guests, given the same requests.
+same_responses_on_both_runtimes(Config) ->
+    case wasmtime:features() of
+        #{wasi_http_serve := true} -> serve_both(Config);
+        #{wasi_http_serve := false} -> {skip, "this library cannot serve HTTP requests"}
+    end.
+
+serve_both(Config) ->
+    Dir = string:replace(?config(data_dir, Config), "parity_SUITE", "serve_SUITE"),
+    Request = #{
+        method => ~"POST",
+        path => ~"/",
+        headers => [{~"foo", ~"bar"}],
+        body => ~"hello body",
+        trailers => [{~"fizz", ~"buzz"}]
+    },
+    Cases = [
+        {"p2_cli_serve_hello_world", #{}},
+        {"p2_cli_serve_return_before_set", #{}},
+        {"p2_cli_serve_trap_before_set", #{}},
+        {"p3_cli_serve_hello_world", #{}},
+        {"p3_http_echo", #{}},
+        {"p3_http_echo", #{http_max_body_bytes => 4}}
+    ],
+    Serve = fun(Runtime) ->
+        [
+            begin
+                File = filename:join(unicode:characters_to_list(Dir), Name ++ ".component.wasm"),
+                {ok, Bin} = file:read_file(File),
+                {Name, outcome(Runtime:run_serve(Bin, Request, Options#{compile => true}))}
+            end
+         || {Name, Options} <- Cases
+        ]
+    end,
+    Theirs = Serve(wasi_preview3),
+    ?assertEqual(Theirs, Serve(wasmtime_wasi_preview3)).
+
+%% Header order and the size an error names are each runtime's own.
+outcome({ok, Status, Headers, Body}) ->
+    {ok, Status, lists:sort(Headers), Body};
+outcome({ok, Status, Headers, Body, Trailers}) ->
+    {ok, Status, lists:sort(Headers), Body, Trailers};
+outcome({error, {Code, _}}) ->
+    {error, Code};
+outcome({error, Reason}) ->
+    {error, Reason}.

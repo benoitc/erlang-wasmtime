@@ -29,7 +29,7 @@ function neither lists. Update both together.
 | `wasi_preview1`: `exit_code`, `imports/1` | `wasmtime_wasi_preview1` | done |
 | `wasi_preview1:imports` and the other map builders | none | refused: Wasmtime implements WASI |
 | `wasi_preview2`, `wasi_preview3`: `run_command` | `wasmtime_wasi_preview2`, `preview3` | done |
-| `wasi_preview2`, `wasi_preview3`: `run_serve` | same | phase 4 |
+| `wasi_preview2`, `wasi_preview3`: `run_serve` | same | done; `run_serve/4` refused (import maps) |
 | `wasi_preview2`, `wasi_preview3`: import maps and `_with` runners | none | refused: Wasmtime implements WASI |
 | `wasi_http_listener`, `wasi_http_h1`, `wasi_http_transport` | `wasmtime_http_*` | phase 4 |
 | `wasi_http_h2` | none | refused: no HTTP/2 |

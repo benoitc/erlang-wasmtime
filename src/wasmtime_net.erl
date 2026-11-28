@@ -25,11 +25,14 @@
 
 %% erlang_wasm's `max_sockets` and `timeout` have no counterpart, and are
 %% answered as keys to refuse.
--spec grant(none | all | net()) -> {ok, nif_grant()} | {unsupported, [atom()]}.
+%% `deny` is wasmtime_http_serve's: linked, and nothing allowed.
+-spec grant(none | all | deny | net()) -> {ok, nif_grant()} | {unsupported, [atom()]}.
 grant(none) ->
     {ok, none};
 grant(all) ->
     {ok, all};
+grant(deny) ->
+    {ok, {rules, false, false, false, []}};
 grant(Map) when is_map(Map) ->
     case maps:keys(maps:without([connect, listen, resolve, tcp, udp], Map)) of
         [] ->

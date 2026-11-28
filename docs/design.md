@@ -30,6 +30,7 @@ thread, but never from two at once.
 | Change pre-initialization | `src/wasmtime_preinit.erl` (parse, instrument, rewrite) and `c_src/nif_preinit.c` (what is read back) |
 | Change what `clocks => monotonic` allows | `c_src/nif_clock.c` (preview 1), `refuse_wall_clock` in `c_src/nif_component.c` (WASI 0.2) |
 | Change how components link, call or serve imports | `c_src/nif_component.c` |
+| Change how a component is served HTTP requests | `src/wasmtime_http_serve.erl`, `c_src/nif_serve.c`, `scripts/wasmtime-patches/0006-*` |
 | Change network grants or the limits on what a component asks of the host | `src/wasmtime_net.erl` (the grant), `c_src/nif_net.c`, `scripts/wasmtime-patches/0005-*` (the checks) |
 | Change how WIT values map to terms | `c_src/nif_cvalues.c` |
 | Measure a change against the CPython reactor | `bench/reactor_bench.erl`, run by `scripts/bench-reactor.sh` |
@@ -316,6 +317,24 @@ Rules a change must keep:
   the serving process counts host resources
   (`host_limit` in `src/wasmtime_component.erl`), Wasmtime's resource table counts
   WASI's.
+
+## Serving HTTP
+
+`nif_serve.c` gives one request to the handler; the response comes back in
+parts (head, chunks, trailers), each sent to the request's caller through
+`host_exchange` while the guest waits. One part is in the node at a time, and
+a slow reader slows the guest.
+
+Rules a change must keep:
+
+- A part goes to the caller, never to the `host` process, and waits without
+  `host_timeout`: only the request's end (its timeout, `interrupt`, the
+  caller's death) gives up on a reader.
+- A request that ends any other way than served (abandoned between two parts,
+  a failed body, no response) may leave the guest suspended in the store:
+  `wasm.cancelled` is set so no guest code runs there again.
+- Nothing bounds a streamed body as a whole. A caller that collects it
+  bounds what it collects (`run` in `src/wasmtime_http_serve.erl`).
 
 ## Engines and precompiled modules
 

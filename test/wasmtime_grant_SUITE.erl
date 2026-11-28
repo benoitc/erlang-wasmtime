@@ -230,7 +230,8 @@ http_rules(Config) ->
             #{http => loopback(Port)}
         ),
         [
-            {{error, _}, <<"refused: ", _/binary>>} = get(Config, Port, #{http => Grant})
+            {{error, _}, <<"refused: ErrorCode::HttpRequestDenied", _/binary>>} =
+                get(Config, Port, #{http => Grant})
          || Grant <- [
                 loopback(Port + 1),
                 #{connect => [{tcp, ~"10.0.0.0/8", any}]},

@@ -194,6 +194,9 @@ typedef struct {
   char *module, *name;
   wasm_functype_t *type;
   int typed; /* references in the signature: the checked callback serves it */
+  /* not an import: a part of an HTTP response (nif_serve.c), served by the
+   * request's caller and waited for as long as the request lasts */
+  int event;
 } hostfn_t;
 /* A linker and its InstancePre for one module and one shape of imports and
  * WASI (key). Nothing in it refers to a store or an instance: callbacks
@@ -422,6 +425,9 @@ void resources_free(instance_t *inst);
 ERL_NIF_TERM component_instantiate(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM imports, int wasi,
                                    int monotonic, ErlNifEnv *out);
 ERL_NIF_TERM component_call(instance_t *inst, req_t *req, ErlNifEnv *out);
+ERL_NIF_TERM component_arm(instance_t *inst, req_t *req, ErlNifEnv *out);
+void note_cancel(instance_t *inst, const wasmtime_error_t *e);
+ERL_NIF_TERM serve_component(instance_t *inst, req_t *req, ERL_NIF_TERM request, ErlNifEnv *out);
 ERL_NIF_TERM component_items(ErlNifEnv *env, module_res_t *m, int exports);
 wasmtime_error_t *component_host_callback(void *envp, wasmtime_context_t *ctx,
                                           const wasmtime_component_func_type_t *ty,
@@ -449,6 +455,7 @@ int limit_http(wasmtime_context_t *ctx, const net_grant_t *g, uint64_t max_field
 #endif
 int async_available(void);
 int wasi3_available(void);
+int serve_available(void);
 void cvalues_init(ErlNifEnv *env);
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
 #define NOT_CROSSING "this type cannot cross yet (stream, future, error-context)"

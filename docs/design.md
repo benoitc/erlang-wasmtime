@@ -30,6 +30,7 @@ thread, but never from two at once.
 | Change pre-initialization | `src/wasmtime_preinit.erl` (parse, instrument, rewrite) and `c_src/nif_preinit.c` (what is read back) |
 | Change what `clocks => monotonic` allows | `c_src/nif_clock.c` (preview 1), `refuse_wall_clock` in `c_src/nif_component.c` (WASI 0.2) |
 | Change how components link, call or serve imports | `c_src/nif_component.c` |
+| Change network grants or the limits on what a component asks of the host | `src/wasmtime_net.erl` (the grant), `c_src/nif_net.c`, `scripts/wasmtime-patches/0005-*` (the checks) |
 | Change how WIT values map to terms | `c_src/nif_cvalues.c` |
 | Measure a change against the CPython reactor | `bench/reactor_bench.erl`, run by `scripts/bench-reactor.sh` |
 | Change an error's class, kind or context | `c_src/nif_atoms.c` and `src/wasmtime_error.erl`, then "Errors" |
@@ -295,6 +296,27 @@ Rules for `nif_cvalues.c`, which a change must keep:
 - Every slot of a vector is blanked before it is filled, so an error half
   way leaves a value `wasmtime_component_val_delete` can free.
 
+## Network grants and host limits
+
+`src/wasmtime_net.erl` turns a grant into address rules, and `net_grant` in
+`nif_net.c` reads them; the checks run inside Wasmtime. Sockets use the WASI
+context's address check, which Wasmtime asks before every connect, bind,
+listen and datagram. Outgoing HTTP goes through hooks that resolve the
+authority once and connect to an address that passed, so a name cannot
+resolve to one address for the check and another for the connection.
+
+Rules a change must keep:
+
+- A grant reaches the guest only with the library that checks it: without
+  `wasi_limits` the NIF refuses rules, it never widens them to `all`.
+- An IPv4-mapped IPv6 address is the IPv4 host, in the rules and in the
+  address checked.
+- Only TCP connect rules grant HTTP.
+- `resource_limit` is counted in two places, because the objects live in two:
+  the serving process counts host resources
+  (`host_limit` in `src/wasmtime_component.erl`), Wasmtime's resource table counts
+  WASI's.
+
 ## Engines and precompiled modules
 
 One engine per distinct compile option set, in a registry keyed by
@@ -496,7 +518,10 @@ too needs the instances in another OS process; see [features](features.md),
 `WASMTIME_C_API_DIR`; a cached archive; a download from this repo's
 release checked against `scripts/*.sha256`; a source build. A function a
 patch adds is declared weak and tested before use, so an unpatched library
-links (`sockets_available`, `pagemap_scan`). `scripts/build-nif.sh` probes what the
+links (`sockets_available`, `limits_available`, `pagemap_scan`). The build
+script resets the cloned Wasmtime tree before applying the patches, since a
+patch that is already applied cannot be told apart once two touch the same
+lines. `scripts/build-nif.sh` probes what the
 library can do (`NIF_HAVE_COMPILER`, `_WAT`, `_WASI`, by `nm` or a link
 test, cross-checked with `conf.h`), records the platform in
 `priv/wasmtime_platform`, and rebuilds only when the stamp file
@@ -540,5 +565,6 @@ Decisions and their reasons:
 | 32 values | `MAX_VALS` | stack arrays for arguments and results | signatures wider than this are `unsupported_type` |
 | 30 s host timeout | `DEFAULT_HOST_TIMEOUT` | a guest parked forever behind a dead handler would pin its thread | how long a slow host fun may take before the guest traps |
 | 16 MB inbox, 16 MB per captured stream | `DEFAULT_INBOX_LIMIT`, `DEFAULT_OUTPUT_LIMIT` | bound what a guest or a sender can queue without anyone reading | `inbox_full` and the dropped counters |
+| 8 MiB HTTP body | `?DEFAULT_HTTP_BODY_LIMIT` in `wasmtime_wasi_config.erl` | erlang_wasm's bound on a request's body and a response's, so a guest meets the same one on both | the largest download or upload without `http_max_body_bytes` |
 | 256 MB memory limit | `DEFAULT_MEMORY_LIMIT` | a guest is isolated by default; growing past this traps | the memory a guest may claim |
 | 10 instances, 100 tables, 10 M elements | limits in `nif_options/3` | store limiter defaults matching Wasmtime's own | resource caps per store |

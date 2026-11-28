@@ -22,10 +22,12 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Explicit teardown | `destroy/1`: stops the instance and frees its store (and pool slot) before returning |
 | Text to binary | `wat2wasm/1` (core modules and components) |
 | Components | compiled, validated, precompiled, pooled like modules; `module_kind/1`; `call/3,4` by `Export` or `Interface#Function`, `{ok, Value}`; erlang_wasm's term mapping for every WIT value; host imports keyed `{Interface, Function}` (raw `{ok, [V]}` funs or erlang_wasm's typed `import_fun/2`); resources as integer handles, `drop_resource/2,3`; see [components](components.md) |
-| WASI 0.3 | linked beside 0.2 for components with a `wasi` option, on libraries with this project's patches (`features/0`, `wasi_p3`): commands through `run/1,2`, the same options, `wasi:http` client under `http => all`; see [WASI 0.3](wasi-0-3.md) |
+| WASI 0.3 | linked beside 0.2 for components with a `wasi` option, on libraries with this project's patches (`features/0`, `wasi_p3`): commands through `run/1,2`, the same options, `wasi:http` client under an `http` grant; see [WASI 0.3](wasi-0-3.md) |
 | Component async | `async func` exports through `call/3,4` and `async func` imports as host functions, on libraries with this project's patches (`features/0`, `component_async`); see [components](components.md) |
 | Host resources | a `resource` in an interface the import map serves is the host's: `wasmtime_component:host_new/2,3`, `host_get/1`, `host_update/2`, `host_drop/1`, `host_live/0`; the guest's drop removes the entry, or calls your `[resource-drop]<name>` fun |
-| WASI 0.2 | for components with a `wasi` option: the same keys as preview 1, `run/1,2`, streamed stdin and stdout, `clocks => monotonic` traps the wall clock (`kind => clock_refused`); `http => all` grants `wasi:http/outgoing-handler` to any server, on full builds; `network => all` grants `wasi:sockets` |
+| WASI 0.2 | for components with a `wasi` option: the same keys as preview 1, `run/1,2`, streamed stdin and stdout, `clocks => monotonic` traps the wall clock (`kind => clock_refused`); `http` grants `wasi:http/outgoing-handler`, to any server or to listed addresses, on full builds; `network` grants `wasi:sockets` the same way; `initial_cwd` |
+| Network grants | erlang_wasm's `wasi_net` form: `connect` and `listen` rules by address prefix and port, `resolve`, `tcp`, `udp`; checked by Wasmtime on every address, and an HTTP request connects to the address that passed; on libraries with this project's patches (`features/0`, `wasi_limits`) |
+| Component limits | `resource_limit` (host and WASI resource handles), `transfer_limit` (bytes copied to the host per call), `http_max_body_bytes` (8 MiB by default), `http_max_field_bytes` |
 | Host functions in a dedicated process | `host => Pid` at instantiate, `handle_host_call/2` in that process |
 | Non-blocking calls | `call_async/3` and `await/2,3` |
 | Fuel metering | `compile(Bin, #{fuel => true})`, `call/4` with `fuel`, `fuel_remaining/1`; `kind => out_of_fuel` |
@@ -132,15 +134,22 @@ Errors have erlang_wasm's shape, `#{class, kind, msg, ctx}`; see
 | `load/1,2` past `max_resident_modules` (256), or without the application | `exhaustion`, `cache_full`; `link`, `not_started` |
 | `snapshot/1,2` on an instance not made for it, or of a module not from `load/1,2`; an image restored or loaded under another key or module | `invalid`, `not_snapshotable`, `module_not_loaded` or `snapshot_incompatible` |
 | `snapshot/1,2` while a call runs | `link`, `busy` |
-| `network => all` on a library without the patches, or `http => all` on a build without `wasi:http` | `link`, `unavailable` |
-| `network => all` or `http => all` for a core module | `link`, `unsupported` |
+| A `network` or `http` grant, `initial_cwd` or a component limit on a library without the patches, or an `http` grant on a build without `wasi:http` | `link`, `unavailable` |
+| A `network` or `http` grant for a core module | `link`, `unsupported` |
+| `initial_cwd`, `http_max_body_bytes` or `http_max_field_bytes` for a core module; `max_sockets` or `timeout` in a grant | `link`, `unsupported_option` |
+| `resource_limit` or `transfer_limit` for a core module; a value that is no limit | `link`, `unsupported_option` or `invalid_limits` |
+| An HTTP limit that is no positive integer | `link`, `wasi_config` |
+| A network grant that cannot be read | raises `{bad_net_grant, Term}` |
+| Headers past `http_max_field_bytes`; a body past `http_max_body_bytes` | `trap` for headers (`wasi:http` has no error for it); the guest's request fails for a body |
+| A host resource past `resource_limit` | `trap`, `resource_limit_reached` |
+| More data from a component in one call than `transfer_limit` | `exhaustion`, `hostcall_fuel` |
 | A `profile` other than `plugin` or `script` | `link`, `unknown_profile` |
 | erlang_wasm's `max_depth` anywhere, `max_heap_words` or `max_host_calls` on `instantiate` or `call`, or a limit of the wrong type | `link`, `invalid_limits` |
 | A host function past `max_host_calls` in a worker | `exhaustion`, `host_call_limit` |
 | A source past `max_module_bytes`; a load past the cache's byte or rate cap | `exhaustion`, `module_too_large`, `cache_full` or `load_rate_exceeded` |
 | `extern/2` of something that is no core function, or on a snapshotable instance; an extern of another signature | `link`, `unsupported_extern`, `instance_snapshotable` or `incompatible_import_type` |
 | `random => {seed, _}` or `none` for a component; a `stdout` atom that names no process | `link`, `unsupported_option` |
-| erlang_wasm's `link`, `snapshot_hooks`, `compile`, `compile_quality`, `compile_after`, `resource_limit` options; a `wasi` key or value this runtime does not have (`net`) | `link`, `unsupported_option`, the keys in `ctx.keys` |
+| erlang_wasm's `link`, `snapshot_hooks`, `compile`, `compile_quality`, `compile_after` options; a `wasi` key or value this runtime does not have (`net`) | `link`, `unsupported_option`, the keys in `ctx.keys` |
 | A core-module accessor on a component instance | `link`, `component` |
 | The WASI wall clock under `clocks => monotonic` | `trap`, `clock_refused` |
 
@@ -216,15 +225,21 @@ Errors have erlang_wasm's shape, `#{class, kind, msg, ctx}`; see
 - **Other script worker options.** `restore_ahead`, `compiled`, the heap
   floors, a result channel apart from stdout, and the conformance kit
   module are erlang_wasm's and have no counterpart yet.
-- **Rules on sockets.** `network => all` is the only grant: the C API has no
-  hook on an address. erlang_wasm grants addresses one by one (`wasi_net`).
-  Without component async (`features/0`), a guest blocked on a socket is
-  not stopped by `timeout` or `interrupt/1` until the peer answers or
-  closes.
-- **Rules on outgoing HTTP, and serving HTTP.** `http => all` is the only
-  grant: the C API has no hook to allow or refuse a request or to supply
-  the transport, and no way to build an incoming request, so
-  `wasi:http/incoming-handler` cannot be called. erlang_wasm has both.
+- **Serving HTTP, and your own HTTP transport.** Wasmtime sends the
+  requests, and the C API has no way to supply the transport or to build an
+  incoming request, so `wasi:http/incoming-handler` cannot be called.
+  erlang_wasm has both.
+- **`max_sockets` and `timeout` in a network grant.** Wasmtime's sockets
+  take neither. `resource_limit` bounds how many WASI resources a component
+  holds, sockets among them, and the call's `timeout` stops a waiting guest.
+- **Sockets without component async.** On such a library (`features/0`) a
+  guest blocked on a socket is not stopped by `timeout` or `interrupt/1`
+  until the peer answers or closes.
+- **A fast path for `list<u8>`.** A list of bytes crosses one value per
+  byte: about 40 ms per megabyte each way and back, against well under 1 ms
+  for a `string`. The cost is in Wasmtime's dynamic component values, which
+  its C API is built on. Raise `transfer_limit` for large lists, or pass
+  them through a file or a stream.
 - **Unversioned WASI imports.** A component importing `wasi:*` without a
   version (accepted by erlang_wasm) is a link error: Wasmtime links WASI
   by version.

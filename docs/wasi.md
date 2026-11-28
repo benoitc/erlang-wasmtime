@@ -156,44 +156,97 @@ ok = wasmtime:run(Inst).
 
 ### Let a component make HTTP requests
 
+A component gets `wasi:http/outgoing-handler` only when you grant it. Name
+the addresses its requests may reach:
+
 ```erlang
-{ok, Inst} = wasmtime:instantiate(Mod, #{wasi => #{http => all, stdout => capture}}),
+Grant = #{connect => [{tcp, ~"10.0.0.0/8", 443}], resolve => allow},
+{ok, Inst} = wasmtime:instantiate(Mod, #{wasi => #{http => Grant, stdout => capture}}),
 ok = wasmtime:run(Inst).
 ```
 
-`http => all` gives the component `wasi:http/outgoing-handler`. It is off
-by default, and it is all or nothing: the component may send requests to
-any server the node can reach, and Wasmtime makes the request. There is no
-rule per address and no way to supply the transport, so grant it only to
-code you would let call any URL. Without the grant a component that imports
-`wasi:http` does not link. A runtime-only build has no `wasi:http`
-(`features/0`, `wasi_http`) and answers `kind => unavailable`.
+Only the `tcp` rules under `connect` count for HTTP. The host name of a
+request is resolved once, and the connection goes to an address that a rule
+allows; a request with none is refused to the guest. `http => all` allows any
+server the node can reach, the loopback included, so grant it only to code
+you would let call any URL.
 
-Serving requests (`wasi:http/incoming-handler`) is not available.
-
-### Sockets
-
-`wasi:sockets` is denied by default: every network operation answers
-`access-denied`. Grant it to a component you would let reach anything the
-node reaches:
+The body of a request and the body of a response are each bounded to 8 MiB;
+past that the guest's request fails. `http_max_body_bytes` changes the bound,
+and `http_max_field_bytes` bounds the headers the guest builds (128 KiB when
+left out; a guest that goes past it traps):
 
 ```erlang
-{ok, I} = wasmtime:instantiate(Component, #{wasi => #{network => all}}),
+#{http => Grant, http_max_body_bytes => 64 * 1024 * 1024, http_max_field_bytes => 16384}.
+```
+
+Without the grant a component that imports `wasi:http` does not link. A
+runtime-only build has no `wasi:http` (`features/0`, `wasi_http`) and answers
+`kind => unavailable`. Serving requests (`wasi:http/incoming-handler`) is not
+available.
+
+### Grant the network
+
+`wasi:sockets` is denied by default: every network operation answers
+`access-denied`. A grant lists what the component may do, in the form of
+erlang_wasm's `wasi_net`:
+
+```erlang
+Grant = #{
+    connect => [{tcp, ~"192.0.2.10", 5432}, {udp, ~"10.0.0.53", 53}],
+    listen => [{tcp, {127, 0, 0, 1}, {8000, 8100}}],
+    resolve => allow
+},
+{ok, I} = wasmtime:instantiate(Component, #{wasi => #{network => Grant}}),
 ok = wasmtime:run(I, #{timeout => 5000}).
 ```
 
-The grant covers TCP, UDP and name lookup, to or from any address, the
-loopback included; there is no rule per address. A guest waiting on a peer
-is stopped by `timeout`, `interrupt/1` or its caller's death, like any
-component call (`features/0`, `component_async`). A library
-without this project's patches (`features/0`, `wasi_sockets`) answers
+- An address is a tuple or a binary, with an optional prefix length
+  (`~"2001:db8::/32"`). Host names are not accepted: a rule is about the
+  address reached. An IPv4-mapped IPv6 address matches the IPv4 rules.
+- A port is one number, `{First, Last}` or `any`.
+- `listen` rules cover listening and binding a port you name. Binding port 0
+  needs no rule.
+- Name lookup is off unless `resolve => allow`. `tcp => false` or
+  `udp => false` turns a transport off whatever the rules say.
+- A grant that cannot be read raises `{bad_net_grant, Term}`. erlang_wasm's
+  `max_sockets` and `timeout` are refused with `kind => unsupported_option`.
+
+`network => all` allows TCP, UDP and name lookup, to or from any address. A
+guest waiting on a peer is stopped by `timeout`, `interrupt/1` or its
+caller's death, like any component call (`features/0`, `component_async`).
+Grants need a library with this project's patches (`features/0`,
+`wasi_sockets` and `wasi_limits`) and otherwise answer
 `kind => unavailable`.
+
+## Bound what a component asks of the host
+
+```erlang
+{ok, I} = wasmtime:instantiate(Component, Imports, #{
+    wasi => #{},
+    resource_limit => 256,
+    transfer_limit => 512 * 1024 * 1024
+}).
+```
+
+- `resource_limit` caps the host resource handles live in the process that
+  serves host calls (`kind => resource_limit_reached`), and the resources
+  WASI holds for the instance: files, streams, sockets.
+- `transfer_limit` is how many bytes one call may copy from the component to
+  the host, 128 MiB when left out (`kind => hostcall_fuel`). A `list<u8>`
+  counts about 32 per byte, so a few megabytes reach the default.
+
+A program that asks where it starts gets what you give as `initial_cwd`:
+
+```erlang
+#{wasi => #{dirs => [{~"/work", "/srv/job", write}], initial_cwd => ~"/work"}}.
+```
 
 ## Notes
 
 - Components get WASI 0.2 (above); core modules get preview 1.
 - No network for core modules: preview 1 as Wasmtime exposes it has no
-  sockets, and `network => all` answers `kind => unsupported`.
+  sockets, and a network grant answers `kind => unsupported`.
 - Randomness (`random_get`) is the host's cryptographic generator, seeded
   per instance. A pre-initialized module starts with whatever its init drew;
   see [preinit](preinit.md).

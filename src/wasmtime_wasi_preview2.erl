@@ -21,12 +21,17 @@ options and nothing else.
 - `args`, `env`: what the program sees.
 - `preopen => Dir` (read-only unless `writable => true`) mounts one directory
   at `/`; `preopens => [{Guest, Dir, Writable}]` names several.
-- `network => all`: sockets, and `wasi:http` on a library that has it.
+- `network`: `all`, or a grant as the `wasi` option's: sockets, and
+  `wasi:http` requests to the addresses its `connect` rules allow, on a
+  library that has it.
+- `initial_cwd`, `resource_limit`.
+- `http_max_body_bytes`: the bound on a request's body and a response's,
+  8 MiB when left out.
 - `timeout`, `fuel`, `max_memory_pages`: the limits of `wasmtime_limits`.
 - `compile => true`: do not keep the component in the module cache.
 
-erlang_wasm's `initial_cwd`, address grants under `network`, `resource_limit`,
-`stdout_limit` and `stdin_dir` are refused with `kind => unsupported_option`.
+erlang_wasm's `stdout_limit` and `stdin_dir` are refused with
+`kind => unsupported_option`.
 """.
 -type command_options() :: #{
     args => [binary()],
@@ -34,7 +39,10 @@ erlang_wasm's `initial_cwd`, address grants under `network`, `resource_limit`,
     preopen => file:filename_all(),
     writable => boolean(),
     preopens => [{binary(), file:filename_all(), boolean()}],
-    network => all,
+    network => all | map(),
+    initial_cwd => binary(),
+    http_max_body_bytes => pos_integer(),
+    resource_limit => non_neg_integer() | infinity,
     compile => boolean(),
     timeout => timeout(),
     fuel => pos_integer() | infinity,
@@ -57,18 +65,13 @@ program's status is 1.
 -spec run_command(binary() | wasmtime_component:prepared(), binary(), command_options()) ->
     command_result().
 run_command(Component, Stdin, Options) when is_binary(Stdin), is_map(Options) ->
-    Known = [args, env, preopen, writable, preopens, network, compile],
-    Limits = [timeout, fuel, max_memory_pages],
+    Known =
+        [args, env, preopen, writable, preopens, network, initial_cwd, compile] ++
+            [http_max_body_bytes],
+    Limits = [timeout, fuel, max_memory_pages, resource_limit],
     case maps:keys(maps:without(Known ++ Limits, Options)) of
-        [] ->
-            case maps:get(network, Options, none) of
-                Grant when Grant =:= all; Grant =:= none ->
-                    run(Component, Stdin, Options, Grant, maps:with(Limits, Options));
-                _ ->
-                    unsupported([network])
-            end;
-        Keys ->
-            unsupported(Keys)
+        [] -> run(Component, Stdin, Options, maps:with(Limits, Options));
+        Keys -> unsupported(Keys)
     end.
 
 unsupported(Keys) ->
@@ -76,8 +79,9 @@ unsupported(Keys) ->
         keys => Keys
     }).
 
-run(Component, Stdin, Options, Grant, Limits) ->
-    Wasi = #{
+run(Component, Stdin, Options, Limits) ->
+    Grant = maps:get(network, Options, none),
+    Wasi = (maps:with([initial_cwd, http_max_body_bytes], Options))#{
         args => maps:get(args, Options, []),
         env => maps:get(env, Options, []),
         dirs => mounts(Options),
@@ -115,11 +119,10 @@ outcome({error, #{kind := unknown_export}}, _) ->
 outcome({error, _} = Error, _) ->
     Error.
 
-http(none) ->
-    none;
-http(all) ->
+%% A network grant covers HTTP too, where the library can send requests.
+http(Grant) ->
     case wasmtime:features() of
-        #{wasi_http := true} -> all;
+        #{wasi_http := true} -> Grant;
         #{wasi_http := false} -> none
     end.
 

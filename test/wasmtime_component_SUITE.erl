@@ -530,14 +530,13 @@ wasi_grants_refused(Config) ->
     {error, #{class := link, kind := NetworkKind}} =
         wasmtime:instantiate(Core, #{wasi => #{network => all}}),
     {ok, _} = wasmtime:instantiate(Core, #{wasi => #{network => none, http => none}}),
-    %% no grant by address
-    try
-        wasmtime:instantiate(component(Config, "net"), #{wasi => #{network => [{~"127.0.0.1", 80}]}})
-    of
-        Other -> ct:fail({accepted, Other})
-    catch
-        error:function_clause -> ok
-    end,
+    %% a grant that is not in `wasi_net`'s form is the caller's mistake
+    ?assertError(
+        {bad_net_grant, _},
+        wasmtime:instantiate(component(Config, "net"), #{
+            wasi => #{network => [{~"127.0.0.1", 80}]}
+        })
+    ),
     ok.
 
 %% ---------------------------------------------------------- host resources

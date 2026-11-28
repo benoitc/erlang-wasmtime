@@ -42,6 +42,7 @@ cannot forge or read it.
 """.
 
 -export([host_new/2, host_new/3, host_get/1, host_update/2, host_drop/1, host_live/0]).
+-export([host_limit/1]).
 -export([decode/1, prepare/1, instantiate/1, instantiate/2, instantiate/3]).
 -export([call/4, call_async/4, call_async/5, destroy/1, destroy/2, exports/1]).
 -export([drop_resource/3, import_fun/2]).
@@ -99,8 +100,8 @@ Instantiate a component, as erlang_wasm's `wasm_component:instantiate/3`.
 `wasmtime:instantiate/3`. What comes back is a `wasmtime:instance()`: the
 functions here and those of `wasmtime` both take it.
 
-erlang_wasm's `resource_limit`, `resource_closer` and `resource_predrop` are
-refused with `kind => unsupported_option`; `loader` is `load` or `compile`.
+erlang_wasm's `resource_closer` and `resource_predrop` are refused with
+`kind => unsupported_option`; `loader` is `load` or `compile`.
 """.
 -spec instantiate(binary() | prepared(), wasmtime:imports(), map()) ->
     {ok, wasmtime:instance()} | {error, term()}.
@@ -214,10 +215,20 @@ import_fun(Sig, Fun) -> wasmtime:import_fun(Sig, Fun).
 
 -define(HOST, '$wasmtime_host_resources').
 -define(NEXT, '$wasmtime_host_next').
+-define(LIMIT, '$wasmtime_host_limit').
+
+%% The `resource_limit` of the instance whose host call runs next in this
+%% process.
+-doc false.
+-spec host_limit(non_neg_integer() | infinity) -> ok.
+host_limit(Limit) ->
+    _ = put(?LIMIT, Limit),
+    ok.
 
 -doc "Keep `State` under a new handle. `Tag` names the kind of object, for `host_get/1`.".
 -spec host_new(atom(), term()) -> pos_integer().
 host_new(Tag, State) when is_atom(Tag) ->
+    ok = room(get(?LIMIT)),
     Handle =
         case get(?NEXT) of
             undefined -> 1;
@@ -226,6 +237,17 @@ host_new(Tag, State) when is_atom(Tag) ->
     put(?NEXT, Handle + 1),
     put(?HOST, (host_table())#{Handle => {Tag, State}}),
     Handle.
+
+%% `infinity`, or no instance's host call at all, bounds nothing.
+room(Limit) when is_integer(Limit) ->
+    case map_size(host_table()) >= Limit of
+        true ->
+            wasmtime_error:trap(resource_limit_reached, #{limit => Limit});
+        false ->
+            ok
+    end;
+room(_) ->
+    ok.
 
 -doc """
 As `host_new/2`, with where the entry came from. erlang_wasm keeps the

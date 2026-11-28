@@ -429,7 +429,24 @@ wasmtime_error_t *component_host_callback(void *envp, wasmtime_context_t *ctx,
                                           wasmtime_component_val_t *results, size_t nresults);
 #endif
 int is_component_binary(const uint8_t *data, size_t size);
+/* nif_net.c */
+enum { NET_NONE, NET_ALL, NET_RULES };
+typedef struct {
+  int kind, tcp, udp, resolve;
+  void *rules; /* wasi_net_rule_t[len] */
+  size_t len;
+} net_grant_t;
 int sockets_available(void);
+int limits_available(void);
+int limit_component_store(wasmtime_context_t *ctx, int wasi, int64_t resources, int64_t transfer);
+#if NIF_HAVE_WASI
+int net_grant(ErlNifEnv *env, ERL_NIF_TERM term, net_grant_t *g);
+void net_grant_free(net_grant_t *g);
+void net_grant_sockets(wasi_config_t *cfg, const net_grant_t *g);
+int initial_cwd(wasi_config_t *cfg, const char *path);
+int limit_http(wasmtime_context_t *ctx, const net_grant_t *g, uint64_t max_field_bytes,
+               uint64_t max_body_bytes);
+#endif
 int async_available(void);
 int wasi3_available(void);
 void cvalues_init(ErlNifEnv *env);

@@ -142,7 +142,8 @@ static const trap_row_t trap_rows[] = {
     T(19, "unhandled tag", "uncaught_exception", "uncaught exception"),
     T(22, "deadlock detected", "async_deadlock", "deadlock detected"),
     T(49, "uncaught exception", "uncaught_exception", "uncaught exception"),
-    X(55, "hostcall fuel", "hostcall_fuel", "too much data copied between host and guest"),
+    X(55, "too much data is being copied between the host and the guest", "hostcall_fuel",
+      "too much data copied between host and guest"),
 };
 #undef T
 #undef X

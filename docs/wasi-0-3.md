@@ -40,6 +40,9 @@ built through an adapter imports 0.2 as well; both are linked.
 {ok, J} = wasmtime:instantiate(Component, #{wasi => #{http => all}}).
 ```
 
+Both also take a grant naming the addresses allowed; see
+[WASI](wasi.md#grant-the-network).
+
 Without `network` every socket operation is denied; without `http` a
 component importing `wasi:http` does not link.
 

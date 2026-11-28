@@ -133,7 +133,9 @@ on an instance at a time; concurrent callers are queued.
     %% `stdout` and `stderr` given as a pid, device or fun, and the `stream`
     %% process for what has no sink
     sinks = #{} :: wasmtime_wasi_config:sinks(),
-    stream :: pid() | undefined
+    stream :: pid() | undefined,
+    %% sends the component's HTTP requests, in the process serving it
+    transport = none :: none | wasmtime_http_transport:settings()
 }).
 
 -record(snapshot, {
@@ -209,7 +211,8 @@ components.md). See building.md, "Runtime-only builds".
     component_async := boolean(),
     wasi_p3 := boolean(),
     wasi_limits := boolean(),
-    wasi_http_serve := boolean()
+    wasi_http_serve := boolean(),
+    wasi_http_transport := boolean()
 }.
 
 -doc """
@@ -326,9 +329,12 @@ WASI configuration. Nothing is granted by default.
 - `http`: whether a component gets `wasi:http/outgoing-handler`. `none`
   (the default), `all` for any server, or a grant like `network`'s whose
   `connect` rules for `tcp` say which addresses a request may reach: the name
-  is resolved once and the connection goes to an address that passed. Full
-  builds only (`features/0`, `wasi_http`). A core module answers `kind =>
-  unsupported`.
+  needs `resolve => allow`, is resolved once, and the connection goes to an
+  address that passed. Full builds only (`features/0`, `wasi_http`). A core
+  module answers `kind => unsupported`.
+- `http_transport`, `http_tls` (components): a module with the
+  `wasmtime_http_transport` behaviour that sends the guest's requests, and
+  options handed to it.
 - `http_max_field_bytes`, `http_max_body_bytes` (components): the most one
   set of headers the guest builds may take, 128 KiB when left out, and the
   most bytes the body of a request, and of a response, may have, 8 MiB when
@@ -360,6 +366,8 @@ WASI configuration. Nothing is granted by default.
     network => none | all | map(),
     http => none | all | map(),
     initial_cwd => iodata(),
+    http_transport => module(),
+    http_tls => list(),
     http_max_field_bytes => pos_integer(),
     http_max_body_bytes => pos_integer()
 }.
@@ -1053,13 +1061,13 @@ snapshot_error(Class, Kind, Msg, Ctx) -> wasmtime_error:new(Class, Kind, Msg, Ct
 
 do_instantiate(Mod, Imports, Opts) ->
     maybe
-        {ok, Wasi, #{sinks := Sinks, imports := Replaced}} ?=
+        {ok, Wasi, #{imports := Replaced} = Extra} ?=
             wasmtime_wasi_config:options(maps:get(wasi, Opts, none), module_kind(Mod)),
         %% an import the caller gives wins over the one an option makes
-        do_instantiate(Mod, maps:merge(Replaced, Imports), Opts, Wasi, Sinks)
+        do_instantiate(Mod, maps:merge(Replaced, Imports), Opts, Wasi, Extra)
     end.
 
-do_instantiate(Mod, Imports, Opts, Wasi, Sinks) ->
+do_instantiate(Mod, Imports, Opts, Wasi, #{sinks := Sinks, transport := Transport}) ->
     Ref = make_ref(),
     Id = erlang:unique_integer([positive, monotonic]),
     StreamPid = maps:get(stream, Opts, self()),
@@ -1076,7 +1084,8 @@ do_instantiate(Mod, Imports, Opts, Wasi, Sinks) ->
                 defaults = call_defaults(Opts),
                 sinks = Sinks,
                 stream = StreamPid,
-                resource_limit = maps:get(resource_limit, Opts, infinity)
+                resource_limit = maps:get(resource_limit, Opts, infinity),
+                transport = Transport
             },
             %% `timeout` bounds the start section too
             case wait_result(Inst, Id, maps:get(timeout, Opts, infinity)) of
@@ -1279,12 +1288,24 @@ call_ref(Inst, Ref, Args, Opts) when is_reference(Ref), is_list(Args), is_map(Op
         do_call(Inst, Ref, Args, Opts)
     end.
 
-do_call(#instance{handle = H, defaults = Defaults} = Inst, Name, Args, Opts0) ->
+do_call(#instance{defaults = Defaults} = Inst, Name, Args, Opts0) ->
     Opts = maps:merge(Defaults, Opts0),
     Id = erlang:unique_integer([positive, monotonic]),
-    case wasmtime_nif:call(H, Name, Args, Id, maps:get(fuel, Opts, undefined)) of
+    case start_call(Inst, Name, Args, Id, maps:get(fuel, Opts, undefined)) of
         enqueued -> wait_result(Inst, Id, maps:get(timeout, Opts, infinity));
         {error, _} = Error -> Error
+    end.
+
+%% The guest waits for its transport, so a transport calling the instance
+%% would wait for itself.
+start_call(#instance{handle = H, ref = Ref}, Name, Args, Id, Fuel) ->
+    case get({wasmtime_transport, Ref}) of
+        undefined ->
+            wasmtime_nif:call(H, Name, Args, Id, Fuel);
+        true ->
+            wasmtime_error:new(
+                link, reentrant, ~"a transport cannot call the instance it is serving"
+            )
     end.
 
 -doc """
@@ -1338,6 +1359,17 @@ handle_host_call(
 ) ->
     _ = wasmtime_nif:host_reply(H, HostId, run_host(Imports, Key, Inst, Args)),
     ok;
+handle_host_call(
+    #instance{ref = Ref} = Inst, {wasmtime_http_request, Ref, Reply, Wire}
+) ->
+    case transported(Inst, Reply, Wire) of
+        ok ->
+            ok;
+        %% there is no call to answer with the error from here: end it
+        {crashed, _} ->
+            _ = interrupt(Inst),
+            refuse_request(Reply)
+    end;
 handle_host_call(#instance{}, _) ->
     ignore.
 
@@ -1351,12 +1383,11 @@ guest that calls back before `await` waits until then, within
 `host_timeout`.
 """.
 -spec call_async(instance(), iodata(), [value()]) -> {ok, call_ref()} | error().
-call_async(#instance{handle = H, defaults = Defaults}, Name, Args) when is_list(Args) ->
+call_async(#instance{defaults = Defaults} = Inst, Name, Args) when is_list(Args) ->
     Id = erlang:unique_integer([positive, monotonic]),
     %% the instance's `fuel` applies; its `timeout` does not, `await/3` has its own
-    case
-        wasmtime_nif:call(H, iolist_to_binary(Name), Args, Id, maps:get(fuel, Defaults, undefined))
-    of
+    Fuel = maps:get(fuel, Defaults, undefined),
+    case start_call(Inst, iolist_to_binary(Name), Args, Id, Fuel) of
         enqueued -> {ok, {call_ref, Id}};
         {error, _} = Error -> Error
     end.
@@ -1378,10 +1409,21 @@ await(#instance{} = Inst, {call_ref, Id}, Timeout) -> wait_result(Inst, Id, Time
 wait_result(#instance{handle = H, ref = Ref, imports = Imports} = Inst, Id, Timeout) ->
     receive
         {wasmtime_result, Ref, Id, Result} ->
+            ok = drop_requests(Ref),
             Result;
         {wasmtime_host_call, Ref, HostId, Key, Args} ->
             _ = wasmtime_nif:host_reply(H, HostId, run_host(Imports, Key, Inst, Args)),
             wait_result(Inst, Id, Timeout);
+        {wasmtime_http_request, Ref, Reply, Wire} ->
+            case transported(Inst, Reply, Wire) of
+                ok ->
+                    wait_result(Inst, Id, Timeout);
+                {crashed, Error} ->
+                    Cancelled = wasmtime_nif:cancel(H, Id),
+                    ok = refuse_request(Reply),
+                    _ = Cancelled =:= ok andalso settle(Inst, Id),
+                    Error
+            end;
         {wasmtime_stream, Ref, Which, Bytes} when map_size(Inst#instance.sinks) > 0 ->
             ok = streamed(Inst, Which, Bytes),
             wait_result(Inst, Id, Timeout)
@@ -1399,6 +1441,41 @@ wait_result(#instance{handle = H, ref = Ref, imports = Imports} = Inst, Id, Time
                 after 0 -> timeout_error(Timeout)
                 end
         end
+    end.
+
+%% Run the instance's transport for one of the guest's requests and answer it.
+%% A transport that raises, or answers nonsense, fails the call as a host
+%% function does.
+transported(#instance{ref = Ref, transport = Settings}, Reply, Wire) ->
+    Key = {wasmtime_transport, Ref},
+    Was = put(Key, true),
+    Outcome = wasmtime_http_transport:perform(Settings, Wire),
+    _ =
+        case Was of
+            undefined -> erase(Key);
+            _ -> Was
+        end,
+    case Outcome of
+        {answer, Answer} ->
+            _ = wasmtime_nif:http_reply(Reply, Answer),
+            ok;
+        {crashed, Ctx} ->
+            %% unanswered: the caller ends the call first, so the guest never
+            %% sees a failure to go on from
+            {crashed, host_error(Ctx#{host => {~"wasi:http", ~"transport"}})}
+    end.
+
+refuse_request(Reply) ->
+    _ = wasmtime_nif:http_reply(Reply, {error, ~"internal-error", none, <<>>}),
+    ok.
+
+%% A request the guest gave up on before anyone ran it.
+drop_requests(Ref) ->
+    receive
+        {wasmtime_http_request, Ref, Reply, _} ->
+            ok = refuse_request(Reply),
+            drop_requests(Ref)
+    after 0 -> ok
     end.
 
 %% Bytes of an instance with sinks: to the sink, or else on to the `stream`
@@ -1420,6 +1497,9 @@ settle(#instance{handle = H, ref = Ref} = Inst, Id) ->
             ok;
         {wasmtime_host_call, Ref, HostId, _, _} ->
             _ = wasmtime_nif:host_reply(H, HostId, host_error(#{reason => interrupted})),
+            settle(Inst, Id);
+        {wasmtime_http_request, Ref, Reply, _} ->
+            ok = refuse_request(Reply),
             settle(Inst, Id);
         {wasmtime_stream, Ref, Which, Bytes} when map_size(Inst#instance.sinks) > 0 ->
             ok = streamed(Inst, Which, Bytes),

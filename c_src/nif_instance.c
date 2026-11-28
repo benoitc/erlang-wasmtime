@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 ErlNifResourceType *module_type, *instance_type, *handle_type, *ref_type;
+ErlNifResourceType *reply_type;
 
 static void req_free(req_t *r) {
   if (r->env) enif_free_env(r->env);
@@ -65,6 +66,10 @@ void *worker_main(void *arg) {
     /* components only: a core module's guest never waits on the async path */
     if (async_available() && inst->wasm.mod->comp) inst->wasm.cancel = wasmtime_cancel_new();
 #endif
+    /* who runs the transport: as for a host call */
+    const ErlNifPid *serves =
+        inst->host.has_pid && req->kind == REQ_CALL ? &inst->host.pid : &req->caller;
+    transport_target(inst, serves);
     pthread_mutex_unlock(&inst->mu);
 
     ErlNifEnv *out = enif_alloc_env();

@@ -31,7 +31,9 @@ function neither lists. Update both together.
 | `wasi_preview2`, `wasi_preview3`: `run_command` | `wasmtime_wasi_preview2`, `preview3` | done |
 | `wasi_preview2`, `wasi_preview3`: `run_serve` | same | done; `run_serve/4` refused (import maps) |
 | `wasi_preview2`, `wasi_preview3`: import maps and `_with` runners | none | refused: Wasmtime implements WASI |
-| `wasi_http_listener`, `wasi_http_h1`, `wasi_http_transport` | `wasmtime_http_*` | phase 4 |
+| `wasi_http_transport` | `wasmtime_http_transport` | done |
+| `wasi_http_h1` | none | refused: Wasmtime sends requests itself |
+| `wasi_http_listener` | `wasmtime_http_listener` | phase 4 |
 | `wasi_http_h2` | none | refused: no HTTP/2 |
 | `wasi_nn` | `wasmtime_wasi_nn` | phase 7 |
 | `wasm_instance_worker` | `wasmtime_instance_worker` | done |

@@ -32,6 +32,7 @@
     gc/1,
     fuel_remaining/1,
     host_reply/3,
+    http_reply/2,
     send/2,
     close/1,
     interrupt/1,
@@ -78,6 +79,7 @@
     gc/1,
     fuel_remaining/1,
     host_reply/3,
+    http_reply/2,
     send/2,
     close/1,
     interrupt/1,
@@ -135,6 +137,7 @@ array_set(_Ref, _Index, _Value) -> erlang:nif_error(not_loaded).
 gc(_Handle) -> erlang:nif_error(not_loaded).
 fuel_remaining(_Handle) -> erlang:nif_error(not_loaded).
 host_reply(_Handle, _Id, _Reply) -> erlang:nif_error(not_loaded).
+http_reply(_Reply, _Answer) -> erlang:nif_error(not_loaded).
 send(_Handle, _Bytes) -> erlang:nif_error(not_loaded).
 close(_Handle) -> erlang:nif_error(not_loaded).
 interrupt(_Handle) -> erlang:nif_error(not_loaded).

@@ -27,6 +27,7 @@ options and nothing else.
   `wasi:http` requests to the addresses its `connect` rules allow, on a
   library that has it.
 - `initial_cwd`, `resource_limit`.
+- `http_transport`, `http_tls`: as the `wasi` option's.
 - `http_max_body_bytes`: the bound on a request's body and a response's,
   8 MiB when left out.
 - `timeout`, `fuel`, `max_memory_pages`: the limits of `wasmtime_limits`.
@@ -45,6 +46,8 @@ erlang_wasm's `stdout_limit` and `stdin_dir` are refused with
     initial_cwd => binary(),
     http_max_body_bytes => pos_integer(),
     resource_limit => non_neg_integer() | infinity,
+    http_transport => module(),
+    http_tls => list(),
     compile => boolean(),
     timeout => timeout(),
     fuel => pos_integer() | infinity,
@@ -127,7 +130,7 @@ run_serve(Component, Request, Options) when is_map(Request), is_map(Options) ->
 with_instance(Component, Options, Adjust, Use) ->
     Known =
         [args, env, preopen, writable, preopens, network, initial_cwd, compile] ++
-            [http_max_body_bytes],
+            [http_max_body_bytes, http_transport, http_tls],
     Limits = [timeout, fuel, max_memory_pages, resource_limit],
     case maps:keys(maps:without(Known ++ Limits, Options)) of
         [] ->
@@ -144,7 +147,7 @@ unsupported(Keys) ->
 
 wasi(Options) ->
     Grant = maps:get(network, Options, none),
-    (maps:with([initial_cwd, http_max_body_bytes], Options))#{
+    (maps:with([initial_cwd, http_max_body_bytes, http_transport, http_tls], Options))#{
         args => maps:get(args, Options, []),
         env => maps:get(env, Options, []),
         dirs => mounts(Options),

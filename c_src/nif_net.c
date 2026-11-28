@@ -22,6 +22,7 @@ extern void wasi_config_set_net_rules(wasi_config_t *, const wasi_net_rule_t *, 
     __attribute__((weak));
 extern bool wasi_config_set_initial_cwd(wasi_config_t *, const char *) __attribute__((weak));
 #ifdef WASMTIME_FEATURE_WASI_HTTP
+extern bool wasmtime_context_deny_wasi_http_names(wasmtime_context_t *) __attribute__((weak));
 extern bool wasmtime_context_limit_wasi_http(wasmtime_context_t *, const wasi_net_rule_t *, size_t,
                                              bool, size_t, uint64_t) __attribute__((weak));
 #endif
@@ -104,17 +105,24 @@ int initial_cwd(wasi_config_t *cfg, const char *path) {
   return wasi_config_set_initial_cwd != NULL && wasi_config_set_initial_cwd(cfg, path);
 }
 
-/* After wasmtime_context_set_wasi_http. 0 when the library cannot. */
+/* After wasmtime_context_set_wasi_http. 0 when the library cannot. A grant
+ * without `resolve` refuses host names, and a library that cannot refuse them
+ * is not given the grant. */
 int limit_http(wasmtime_context_t *ctx, const net_grant_t *g, uint64_t max_field_bytes,
                uint64_t max_body_bytes) {
   if (g->kind != NET_RULES && !max_field_bytes && !max_body_bytes) return 1;
 #ifdef WASMTIME_FEATURE_WASI_HTTP
-  if (wasmtime_context_limit_wasi_http != NULL)
-    return wasmtime_context_limit_wasi_http(ctx, g->rules, g->len, g->kind == NET_RULES,
-                                            (size_t)max_field_bytes, max_body_bytes);
-#endif
+  if (wasmtime_context_limit_wasi_http == NULL ||
+      !wasmtime_context_limit_wasi_http(ctx, g->rules, g->len, g->kind == NET_RULES,
+                                        (size_t)max_field_bytes, max_body_bytes))
+    return 0;
+  if (g->kind != NET_RULES || g->resolve) return 1;
+  return wasmtime_context_deny_wasi_http_names != NULL &&
+         wasmtime_context_deny_wasi_http_names(ctx);
+#else
   (void)ctx;
   return 0;
+#endif
 }
 
 #endif /* NIF_HAVE_WASI */

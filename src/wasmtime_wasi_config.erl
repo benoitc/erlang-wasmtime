@@ -42,9 +42,14 @@ take_imports(Imports, Opts) ->
 %% {ok, NifOptions, #{sinks, imports}}: `imports` are host functions that
 %% replace WASI's.
 -spec options(none | map(), module | component) ->
-    {ok, none | map(), #{sinks := sinks(), imports := map()}} | wasmtime:error().
+    {ok, none | map(), #{
+        sinks := sinks(),
+        imports := map(),
+        transport := none | wasmtime_http_transport:settings()
+    }}
+    | wasmtime:error().
 options(none, _Kind) ->
-    {ok, none, #{sinks => #{}, imports => #{}}};
+    {ok, none, #{sinks => #{}, imports => #{}, transport => none}};
 options(Wasi, Kind) when is_map(Wasi) ->
     Refused = refused_keys(Wasi, Kind),
     Clocks = clocks(maps:get(clocks, Wasi, all)),
@@ -58,15 +63,7 @@ options(Wasi, Kind) when is_map(Wasi) ->
             [Key || Key <- [stdout, stderr], stdio(Key, Wasi) =:= unsupported],
     case Bad of
         [] ->
-            Sinks = maps:from_list([
-                {Key, Sink}
-             || Key <- [stdout, stderr], {sink, Sink} <- [stdio(Key, Wasi)]
-            ]),
-            Options = maps:merge(
-                nif_options(Wasi, Clocks),
-                maps:from_list([{Key, Grant} || {Key, {ok, Grant}} <- Grants])
-            ),
-            {ok, Options, #{sinks => Sinks, imports => Random}};
+            built(Wasi, maps:merge(nif_options(Wasi, Clocks), granted(Grants)), Random);
         _ ->
             wasmtime_error:new(
                 link, unsupported_option, ~"this runtime does not support the option", #{
@@ -78,7 +75,7 @@ options(Wasi, Kind) when is_map(Wasi) ->
 refused_keys(Wasi, Kind) ->
     Known = [args, env, dirs, stdin, stdout, stderr, output_limit, clocks, network, http, random],
     %% only a component has a place for these
-    Component = [initial_cwd, http_max_field_bytes, http_max_body_bytes],
+    Component = [initial_cwd, http_max_field_bytes, http_max_body_bytes] ++ transport_keys(),
     Taken =
         case Kind of
             component -> Known ++ Component;
@@ -86,6 +83,37 @@ refused_keys(Wasi, Kind) ->
         end,
     %% `net => none` is erlang_wasm's default, which is what happens anyway
     maps:keys(maps:without(Taken, maps:filter(fun(Key, V) -> {Key, V} =/= {net, none} end, Wasi))).
+
+granted(Grants) -> maps:from_list([{Key, Grant} || {Key, {ok, Grant}} <- Grants]).
+
+%% The NIF's options, and what is done in Erlang around them.
+built(Wasi, Options, Random) ->
+    Sinks = maps:from_list([
+        {Key, Sink}
+     || Key <- [stdout, stderr], {sink, Sink} <- [stdio(Key, Wasi)]
+    ]),
+    Transport = transport(Wasi),
+    {ok, Options#{transport => Transport =/= none}, #{
+        sinks => Sinks, imports => Random, transport => Transport
+    }}.
+
+transport_keys() -> [http_transport, http_tls].
+
+%% The module that sends the component's requests, when it may send any.
+transport(#{http_transport := Module} = Wasi) ->
+    case maps:get(http, Wasi, none) of
+        none ->
+            none;
+        _ ->
+            Max =
+                case byte_limit(http_max_body_bytes, Wasi, ?DEFAULT_HTTP_BODY_LIMIT) of
+                    invalid -> ?DEFAULT_HTTP_BODY_LIMIT;
+                    N -> N
+                end,
+            wasmtime_http_transport:settings(Module, maps:get(http_tls, Wasi, []), Max)
+    end;
+transport(_) ->
+    none.
 
 nif_options(Wasi, Clocks) ->
     #{

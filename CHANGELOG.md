@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- You can send a component's outgoing HTTP requests with your own module
+  (`http_transport`), as on erlang_wasm.
+- Breaking: an HTTP request naming a host now needs `resolve => allow` in the
+  grant, as on erlang_wasm. A name that does not resolve fails with
+  `DNS-error`.
 - `run_serve` gives a component that serves HTTP, WASI 0.2 or 0.3, one request
   and returns its response.
 - A request an address grant refuses now fails for the guest with

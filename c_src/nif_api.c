@@ -794,6 +794,7 @@ static void open_atoms(ErlNifEnv *env) {
   A(atom_reason, "reason");
   A(atom_wasi_exit, "wasi_exit");
   A(atom_module, "module");
+  A(atom_fuel, "fuel");
   A(atom_not_running, "not_running");
   A(atom_func, "func");
   A(atom_global, "global");

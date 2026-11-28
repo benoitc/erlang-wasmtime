@@ -126,6 +126,9 @@ wasmtime_component_linker_add_wasi_http_p3(wasmtime_component_linker_t *linker);
 #endif
 
 #define EPOCH_TICK_NS (10 * 1000 * 1000) /* 10 ms */
+/* Fuel for instantiating a metered module when none is given, beside the
+ * unit per byte of memory (nif_instantiate.c, give_init_fuel). */
+#define INIT_FUEL 10000000
 #define MAX_VALS 32
 
 /* -------------------------------------------------------------- atoms -- */
@@ -140,7 +143,7 @@ extern ERL_NIF_TERM atom_ok, atom_error, atom_true, atom_false, atom_compiler, a
     atom_wasi, atom_memory_limit, atom_max_tables, atom_max_table_elements, atom_max_instances,
     atom_host_timeout, atom_host, atom_inbox_limit, atom_shim, atom_args, atom_env, atom_dirs,
     atom_stdin, atom_output_limit, atom_clocks, atom_monotonic, atom_all, atom_detail, atom_name,
-    atom_reason, atom_wasi_exit, atom_module;
+    atom_reason, atom_wasi_exit, atom_module, atom_fuel;
 
 /* -------------------------------------------------------------- types -- */
 /* wasm_valtype_kind aborts the process on v128 and on non-nullable references
@@ -403,6 +406,7 @@ void unroot_vals(wasmtime_val_t *vals, size_t n);
 ERL_NIF_TERM conv_error(ErlNifEnv *env, const char *kind, const char *badarg);
 ERL_NIF_TERM term_or_unsupported(ErlNifEnv *env, ERL_NIF_TERM t);
 engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err);
+int fuel_of(ErlNifEnv *env, ERL_NIF_TERM term, const engine_t *engine, ErlNifUInt64 *fuel);
 ERL_NIF_TERM key_term(ErlNifEnv *env, const engine_t *e);
 ERL_NIF_TERM plain_key(ErlNifEnv *env, int fuel);
 int pool_fits(unsigned memories, unsigned core_instances);

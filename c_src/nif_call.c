@@ -59,6 +59,16 @@ static ERL_NIF_TERM call_typed(instance_t *inst, req_t *req, ErlNifEnv *out, was
   return enif_make_tuple2(out, atom_ok, list);
 }
 
+/* The fuel a `fuel` option asks for: an integer, or all there is for
+ * `infinity` on a metered engine. 0 leaves what the store holds, and then
+ * `*fuel` is not to be read: enif_get_uint64 may write it as it fails. */
+int fuel_of(ErlNifEnv *env, ERL_NIF_TERM term, const engine_t *engine, ErlNifUInt64 *fuel) {
+  if (enif_get_uint64(env, term, fuel)) return 1;
+  if (!engine->fuel || !enif_is_identical(term, atom_infinity)) return 0;
+  *fuel = UINT64_MAX;
+  return 1;
+}
+
 ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
   ErlNifEnv *env = req->env;
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
@@ -105,7 +115,7 @@ ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
     goto done;
   }
   ErlNifUInt64 fuel;
-  if (enif_get_uint64(env, req->opts, &fuel)) {
+  if (fuel_of(env, req->opts, inst->wasm.mod->engine, &fuel)) {
     wasmtime_error_t *fe = wasmtime_context_set_fuel(inst->wasm.ctx, fuel);
     if (fe) {
       wasmtime_error_delete(fe);

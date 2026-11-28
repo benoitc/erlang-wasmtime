@@ -260,6 +260,7 @@ typedef struct {
   ERL_NIF_TERM wasi;    /* none | map, see configure_wasi */
   ERL_NIF_TERM shim;    /* binary() | undefined: the precompiled stdin shim */
   ErlNifSInt64 memory_limit, max_tables, max_table_elements, max_instances; /* -1: unlimited */
+  ERL_NIF_TERM fuel; /* integer() | infinity | undefined */
 } opts_t;
 
 static ERL_NIF_TERM opt_error(ErlNifEnv *out, const char *key) {
@@ -276,6 +277,7 @@ static ERL_NIF_TERM parse_options(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM
     return opt_error(out, "imports");
   if (!enif_get_map_value(env, map, atom_wasi, &o->wasi)) return opt_error(out, "wasi");
   if (!enif_get_map_value(env, map, atom_shim, &o->shim)) return opt_error(out, "shim");
+  if (!enif_get_map_value(env, map, atom_fuel, &o->fuel)) return opt_error(out, "fuel");
   struct {
     ERL_NIF_TERM key;
     const char *name;
@@ -540,6 +542,31 @@ static void cache_memory(instance_t *inst) {
   }
 }
 
+/* Initialization is guest code: the global, table and data initializers and
+ * the start section draw fuel on a metered engine, about one unit per byte of
+ * data copied. They get what `fuel` says. When instantiate gave none they get
+ * INIT_FUEL plus one unit per byte the store lets a memory hold, which pays
+ * for the data and still ends a start section that loops, and the store is
+ * left empty for calls to fill. */
+static void give_init_fuel(instance_t *inst, ErlNifEnv *env, const opts_t *o) {
+  if (!inst->wasm.mod->engine->fuel) return;
+  ErlNifUInt64 n, asked;
+  if (fuel_of(env, o->fuel, inst->wasm.mod->engine, &asked))
+    n = asked;
+  else
+    n = INIT_FUEL + (o->memory_limit < 0 ? UINT32_MAX : (ErlNifUInt64)o->memory_limit);
+  /* cannot fail: the engine meters fuel */
+  wasmtime_error_t *e = wasmtime_context_set_fuel(inst->wasm.ctx, n);
+  if (e) wasmtime_error_delete(e);
+}
+
+static void take_init_fuel(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM fuel) {
+  ErlNifUInt64 n;
+  if (!inst->wasm.mod->engine->fuel || fuel_of(env, fuel, inst->wasm.mod->engine, &n)) return;
+  wasmtime_error_t *e = wasmtime_context_set_fuel(inst->wasm.ctx, 0);
+  if (e) wasmtime_error_delete(e);
+}
+
 /* The REQ_INSTANTIATE request, on the worker thread. Each step answers 0
  * or the error to send; a failure leaves the instance stopped. */
 ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
@@ -548,6 +575,7 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
   ERL_NIF_TERM err;
   if ((err = parse_options(inst, env, req->opts, &o, out))) return err;
   configure_store(inst, &o);
+  give_init_fuel(inst, env, &o);
   int monotonic = 0, grants = 0, wasi = !enif_is_identical(o.wasi, atom_none);
   if ((err = configure_wasi(inst, env, out, o.wasi, &monotonic, &grants))) return err;
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
@@ -559,6 +587,7 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
      * when it was granted, so the linker cache keys on it */
     wasi |= grants & WASI_GRANT_HTTP;
     if ((err = component_instantiate(inst, env, o.imports, wasi, monotonic, out))) return err;
+    take_init_fuel(inst, env, o.fuel);
     stdin_pump_start(inst);
     inst->wasm.instantiated = 1;
     return atom_ok;
@@ -575,6 +604,7 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
     if ((err = take_real_wasi(inst, out))) return err;
     if ((err = link_wasi_shim(inst, env, o.shim, out))) return err;
   }
+  take_init_fuel(inst, env, o.fuel);
   stdin_pump_start(inst);
   inst->wasm.instantiated = 1;
   return atom_ok;

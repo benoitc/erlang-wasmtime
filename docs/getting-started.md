@@ -144,8 +144,12 @@ need nothing at load time.
 
 Fuel counts instructions (about one unit each), so the same input always
 stops at the same point, unlike `timeout`. It costs a few percent of speed
-and must be chosen at compile time; fuel belongs to the instance and is
+and must be chosen at compile time. Fuel belongs to the instance and is
 consumed across calls until set again.
+
+Instantiating costs fuel too, about one unit per byte of data copied. Give
+`fuel` to `instantiate/3` to bound it with the start section; without it,
+initialization gets what the data can need.
 
 ## Read traps with their frames
 

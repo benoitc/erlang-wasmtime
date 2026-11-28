@@ -32,6 +32,8 @@
     async_host_served_in_await/1,
     fuel_bounds_a_call/1,
     fuel_needs_metered_module/1,
+    fuel_covers_initialization/1,
+    fuel_infinity/1,
     fuel_precompiled/1,
     trap_trace/1,
     globals_get_set/1,
@@ -82,6 +84,8 @@ groups() ->
         {api, [parallel], [
             fuel_bounds_a_call,
             fuel_needs_metered_module,
+            fuel_covers_initialization,
+            fuel_infinity,
             fuel_precompiled,
             trap_trace,
             globals_get_set,
@@ -398,6 +402,63 @@ fuel_needs_metered_module(_) ->
     {error, #{class := link, kind := fuel_disabled}} = wasmtime:call(Inst, ~"one", [], #{fuel => 10}),
     {error, #{class := link, kind := fuel_disabled}} = wasmtime:fuel_remaining(Inst),
     {ok, [1]} = wasmtime:call(Inst, ~"one", []),
+    ok.
+
+%% Instantiating a metered module costs fuel: its data segments and start
+%% section run as guest code.
+fuel_covers_initialization(_) ->
+    {ok, Data} = wasmtime:compile(
+        {wat, [
+            ~"(module (memory (export \"memory\") 80) (data (i32.const 0) \"hi\")",
+            ~" (data (i32.const 5000000) \"far\") (func (export \"one\") (result i32) i32.const 1))"
+        ]},
+        #{fuel => true}
+    ),
+    %% without fuel: initialized, and calls still run on nothing
+    {ok, Inst} = wasmtime:instantiate(Data),
+    {ok, ~"far"} = wasmtime:read_memory(Inst, 5000000, 3),
+    {ok, 0} = wasmtime:fuel_remaining(Inst),
+    {error, #{kind := out_of_fuel}} = wasmtime:call(Inst, ~"one", []),
+    {ok, [1]} = wasmtime:call(Inst, ~"one", [], #{fuel => 100}),
+    %% with fuel: what the start section leaves is the instance's
+    {ok, Started} = wasmtime:compile(
+        {wat,
+            ~"""
+            (module
+              (global $n (mut i32) (i32.const 0))
+              (func $s (loop $l
+                (global.set $n (i32.add (global.get $n) (i32.const 1)))
+                (br_if $l (i32.lt_u (global.get $n) (i32.const 1000)))))
+              (start $s)
+              (func (export "n") (result i32) global.get $n))
+            """},
+        #{fuel => true}
+    ),
+    {ok, Fuelled} = wasmtime:instantiate(Started, #{}, #{fuel => 100000}),
+    {ok, Left} = wasmtime:fuel_remaining(Fuelled),
+    ?assert(Left < 100000 andalso Left > 50000),
+    {ok, [1000]} = wasmtime:call(Fuelled, ~"n", []),
+    {error, #{class := exhaustion, kind := out_of_fuel}} =
+        wasmtime:instantiate(Started, #{}, #{fuel => 500}),
+    %% without fuel a start section is still bounded
+    {ok, Endless} = wasmtime:compile(
+        {wat, ~"(module (func $s (loop br 0)) (start $s))"}, #{fuel => true}
+    ),
+    {error, #{class := exhaustion, kind := out_of_fuel}} =
+        wasmtime:instantiate(Endless, #{}, #{timeout => 5000}),
+    ok.
+
+fuel_infinity(_) ->
+    {ok, Mod} = wasmtime:compile({wat, fuel_wat()}, #{fuel => true}),
+    {ok, Inst} = wasmtime:instantiate(Mod, #{}, #{fuel => infinity}),
+    {ok, [1]} = wasmtime:call(Inst, ~"one", []),
+    {ok, Ref} = wasmtime:call_async(Inst, ~"one", []),
+    {ok, [1]} = wasmtime:await(Inst, Ref),
+    {ok, Metered} = wasmtime:instantiate(Mod),
+    {ok, [1]} = wasmtime:call(Metered, ~"one", [], #{fuel => infinity}),
+    %% a module without metering takes it too
+    Plain = instance(fuel_wat()),
+    {ok, [1]} = wasmtime:call(Plain, ~"one", [], #{fuel => infinity}),
     ok.
 
 fuel_precompiled(_) ->

@@ -22,6 +22,10 @@
 - A module whose start function never returns could hang `instantiate`
   whatever its `timeout`. Fixed.
 - A `wasi` `env` map or `clocks` list crashed the caller. Fixed.
+- A module compiled with fuel metering failed to instantiate with
+  `out_of_fuel` when it had data or a start function. Fixed: `fuel` given at
+  instantiate now pays for it, and without `fuel` it gets an allowance.
+- `fuel => infinity` left a metered instance with no fuel. Fixed.
 - Wasmtime 51.0.0. Modules and components precompiled with an earlier
   version are refused: precompile them again.
 - Modules using the wide arithmetic proposal (128-bit integer operations)

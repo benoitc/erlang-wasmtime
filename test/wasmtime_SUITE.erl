@@ -576,7 +576,8 @@ nif_options_by_key(_) ->
         host => undefined,
         stream => self(),
         inbox_limit => 1,
-        shim => undefined
+        shim => undefined,
+        fuel => undefined
     },
     {ok, _} = wasmtime_nif:instantiate(Mod, Good#{host_timeout => bad}, Ref, Id2),
     receive

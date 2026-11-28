@@ -726,7 +726,11 @@ memory at most. Options:
   `max_instances` counts core instances: 10 by default for a module, 100
   for a component, which holds several.
 - `timeout`, `fuel`, `max_memory_pages`: the limits of `wasmtime_limits`.
-  `timeout` and `fuel` become the defaults of every call on the instance.
+  `timeout` and `fuel` become the defaults of every call on the instance,
+  and bound the module's initialization too, which costs about one unit per
+  byte of data. A metered module instantiated without `fuel` is initialized
+  on 10,000,000 units plus one per byte of `memory_limit`, and then holds
+  none.
 - `profile`: `plugin` or `script`, erlang_wasm's compile tiers. Accepted and
   without effect: Wasmtime has one tier.
 - `snapshotable`: `true` to allow `snapshot/1,2` on the instance. The module
@@ -895,8 +899,15 @@ do_instantiate(Mod, Imports, Opts, Wasi) ->
             Error
     end.
 
+%% `fuel => infinity` stays: each call then refills a metered store.
 call_defaults(Opts) ->
-    maps:filter(fun(_, V) -> V =/= infinity end, maps:with([timeout, fuel], Opts)).
+    maps:filter(
+        fun
+            (timeout, V) -> V =/= infinity;
+            (fuel, _) -> true
+        end,
+        maps:with([timeout, fuel], Opts)
+    ).
 
 %% The map the NIF reads by key; see parse_options in c_src/nif_instantiate.c.
 nif_options(Mod, Imports, Opts, Wasi) ->
@@ -923,7 +934,8 @@ nif_options(Mod, Imports, Opts, Wasi) ->
         host => HostPid,
         stream => StreamPid,
         inbox_limit => InboxLimit,
-        shim => stdin_shim(Mod, Wasi)
+        shim => stdin_shim(Mod, Wasi),
+        fuel => maps:get(fuel, Opts, undefined)
     }.
 
 %% A `stream` stdout or stderr reports itself a terminal through an

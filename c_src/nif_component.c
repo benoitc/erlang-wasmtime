@@ -546,7 +546,7 @@ ERL_NIF_TERM component_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
     }
   }
   ErlNifUInt64 fuel;
-  if (enif_get_uint64(env, req->opts, &fuel)) {
+  if (fuel_of(env, req->opts, inst->wasm.mod->engine, &fuel)) {
     wasmtime_error_t *fe = wasmtime_context_set_fuel(inst->wasm.ctx, fuel);
     if (fe) {
       wasmtime_error_delete(fe);

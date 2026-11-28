@@ -108,8 +108,10 @@ typedef struct {
   const char *text, *cls, *kind, *msg;
 } trap_row_t;
 
+/* clang-format off: releases disagree on a braced macro body */
 #define T(code, text, kind, msg) {code, text, "trap", kind, msg}
 #define X(code, text, kind, msg) {code, text, "exhaustion", kind, msg}
+/* clang-format on */
 static const trap_row_t trap_rows[] = {
     X(0, "call stack exhausted", "call_stack_exhausted", "call stack exhausted"),
     T(1, "out of bounds memory access", "out_of_bounds_memory_access",

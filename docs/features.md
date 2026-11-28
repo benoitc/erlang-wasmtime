@@ -41,8 +41,13 @@ feature is missing the runtime says so with an error; it does not approximate.
 | WASI preview 1 | args, env, preopened dirs with read or write, stdio to file or inherited; `clocks => monotonic` refuses wall and CPU clocks with `ENOTCAPABLE` |
 | Snapshots | `snapshot/1,2` of an instance made with `snapshotable => true`, `restore/3`, `snapshot_info/1`, `save_snapshot/2`, `load_snapshot/2`, `compatibility_key`; core modules, memories and mutable globals; see [snapshots](snapshots.md) |
 | Script workers | `wasmtime_script_worker` (`run/2,3`, `submit/2,3`, `await/3`, `cancel/2`) over an adapter (`wasmtime_worker_adapter`); `wasmtime_javascript_command` and `wasmtime_python_command`; a directory, a deadline and bounded output per request; see [scripting](scripting.md) |
+| Instance linking | `extern/2`: a core function export as another instance's import, signatures checked |
+| erlang_wasm's modules | `wasmtime_wasi`, `wasmtime_wasi_preview1`, `preview2`, `preview3` (running programs), `wasmtime_component` (`instantiate`, `call`, `destroy` and the rest), `wasmtime_actor`; see [switching](erlang-wasm.md) |
+| Output sinks and randomness | `stdout`/`stderr` as a pid, io device or fun; `random => {seed, N} \| none` for core modules |
+| Actors | `wasmtime_actor`: a component as a process with a bounded queue; see [actors](actors.md) |
+| Worker limits | `max_host_calls`, `max_heap_words` on both workers |
 | Instance worker | `wasmtime_instance_worker`: one instance in a process, a deadline per request, `fresh` or `reuse` between requests; see [workers](worker.md) |
-| Module cache | `load/1,2`, `load_file/1`, `unload/1`: one compiled module per source and option set for the node, a claim per load, given back by `unload/1` or when the loader dies; needs the application started |
+| Module cache | `load/1,2`, `load_file/1`, `unload/1`: one compiled module per source and option set for the node, a claim per load, given back by `unload/1` or when the loader dies; caps `max_resident_modules`, `max_resident_module_bytes`, `max_module_loads_per_second`, `max_module_bytes`; needs the application started |
 | Function types without an instance | `func_types_of/1`, `func_type_of/2`, on a module or on bytes |
 | Limit presets | `wasmtime_limits`: `untrusted/0`, `trusted/0`, `merge/2`, `validate/1`; `timeout`, `fuel` and `max_memory_pages` at instantiate, the first two as defaults of every call |
 | Errors on one line | `format_error/1`, for logs |
@@ -130,8 +135,12 @@ Errors have erlang_wasm's shape, `#{class, kind, msg, ctx}`; see
 | `network => all` on a library without the patches, or `http => all` on a build without `wasi:http` | `link`, `unavailable` |
 | `network => all` or `http => all` for a core module | `link`, `unsupported` |
 | A `profile` other than `plugin` or `script` | `link`, `unknown_profile` |
-| erlang_wasm's `max_depth`, `max_heap_words`, `max_host_calls` limits, or a limit of the wrong type | `link`, `invalid_limits` |
-| erlang_wasm's `link`, `snapshot_hooks`, `compile`, `compile_quality`, `compile_after`, `resource_limit` options; a `wasi` key or value this runtime does not have (`random => {seed, _}`, `net`) | `link`, `unsupported_option`, the keys in `ctx.keys` |
+| erlang_wasm's `max_depth` anywhere, `max_heap_words` or `max_host_calls` on `instantiate` or `call`, or a limit of the wrong type | `link`, `invalid_limits` |
+| A host function past `max_host_calls` in a worker | `exhaustion`, `host_call_limit` |
+| A source past `max_module_bytes`; a load past the cache's byte or rate cap | `exhaustion`, `module_too_large`, `cache_full` or `load_rate_exceeded` |
+| `extern/2` of something that is no core function, or on a snapshotable instance; an extern of another signature | `link`, `unsupported_extern`, `instance_snapshotable` or `incompatible_import_type` |
+| `random => {seed, _}` or `none` for a component; a `stdout` atom that names no process | `link`, `unsupported_option` |
+| erlang_wasm's `link`, `snapshot_hooks`, `compile`, `compile_quality`, `compile_after`, `resource_limit` options; a `wasi` key or value this runtime does not have (`net`) | `link`, `unsupported_option`, the keys in `ctx.keys` |
 | A core-module accessor on a component instance | `link`, `component` |
 | The WASI wall clock under `clocks => monotonic` | `trap`, `clock_refused` |
 
@@ -154,6 +163,16 @@ Errors have erlang_wasm's shape, `#{class, kind, msg, ctx}`; see
   runners). Here Wasmtime implements WASI: you configure it with the `wasi`
   options. An import you give still wins for a core module; a component's
   WASI cannot be overridden.
+- **Sharing more than functions.** `extern/2` hands out core functions only:
+  a memory, table, global or tag belongs to one store, and Wasmtime cannot
+  share it with another instance. erlang_wasm's `link` option has no
+  counterpart for the same reason.
+- **erlang_wasm's default cache caps.** It limits a node to 64 MiB per
+  module, 2 GiB resident and 50 loads a second unless told otherwise; here
+  those three are unlimited unless set.
+- **`wasm:encode/1`.** erlang_wasm writes a module it holds as `.wasm`
+  bytes. Wasmtime does not keep the module in a form it can write back;
+  `wat2wasm/1` covers the text format.
 - **HTTP/2.** erlang_wasm's `wasi_http_h2` transport has no counterpart.
 - **Creating GC structs and arrays from Erlang.** Values the guest creates
   can be read and written field by field; creating one needs a type handle

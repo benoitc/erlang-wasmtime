@@ -54,14 +54,24 @@ static int in_bounds(size_t size, uint32_t ptr, uint32_t len) {
   return (uint64_t)ptr + len <= size;
 }
 
-/* {wasmtime_stream, Ref, Kind, Bytes} to the stream process. A receiver
- * that is gone drops the bytes, like `none` does. */
+/* {wasmtime_stream, Ref, Kind, Bytes} to the stream process, or to the
+ * caller of the running request (`stream => caller`, for output sinks). A
+ * receiver that is gone drops the bytes, like `none` does. */
 static void stream_send(instance_t *inst, ERL_NIF_TERM kind, const unsigned char *data,
                         size_t len) {
   ErlNifEnv *menv = enif_alloc_env();
   ERL_NIF_TERM msg = enif_make_tuple4(menv, atom_wasmtime_stream, enif_make_copy(menv, inst->ref),
                                       kind, mk_binary(menv, data, len));
-  enif_send(NULL, &inst->inbox.stream_pid, menv, msg);
+  ErlNifPid to = inst->inbox.stream_pid;
+  int have = 1;
+  if (inst->inbox.to_caller) {
+    /* no request, no caller: bytes written as the store goes are dropped */
+    pthread_mutex_lock(&inst->mu);
+    have = inst->queue.current != NULL;
+    if (have) to = inst->queue.current->caller;
+    pthread_mutex_unlock(&inst->mu);
+  }
+  if (have) enif_send(NULL, &to, menv, msg);
   enif_free_env(menv);
 }
 

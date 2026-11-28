@@ -373,6 +373,31 @@ static ERL_NIF_TERM nif_module_func_types(ErlNifEnv *env, int argc, const ERL_NI
   return list;
 }
 
+/* module_import_types(Module) -> [{Module, Name, Params, Results}], one per
+ * function import of a core module; [] for a component. */
+static ERL_NIF_TERM nif_module_import_types(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
+  module_res_t *m;
+  if (!enif_get_resource(env, argv[0], module_type, (void **)&m)) return enif_make_badarg(env);
+  ERL_NIF_TERM list = enif_make_list(env, 0);
+  if (!m->mod) return list;
+  wasm_importtype_vec_t v;
+  wasmtime_module_imports(m->mod, &v);
+  for (size_t i = v.size; i > 0; i--) {
+    const wasm_importtype_t *it = v.data[i - 1];
+    const wasm_functype_t *ft = wasm_externtype_as_functype_const(wasm_importtype_type(it));
+    if (!ft) continue;
+    const wasm_name_t *mn = wasm_importtype_module(it), *nn = wasm_importtype_name(it);
+    list = enif_make_list_cell(env,
+                               enif_make_tuple4(env, mk_binary(env, mn->data, mn->size),
+                                                mk_binary(env, nn->data, nn->size),
+                                                valtypes_term(env, wasm_functype_params(ft)),
+                                                valtypes_term(env, wasm_functype_results(ft))),
+                               list);
+  }
+  wasm_importtype_vec_delete(&v);
+  return list;
+}
+
 /* instantiate(Module, Opts, Ref, Id) -> {ok, Handle}; result arrives as a message */
 static ERL_NIF_TERM nif_instantiate(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   module_res_t *m;
@@ -795,6 +820,7 @@ static void open_atoms(ErlNifEnv *env) {
   A(atom_wasi_exit, "wasi_exit");
   A(atom_module, "module");
   A(atom_fuel, "fuel");
+  A(atom_caller, "caller");
   A(atom_not_running, "not_running");
   A(atom_func, "func");
   A(atom_global, "global");
@@ -880,6 +906,7 @@ static ErlNifFunc funcs[] = {
     {"module_imports", 1, nif_module_imports, 0},
     {"module_exports", 1, nif_module_exports, 0},
     {"module_func_types", 1, nif_module_func_types, 0},
+    {"module_import_types", 1, nif_module_import_types, 0},
     {"serialize", 1, nif_serialize, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"deserialize", 2, nif_deserialize, ERL_NIF_DIRTY_JOB_CPU_BOUND},
     {"instantiate", 4, nif_instantiate, 0},

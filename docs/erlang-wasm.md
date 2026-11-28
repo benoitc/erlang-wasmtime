@@ -30,7 +30,7 @@ it, or calls `my_wasm:mod(core)` for what both runtimes spell the same.
 
 ```erlang
 -module(my_wasm).
--export([runtime/0, mod/1, start/0, instantiate/4, run_program/2]).
+-export([runtime/0, mod/1, start/0]).
 
 runtime() ->
     application:get_env(my_app, wasm_runtime, wasmtime).
@@ -46,6 +46,9 @@ modules(wasmtime) ->
         limits => wasmtime_limits,
         worker => wasmtime_instance_worker,
         script_worker => wasmtime_script_worker,
+        wasi => wasmtime_wasi,
+        component => wasmtime_component,
+        actor => wasmtime_actor,
         javascript => wasmtime_javascript_command,
         python => wasmtime_python_command
     };
@@ -57,6 +60,9 @@ modules(wasm) ->
         limits => wasm_limits,
         worker => wasm_instance_worker,
         script_worker => wasm_script_worker,
+        wasi => wasi,
+        component => wasm_component,
+        actor => wasm_actor,
         javascript => wasm_javascript_command,
         python => wasm_python_command
     }.
@@ -64,38 +70,6 @@ modules(wasm) ->
 start() ->
     {ok, _} = application:ensure_all_started(mod(app)),
     ok.
-
-%% WASI is an option here and an import map on erlang_wasm.
-instantiate(Module, Imports, none, Opts) ->
-    (mod(core)):instantiate(Module, Imports, Opts);
-instantiate(Module, Imports, Wasi, Opts) ->
-    case runtime() of
-        wasmtime ->
-            wasmtime:instantiate(Module, Imports, Opts#{wasi => Wasi});
-        wasm ->
-            All = maps:merge(wasi_preview1:imports(Wasi), Imports),
-            wasm:instantiate(Module, All, Opts)
-    end.
-
-%% Run a WASI program: {ok, ExitStatus, Stdout, Stderr}.
-run_program(Module, Wasi) ->
-    run_program(runtime(), Module, Wasi).
-
-run_program(wasm, Module, Wasi) ->
-    wasi:run(Module, Wasi);
-run_program(wasmtime, Module, Wasi) ->
-    Captured = Wasi#{stdout => capture, stderr => capture},
-    maybe
-        {ok, Inst} ?= wasmtime:instantiate(Module, #{}, #{wasi => Captured}),
-        Result = wasmtime:call(Inst, ~"_start", []),
-        {ok, {Out, Err, _Dropped}} = wasmtime:read_output(Inst),
-        ok = wasmtime:destroy(Inst),
-        case Result of
-            {ok, _} -> {ok, 0, Out, Err};
-            {error, #{ctx := #{wasi_exit := Status}}} -> {ok, Status, Out, Err};
-            {error, _} -> Result
-        end
-    end.
 ```
 
 Switch in `sys.config`, `wasm` or `wasmtime`:
@@ -137,18 +111,35 @@ In a host function:
   shared
 - answer `{ok, Results}` or `{trap, Reason}`
 
-For WASI, pass only the keys both take:
+## Run WASI programs and components
+
+Pass only the keys both take. `run/2` answers the exit status and output, and
+`imports/1` gives an import map for `instantiate/3`.
 
 ```erlang
-Wasi = #{
+Wasi = my_wasm:mod(wasi),
+Config = #{
     args => [~"prog"],
     env => #{~"MODE" => ~"production"},
     dirs => [{~"/data", "/srv/app/data", read}],
     clocks => [monotonic]
 },
 {ok, Module} = (my_wasm:mod(core)):load(Program),
-{ok, Status, Stdout, Stderr} = my_wasm:run_program(Module, Wasi).
+{ok, Status, Stdout, Stderr} = Wasi:run(Module, Config).
 ```
+
+A component goes through `my_wasm:mod(component)`:
+
+```erlang
+Component = my_wasm:mod(component),
+{ok, Inst} = Component:instantiate(Bytes, #{}),
+{ok, Result} = Component:call(Inst, ~"greet", {[string], string}, [~"you"]),
+ok = Component:destroy(Inst).
+```
+
+Give a typed host function with `Component:import_fun/2`, which both take. The
+`wasi_preview2` and `wasi_preview3` runners and `wasm_actor` have the same
+calls here under the `wasmtime_` prefix.
 
 ## Put deadlines in a worker
 
@@ -202,7 +193,8 @@ the runtime's application, `wasm` or `erlang_wasmtime`.
 | `timeout` on a call | does not stop the guest | stops it | use a worker |
 | Snapshot of an instance with imports | needs `snapshot_hooks` | `snapshot_hooks` is refused | add the option on erlang_wasm only |
 | Saved snapshot files | its own format | its own format | save one per runtime |
-| `max_depth`, `max_host_calls`, `max_heap_words` | enforced | refused | leave them out |
+| `max_host_calls`, `max_heap_words` | on instances and workers | workers only | set them on a worker |
+| `max_depth` | enforced | refused | leave it out |
 | `{error, Reason}` from a host function | not accepted | traps | answer `{trap, Reason}` |
 
 Only erlang_wasm has `wasm:encode/1`, the compiled tier and the `link`
@@ -216,10 +208,11 @@ Keep this code on one runtime:
 
 | You use | Why |
 |---|---|
-| components | erlang_wasm calls them through `wasm_component`; here they go through `wasmtime`. The terms for WIT values are the same, and so are `host_new`, `host_get`, `host_update`, `host_drop` and `host_live` |
+| a component's raw host function, taking flat values | erlang_wasm's receives the core values; here a two-argument fun receives terms. Use `import_fun/2` |
+| component snapshots and live streams | not available here |
 | WASI import maps you change or wrap | Wasmtime implements WASI itself |
-| serving or filtering HTTP, address rules on sockets, `wasi:nn`, streams of a component | not available here |
-| `wasm_actor`, snapshot script adapters, the reaper, the conformance kit | not available here |
+| serving or filtering HTTP, address rules on sockets, `wasi:nn` | not available here |
+| snapshot script adapters, the reaper, the conformance kit | not available here |
 
 ## Notes
 

@@ -147,7 +147,7 @@ runs on, but may not call it (`enqueue` would queue behind itself).
 | `{wasmtime_result, Ref, Id, Result}` | worker (`send_result`) | the request's caller | a request ended and was not cancelled |
 | `{wasmtime_result, Ref, Id, ok}` | worker, as it exits | the `destroy/1` caller | the store is freed |
 | `{wasmtime_host_call, Ref, HostId, {Module, Name}, Args}` | worker (`host_exchange`) | the `host` process, or the caller for the start section | the guest called an import backed by Erlang |
-| `{wasmtime_stream, Ref, stdout \| stderr \| channel, Bytes}` | worker (`stream_send`) | the `stream` process | the guest wrote to a `stream` stdio or called `erlang.send` |
+| `{wasmtime_stream, Ref, stdout \| stderr \| channel, Bytes}` | worker (`stream_send`) | the `stream` process; with output sinks, the running request's caller | the guest wrote to a `stream` stdio or called `erlang.send` |
 
 Replies go the other way through NIFs, never messages: `host_reply/3`,
 `send/2`, `close/1`. Terms in a message are built in a fresh
@@ -342,10 +342,18 @@ must be compiled with the same settings, which is why
 `scripts/precompile-shims.sh` mirrors `make_config` flag by flag and
 `shim_files_load` in the tests fails when they drift.
 
+With a `stdout` or `stderr` sink (a pid, device or fun) the instance is told
+`stream => caller`: bytes go to whoever waits for the request, which delivers
+them in `wait_result/3`, and forwards what has no sink to the `stream`
+process. One sender and one receiver keep them ahead of the result. Bytes
+written with no request running are dropped.
+
 ## The module cache
 
-`load/1,2` is the one part of the library with an Erlang process:
-`wasmtime_module_cache`, under `wasmtime_sup`. It maps the hash of the
+`load/1,2` needs an Erlang process, `wasmtime_module_cache`, under
+`wasmtime_sup`; the only other one is the actors' registry, which monitors
+actors and deletes the row of one that was killed. The actors' table belongs
+to the supervisor so a registry restart keeps it. It maps the hash of the
 source and its engine key to a module reference, counts claims per loading
 process and gives them back when that process dies. Rules:
 

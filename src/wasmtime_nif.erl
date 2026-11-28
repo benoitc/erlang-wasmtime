@@ -10,6 +10,7 @@
     module_imports/1,
     module_exports/1,
     module_func_types/1,
+    module_import_types/1,
     serialize/1,
     deserialize/2,
     instantiate/4,
@@ -55,6 +56,7 @@
     module_imports/1,
     module_exports/1,
     module_func_types/1,
+    module_import_types/1,
     serialize/1,
     deserialize/2,
     instantiate/4,
@@ -111,6 +113,7 @@ module_kind(_Mod) -> erlang:nif_error(not_loaded).
 module_imports(_Mod) -> erlang:nif_error(not_loaded).
 module_exports(_Mod) -> erlang:nif_error(not_loaded).
 module_func_types(_Mod) -> erlang:nif_error(not_loaded).
+module_import_types(_Mod) -> erlang:nif_error(not_loaded).
 serialize(_Mod) -> erlang:nif_error(not_loaded).
 deserialize(_Bin, _Key) -> erlang:nif_error(not_loaded).
 instantiate(_Mod, _Opts, _Ref, _Id) -> erlang:nif_error(not_loaded).

@@ -57,6 +57,21 @@ milliseconds or `infinity`.
 }).
 ```
 
+## Bound host calls and memory
+
+```erlang
+{ok, W} = wasmtime_instance_worker:start_link(Mod, #{
+    imports => Imports,
+    limits => #{max_host_calls => 100, max_heap_words => 8 * 1024 * 1024}
+}).
+```
+
+A request that calls the host more than `max_host_calls` times fails with
+`kind => host_call_limit`. `max_heap_words` bounds the Erlang heap of the
+process running your host functions: past it the process is killed and the
+request answers `kind => worker_died`. `wasmtime_script_worker` takes both in
+its limits too.
+
 ## Run requests in parallel
 
 One worker runs one request at a time. Start several over the same module

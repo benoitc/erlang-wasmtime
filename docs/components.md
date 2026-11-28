@@ -34,6 +34,20 @@ function as `{~"iface#func", func}`, the name `call/3` takes.
 erlang_wasm's `call(Inst, Export, {Params, Result}, Args)` is accepted too;
 the signature is read from the component instead.
 
+## With erlang_wasm's calls
+
+`wasmtime_component` has the functions of erlang_wasm's `wasm_component`, for
+code written around them:
+
+```erlang
+{ok, Inst} = wasmtime_component:instantiate(Bytes, Imports),
+{ok, Result} = wasmtime_component:call(Inst, ~"greet", {[string], string}, [~"you"]),
+ok = wasmtime_component:destroy(Inst).
+```
+
+The signature is read from the component, so what you pass is not checked.
+`$root` names the component's own functions in the import map, as `""` does.
+
 ## How values look
 
 | WIT | Erlang |

@@ -16,6 +16,15 @@
 - Breaking: erlang_wasm options this library cannot honour, unknown `wasi`
   keys, and `max_depth` or `max_host_calls` on a call are refused instead of
   ignored.
+- erlang_wasm's `wasi`, `wasi_preview1`, `wasi_preview2`, `wasi_preview3`
+  and `wasm_actor` have their counterparts here under the `wasmtime_` prefix,
+  and `wasmtime_component` takes `wasm_component`'s calls.
+- `extern/2` gives one instance's function to another.
+- `stdout` and `stderr` can go to a process, an io device or a fun, and a
+  core module's randomness can be seeded or withheld.
+- Both workers take `max_host_calls` and `max_heap_words`, and the module
+  cache can be capped by size, by load rate and by module size.
+- Components accept imports named under `$root`.
 - A new guide explains how to write code that runs on this library and on
   erlang_wasm, and how to switch between them.
 - Host functions can be given as `{Module, Function}` and can answer

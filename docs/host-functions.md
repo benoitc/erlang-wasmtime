@@ -104,6 +104,22 @@ process's `receive`, which is not running while that process executes the
 host fun. Use `host_timeout` for the guest side and keep host funs short, or
 hand long work to another process.
 
+## Link one instance to another
+
+`extern/2` takes a function an instance exports, to give to another as an
+import.
+
+```erlang
+{ok, Add} = wasmtime:extern(Library, ~"add"),
+{ok, Inst} = wasmtime:instantiate(Mod, #{{~"lib", ~"add"} => Add}, #{}).
+```
+
+The call runs on the library's thread while the caller's waits, through the
+process that made the outer call. An error in the library is the error of that
+call. Only functions can be shared, and a signature that does not match is
+`kind => incompatible_import_type`. Instances that call each other in a loop
+get `kind => reentrant`.
+
 ## Notes
 
 - A host function is the guest asking Erlang and waiting for the answer. For

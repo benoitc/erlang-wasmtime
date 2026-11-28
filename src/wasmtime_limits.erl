@@ -20,10 +20,12 @@ A `timeout` or `fuel` given to `call/4` wins over the instance's.
 `max_memory_pages` is the same cap as `memory_limit`, which wins when both
 are given.
 
-erlang_wasm's `max_depth`, `max_heap_words` and `max_host_calls` are refused
-with `kind => invalid_limits`: the guest runs on its own thread with
-Wasmtime's stack limit, holds no Erlang heap, and host calls are bounded in
-time by `host_timeout`, not counted.
+`max_host_calls` and `max_heap_words` are the workers'
+(`wasmtime_instance_worker`, `wasmtime_script_worker`): host calls counted per
+request, and a bound on the Erlang heap of the process that runs it.
+`wasmtime:instantiate/3` and `call/4` refuse them with `kind =>
+invalid_limits`, as everything refuses erlang_wasm's `max_depth`: the guest
+runs on its own thread with Wasmtime's stack limit.
 
 The presets hold no `fuel`, since a module compiled without it refuses the
 option. Add it yourself for a metered module.
@@ -36,7 +38,9 @@ option. Add it yourself for a metered module.
 -type limits() :: #{
     timeout => timeout(),
     fuel => pos_integer() | infinity,
-    max_memory_pages => non_neg_integer() | infinity
+    max_memory_pages => non_neg_integer() | infinity,
+    max_host_calls => non_neg_integer() | infinity,
+    max_heap_words => pos_integer()
 }.
 
 -doc "Limits for a module you did not write: one second per call, 16 MB of memory.".
@@ -74,8 +78,8 @@ validate(Limits) when is_map(Limits) ->
         {fuel, Budget},
         {max_memory_pages, Pages},
         {max_depth, Refused},
-        {max_heap_words, Refused},
-        {max_host_calls, Refused}
+        {max_heap_words, fun(V) -> is_integer(V) andalso V > 0 end},
+        {max_host_calls, Pages}
     ],
     case [K || {K, Pred} <- Checks, maps:is_key(K, Limits), not Pred(maps:get(K, Limits))] of
         [] -> ok;

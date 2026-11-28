@@ -290,7 +290,7 @@ argument list alone and return the value itself, erlang_wasm's typed form
     | fun(([term()]) -> term()).
 
 -doc "A function export taken with `extern/2`, to give to another instance.".
--nominal extern() ::
+-type extern() ::
     {wasm_func, fun((term(), [value()]) -> {ok, [value()]}), {[valtype()], [valtype()]}}.
 
 -doc "What a host function receives first. Memory functions accept it.".

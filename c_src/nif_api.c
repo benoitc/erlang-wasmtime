@@ -19,12 +19,12 @@ static ERL_NIF_TERM nif_wat2wasm(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
   ErlNifBinary bin;
   if (!enif_inspect_binary(env, argv[0], &bin)) return enif_make_badarg(env);
 #if !NIF_HAVE_WAT
-  return mk_error_s(env, "compile", "unavailable",
+  return mk_error_s(env, "link", "unavailable",
                     "this build of erlang_wasmtime cannot read the text format");
 #else
   wasm_byte_vec_t wasm;
   wasmtime_error_t *e = wasmtime_wat2wasm((const char *)bin.data, bin.size, &wasm);
-  if (e) return error_to_term(env, e, "compile");
+  if (e) return error_to_term(env, e, "wat");
   ERL_NIF_TERM t = mk_binary(env, wasm.data, wasm.size);
   wasm_byte_vec_delete(&wasm);
   return enif_make_tuple2(env, atom_ok, t);
@@ -37,7 +37,7 @@ static ERL_NIF_TERM nif_compile(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
   int is_wat = enif_is_identical(argv[1], atom_true);
 #if !NIF_HAVE_COMPILER
   (void)is_wat;
-  return mk_error_s(env, "compile", "unavailable",
+  return mk_error_s(env, "link", "unavailable",
                     "this build of erlang_wasmtime has no compiler: use deserialize/1");
 #else
   wasm_byte_vec_t wasm = {0, NULL};
@@ -45,11 +45,11 @@ static ERL_NIF_TERM nif_compile(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
   size_t size = bin.size;
   if (is_wat) {
 #if !NIF_HAVE_WAT
-    return mk_error_s(env, "compile", "unavailable",
+    return mk_error_s(env, "link", "unavailable",
                       "this build of erlang_wasmtime cannot read the text format");
 #else
     wasmtime_error_t *e = wasmtime_wat2wasm((const char *)bin.data, bin.size, &wasm);
-    if (e) return error_to_term(env, e, "compile");
+    if (e) return error_to_term(env, e, "wat");
     data = (const uint8_t *)wasm.data;
     size = wasm.size;
 #endif
@@ -74,7 +74,7 @@ static ERL_NIF_TERM nif_compile(ErlNifEnv *env, int argc, const ERL_NIF_TERM arg
     goto made;
 #else
     if (is_wat) wasm_byte_vec_delete(&wasm);
-    return mk_error_s(env, "compile", "unavailable",
+    return mk_error_s(env, "link", "unavailable",
                       "this build of erlang_wasmtime has no component model");
 #endif
   }
@@ -104,7 +104,7 @@ static ERL_NIF_TERM nif_validate(ErlNifEnv *env, int argc, const ERL_NIF_TERM ar
   ErlNifBinary bin;
   if (!enif_inspect_binary(env, argv[0], &bin)) return enif_make_badarg(env);
 #if !NIF_HAVE_COMPILER
-  return mk_error_s(env, "compile", "unavailable", "this build of erlang_wasmtime cannot validate");
+  return mk_error_s(env, "link", "unavailable", "this build of erlang_wasmtime cannot validate");
 #else
   ERL_NIF_TERM err;
   engine_t *eng = engine_for(env, argv[1], &err);
@@ -129,7 +129,7 @@ static ERL_NIF_TERM nif_serialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM a
   module_res_t *m;
   if (!enif_get_resource(env, argv[0], module_type, (void **)&m)) return enif_make_badarg(env);
 #if !NIF_HAVE_COMPILER
-  return mk_error_s(env, "compile", "unavailable",
+  return mk_error_s(env, "link", "unavailable",
                     "this build of erlang_wasmtime cannot serialize modules");
 #else
   wasm_byte_vec_t out;
@@ -140,7 +140,7 @@ static ERL_NIF_TERM nif_serialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM a
   else
 #endif
     e = wasmtime_module_serialize(m->mod, &out);
-  if (e) return error_to_term(env, e, "compile");
+  if (e) return error_to_term(env, e, "serialize");
   ERL_NIF_TERM t = mk_binary(env, out.data, out.size);
   wasm_byte_vec_delete(&out);
   return enif_make_tuple2(env, atom_ok, t);
@@ -235,7 +235,7 @@ static ERL_NIF_TERM nif_deserialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM
       wasmtime_error_t *e2 = load_module(feng, &src, &mod);
       if (e2) {
         wasmtime_error_delete(e2);
-        return error_to_term(env, e, "compile");
+        return error_to_term(env, e, "incompatible_module");
       }
       wasmtime_error_delete(e);
       eng = feng;
@@ -244,7 +244,7 @@ static ERL_NIF_TERM nif_deserialize(ErlNifEnv *env, int argc, const ERL_NIF_TERM
     eng = engine_for(env, argv[1], &err);
     if (!eng) return err;
     e = load_module(eng, &src, &mod);
-    if (e) return error_to_term(env, e, "compile");
+    if (e) return error_to_term(env, e, "incompatible_module");
   }
   module_res_t *m = module_res_new(mod.mod, eng);
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
@@ -384,6 +384,7 @@ static ERL_NIF_TERM nif_instantiate(ErlNifEnv *env, int argc, const ERL_NIF_TERM
   pthread_mutex_init(&inst->mu, NULL);
   pthread_cond_init(&inst->cv, NULL);
   inst->host.reply_env = enif_alloc_env();
+  inst->host.error_env = enif_alloc_env();
   inst->ref_env = enif_alloc_env();
   inst->ref = enif_make_copy(inst->ref_env, argv[2]);
   inst->wasm.mod = m;
@@ -421,7 +422,7 @@ static ERL_NIF_TERM nif_instantiate(ErlNifEnv *env, int argc, const ERL_NIF_TERM
     inst->queue.exited = 1;
     pthread_mutex_unlock(&inst->mu);
     enif_release_resource(inst); /* the thread's reference, never taken */
-    return mk_error_s(env, "link", "thread", "could not start instance thread");
+    return mk_error_s(env, "exhaustion", "thread", "could not start instance thread");
   }
   return enif_make_tuple2(env, atom_ok, ht);
 }
@@ -442,7 +443,7 @@ static ERL_NIF_TERM nif_global_get(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
   if (err) return err;
   wasmtime_val_t v;
   wasmtime_global_get(inst->wasm.ctx, &ext.of.global, &v);
-  ERL_NIF_TERM r = term_or_unsupported(env, "global", val_to_term(env, inst, &v));
+  ERL_NIF_TERM r = term_or_unsupported(env, val_to_term(env, inst, &v));
   pthread_mutex_unlock(&inst->mu);
   return r;
 }
@@ -461,13 +462,13 @@ static ERL_NIF_TERM nif_global_set(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
   vtype_of(wasm_globaltype_content(gt), &t);
   const char *kind;
   if (wasm_globaltype_mutability(gt) == WASM_CONST) {
-    r = mk_error_s(env, "global", "immutable", "the global is not mutable");
+    r = mk_error_s(env, "link", "immutable", "the global is not mutable");
   } else if ((kind = term_to_val(env, inst, argv[2], &t, &v))) {
-    r = conv_error(env, "global", kind);
+    r = conv_error(env, kind, "badarg");
   } else {
     wasmtime_error_t *e = wasmtime_global_set(inst->wasm.ctx, &ext.of.global, &v);
     wasmtime_val_unroot(&v);
-    r = e ? error_to_term(env, e, "global") : atom_ok;
+    r = e ? error_to_term(env, e, "badarg") : atom_ok;
   }
   wasm_globaltype_delete(gt);
   pthread_mutex_unlock(&inst->mu);
@@ -499,9 +500,9 @@ static ERL_NIF_TERM nif_table_get(ErlNifEnv *env, int argc, const ERL_NIF_TERM a
   wasmtime_val_t v;
   ERL_NIF_TERM r;
   if (!wasmtime_table_get(inst->wasm.ctx, &ext.of.table, index, &v))
-    r = mk_error_s(env, "table", "out_of_bounds", "index is past the table's size");
+    r = mk_error_s(env, "trap", "out_of_bounds_table_access", "index is past the table's size");
   else
-    r = term_or_unsupported(env, "table", val_to_term(env, inst, &v));
+    r = term_or_unsupported(env, val_to_term(env, inst, &v));
   pthread_mutex_unlock(&inst->mu);
   return r;
 }
@@ -528,11 +529,11 @@ static ERL_NIF_TERM nif_table_set(ErlNifEnv *env, int argc, const ERL_NIF_TERM a
   ERL_NIF_TERM r;
   const char *kind = term_to_val(env, inst, argv[3], &t, &v);
   if (kind) {
-    r = conv_error(env, "table", kind);
+    r = conv_error(env, kind, "badarg");
   } else {
     wasmtime_error_t *e = wasmtime_table_set(inst->wasm.ctx, &ext.of.table, index, &v);
     wasmtime_val_unroot(&v);
-    r = e ? error_to_term(env, e, "table") : atom_ok;
+    r = e ? error_to_term(env, e, "badarg") : atom_ok;
   }
   pthread_mutex_unlock(&inst->mu);
   return r;
@@ -553,12 +554,12 @@ static ERL_NIF_TERM nif_table_grow(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
   ERL_NIF_TERM r;
   const char *kind = term_to_val(env, inst, argv[3], &t, &init);
   if (kind) {
-    r = conv_error(env, "table", kind);
+    r = conv_error(env, kind, "badarg");
   } else {
     uint64_t prev = 0;
     wasmtime_error_t *e = wasmtime_table_grow(inst->wasm.ctx, &ext.of.table, delta, &init, &prev);
     wasmtime_val_unroot(&init);
-    r = e ? error_to_term(env, e, "table")
+    r = e ? error_to_term(env, e, "badarg")
           : enif_make_tuple2(env, atom_ok, enif_make_uint64(env, prev));
   }
   pthread_mutex_unlock(&inst->mu);
@@ -573,20 +574,20 @@ static ERL_NIF_TERM nif_fuel_remaining(ErlNifEnv *env, int argc, const ERL_NIF_T
   ERL_NIF_TERM r;
   uint64_t fuel = 0;
   if (inst->queue.state == ST_RUNNING) {
-    r = mk_error_s(env, "call", "busy", "guest is running");
+    r = mk_error_s(env, "link", "instance_busy", "guest is running");
   } else if (!inst->wasm.instantiated || !inst->wasm.mod->engine->fuel) {
-    r = mk_error_s(env, "call", "fuel_disabled",
+    r = mk_error_s(env, "link", "fuel_disabled",
                    "the module was not compiled with fuel metering: compile with fuel => true");
   } else {
     wasmtime_error_t *e = wasmtime_context_get_fuel(inst->wasm.ctx, &fuel);
-    r = e ? error_to_term(env, e, "call")
+    r = e ? error_to_term(env, e, "fuel_disabled")
           : enif_make_tuple2(env, atom_ok, enif_make_uint64(env, fuel));
   }
   pthread_mutex_unlock(&inst->mu);
   return r;
 }
 
-/* host_reply(Handle, HostId, {ok, Results} | {error, Message}) -> ok */
+/* host_reply(Handle, HostId, {ok, Results} | {error, Map}) -> ok */
 static ERL_NIF_TERM nif_host_reply(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   instance_t *inst;
   ErlNifUInt64 id;
@@ -659,7 +660,7 @@ static ERL_NIF_TERM nif_read_memory(ErlNifEnv *env, int argc, const ERL_NIF_TERM
   size_t size = wasmtime_memory_data_size(inst->wasm.ctx, &mem);
   ERL_NIF_TERM r;
   if (ptr > size || len > size - ptr) {
-    r = mk_error_s(env, "memory", "out_of_bounds", "range is outside linear memory");
+    r = mk_error_s(env, "trap", "out_of_bounds_memory_access", "range is outside linear memory");
   } else {
     const uint8_t *data = wasmtime_memory_data(inst->wasm.ctx, &mem);
     r = enif_make_tuple2(env, atom_ok, mk_binary(env, data + ptr, len));
@@ -681,7 +682,7 @@ static ERL_NIF_TERM nif_write_memory(ErlNifEnv *env, int argc, const ERL_NIF_TER
   size_t size = wasmtime_memory_data_size(inst->wasm.ctx, &mem);
   ERL_NIF_TERM r;
   if (ptr > size || bin.size > size - ptr) {
-    r = mk_error_s(env, "memory", "out_of_bounds", "range is outside linear memory");
+    r = mk_error_s(env, "trap", "out_of_bounds_memory_access", "range is outside linear memory");
   } else {
     memcpy(wasmtime_memory_data(inst->wasm.ctx, &mem) + ptr, bin.data, bin.size);
     r = atom_ok;
@@ -786,8 +787,14 @@ static void open_atoms(ErlNifEnv *env) {
   A(atom_neg_infinity, "neg_infinity");
   A(atom_class, "class");
   A(atom_kind, "kind");
-  A(atom_message, "message");
-  A(atom_status, "status");
+  A(atom_msg, "msg");
+  A(atom_ctx, "ctx");
+  A(atom_detail, "detail");
+  A(atom_name, "name");
+  A(atom_reason, "reason");
+  A(atom_wasi_exit, "wasi_exit");
+  A(atom_module, "module");
+  A(atom_fuel, "fuel");
   A(atom_not_running, "not_running");
   A(atom_func, "func");
   A(atom_global, "global");

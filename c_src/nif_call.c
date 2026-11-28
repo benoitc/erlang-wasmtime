@@ -12,11 +12,12 @@ static ERL_NIF_TERM call_raw(instance_t *inst, req_t *req, ErlNifEnv *out, wasmt
   ERL_NIF_TERM l = req->args, h;
   for (size_t i = 0; enif_get_list_cell(env, l, &h, &l); i++)
     if (!term_to_raw(env, h, kind_of(ps->data[i]), &vals[i]))
-      return mk_error_s(out, "call", "badarg", "argument does not match the parameter type");
+      return mk_error_s(out, "link", "argument_type",
+                        "argument is not a value of the declared type");
   wasm_trap_t *trap = NULL;
   size_t nvals = ps->size > rs->size ? ps->size : rs->size;
   wasmtime_error_t *e = wasmtime_func_call_unchecked(inst->wasm.ctx, func, vals, nvals, &trap);
-  ERL_NIF_TERM result = outcome(inst, out, e, trap, "call");
+  ERL_NIF_TERM result = outcome(inst, out, e, trap, "call_failed");
   if (!enif_is_identical(result, atom_ok)) return result;
   ERL_NIF_TERM list = enif_make_list(out, 0);
   for (size_t i = rs->size; i > 0; i--)
@@ -38,14 +39,14 @@ static ERL_NIF_TERM call_typed(instance_t *inst, req_t *req, ErlNifEnv *out, was
     const char *kind = term_to_val(env, inst, h, &t, &args[nargs]);
     if (kind) {
       unroot_vals(args, nargs);
-      return conv_error(out, "call", kind);
+      return conv_error(out, kind, "argument_type");
     }
   }
   wasm_trap_t *trap = NULL;
   wasmtime_error_t *e =
       wasmtime_func_call(inst->wasm.ctx, func, args, nargs, results, rs->size, &trap);
   unroot_vals(args, nargs);
-  ERL_NIF_TERM result = outcome(inst, out, e, trap, "call");
+  ERL_NIF_TERM result = outcome(inst, out, e, trap, "call_failed");
   if (!enif_is_identical(result, atom_ok)) return result;
   ERL_NIF_TERM list = enif_make_list(out, 0);
   int bad = 0;
@@ -54,8 +55,18 @@ static ERL_NIF_TERM call_typed(instance_t *inst, req_t *req, ErlNifEnv *out, was
     if (!t) bad = 1;
     list = enif_make_list_cell(out, t ? t : atom_undefined, list);
   }
-  if (bad) return mk_error_s(out, "call", "unsupported_type", "a result cannot cross the boundary");
+  if (bad) return mk_error_s(out, "link", "unsupported_type", "a result cannot cross the boundary");
   return enif_make_tuple2(out, atom_ok, list);
+}
+
+/* The fuel a `fuel` option asks for: an integer, or all there is for
+ * `infinity` on a metered engine. 0 leaves what the store holds, and then
+ * `*fuel` is not to be read: enif_get_uint64 may write it as it fails. */
+int fuel_of(ErlNifEnv *env, ERL_NIF_TERM term, const engine_t *engine, ErlNifUInt64 *fuel) {
+  if (enif_get_uint64(env, term, fuel)) return 1;
+  if (!engine->fuel || !enif_is_identical(term, atom_infinity)) return 0;
+  *fuel = UINT64_MAX;
+  return 1;
 }
 
 ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
@@ -68,18 +79,19 @@ ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
   ref_t *r;
   if (enif_get_resource(env, req->name, ref_type, (void **)&r)) {
     /* call_ref: a funcref this instance handed out */
-    if (r->inst != inst) return conv_error(out, "call", "wrong_instance");
-    if (r->kind != REF_FUNC) return mk_error_s(out, "call", "badarg", "not a funcref");
+    if (r->inst != inst) return conv_error(out, "wrong_instance", "badarg");
+    if (r->kind != REF_FUNC) return mk_error_s(out, "link", "badarg", "not a funcref");
     func = r->of.func;
   } else {
     if (!enif_inspect_iolist_as_binary(env, req->name, &name))
-      return mk_error_s(out, "call", "badarg", "export name must be a binary");
+      return mk_error_s(out, "link", "badarg", "export name must be a binary");
     wasmtime_extern_t ext;
     if (!wasmtime_instance_export_get(inst->wasm.ctx, &inst->wasm.instance, (const char *)name.data,
                                       name.size, &ext))
-      return mk_error(out, "call", "no_such_export", (const char *)name.data, name.size);
+      return mk_name_error(out, "link", "unknown_export", "unknown export", name.data, name.size);
     if (ext.kind != WASMTIME_EXTERN_FUNC)
-      return mk_error(out, "call", "not_a_function", (const char *)name.data, name.size);
+      return mk_name_error(out, "link", "not_a_function", "export is not a function", name.data,
+                           name.size);
     func = ext.of.func;
   }
 
@@ -88,27 +100,27 @@ ERL_NIF_TERM do_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
   ERL_NIF_TERM result;
   unsigned nargs;
   if (!enif_get_list_length(env, req->args, &nargs) || nargs != ps->size) {
-    result = mk_error_s(out, "call", "badarity", "wrong number of arguments");
+    result = arity_error(out, ps->size, enif_make_copy(out, req->args));
     goto done;
   }
   if (ps->size > MAX_VALS || rs->size > MAX_VALS) {
-    result = mk_error_s(out, "call", "unsupported_type", "too many parameters or results");
+    result = mk_error_s(out, "link", "unsupported_type", "too many parameters or results");
     goto done;
   }
   shape_t sh = shape_of(ft);
   if (sh.exn || (sh.refs && sh.v128)) {
-    result = mk_error_s(out, "call", "unsupported_type",
+    result = mk_error_s(out, "link", "unsupported_type",
                         sh.exn ? "exception references cannot cross the boundary"
                                : "v128 and references cannot mix in one signature");
     goto done;
   }
   ErlNifUInt64 fuel;
-  if (enif_get_uint64(env, req->opts, &fuel)) {
+  if (fuel_of(env, req->opts, inst->wasm.mod->engine, &fuel)) {
     wasmtime_error_t *fe = wasmtime_context_set_fuel(inst->wasm.ctx, fuel);
     if (fe) {
       wasmtime_error_delete(fe);
       result =
-          mk_error_s(out, "call", "fuel_disabled",
+          mk_error_s(out, "link", "fuel_disabled",
                      "the module was not compiled with fuel metering: compile with fuel => true");
       goto done;
     }

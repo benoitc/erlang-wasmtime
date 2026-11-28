@@ -15,11 +15,20 @@ static void add_ms(struct timespec *ts, unsigned ms) {
   }
 }
 
-static void set_host_failure(instance_t *inst, const char *msg, size_t len) {
-  enif_free(inst->host.msg);
-  inst->host.msg = enif_alloc(len + 1);
-  memcpy(inst->host.msg, msg, len);
-  inst->host.msg[len] = 0;
+/* A host call that failed here, not in the fun: builds the host_error the
+ * request answers with. `detail` may be NULL. */
+static void set_host_failure(instance_t *inst, const hostfn_t *fn, const char *reason,
+                             const char *detail) {
+  ErlNifEnv *env = inst->host.error_env;
+  enif_clear_env(env);
+  ERL_NIF_TERM key = enif_make_tuple2(env, mk_binary(env, fn->module, strlen(fn->module)),
+                                      mk_binary(env, fn->name, strlen(fn->name)));
+  ERL_NIF_TERM keys[3] = {atom_reason, atom_host, atom_detail};
+  ERL_NIF_TERM vals[3] = {mk_atom(env, reason), key, 0};
+  if (detail) vals[2] = mk_binary(env, detail, strlen(detail));
+  ERL_NIF_TERM ctx;
+  enif_make_map_from_arrays(env, keys, vals, detail ? 3 : 2, &ctx);
+  inst->host.error = mk_error_ctx(env, "trap", "host_error", "host error", 10, ctx);
   inst->host.failed = 1;
 }
 
@@ -38,7 +47,7 @@ ERL_NIF_TERM outcome(instance_t *inst, ErlNifEnv *out, wasmtime_error_t *e, wasm
     if (e) wasmtime_error_delete(e);
     if (trap) wasm_trap_delete(trap);
     if (inst->interrupted_fired) return mk_error_s(out, "trap", "interrupt", "interrupted");
-    return mk_error_s(out, "host", "host_error", inst->host.msg ? inst->host.msg : "host error");
+    return enif_make_copy(out, inst->host.error);
   }
   if (e) return error_to_term(out, e, cls);
   if (trap) return trap_to_term(out, trap);
@@ -81,7 +90,7 @@ static void spin_for_reply(instance_t *inst) {
 /* Sends {wasmtime_host_call, Ref, Id, {Module, Name}, Args} (`args` lives in
  * `menv`, consumed here) and waits for the reply. Returns with the mutex
  * held. On HOST_OK, *results is the reply's result list in inst->host.reply_env;
- * on HOST_FAILED, inst->host.failed is set or *fail names the reason. */
+ * on HOST_FAILED, inst->host.failed is set or *fail is the reason's atom. */
 enum host_status host_exchange(instance_t *inst, hostfn_t *fn, ErlNifEnv *menv, ERL_NIF_TERM args,
                                ERL_NIF_TERM *results, const char **fail) {
   *fail = NULL;
@@ -111,14 +120,14 @@ enum host_status host_exchange(instance_t *inst, hostfn_t *fn, ErlNifEnv *menv, 
   enif_free_env(menv);
   int interrupted = 0;
   if (!sent) {
-    *fail = "host process is gone";
+    *fail = "host_gone";
   } else {
     spin_for_reply(inst);
     struct timespec deadline;
     add_ms(&deadline, inst->host.timeout_ms);
     while (!inst->host.has_reply && !inst->host.abort) {
       if (pthread_cond_timedwait(&inst->cv, &inst->mu, &deadline) == ETIMEDOUT) {
-        if (!inst->host.has_reply && !inst->host.abort) *fail = "host function timed out";
+        if (!inst->host.has_reply && !inst->host.abort) *fail = "host_timeout";
         break;
       }
     }
@@ -128,21 +137,22 @@ enum host_status host_exchange(instance_t *inst, hostfn_t *fn, ErlNifEnv *menv, 
   if (interrupted) return HOST_INTERRUPTED;
   if (*fail) return HOST_FAILED;
 
-  /* {ok, Results} | {error, Message :: binary()} */
+  /* {ok, Results} | {error, Map}: the error the request answers with */
   ErlNifEnv *renv = inst->host.reply_env;
   const ERL_NIF_TERM *tup;
   int arity;
-  ErlNifBinary bin;
   if (!enif_get_tuple(renv, inst->host.reply, &arity, &tup) || arity != 2) {
-    *fail = "host function returned a malformed reply";
+    *fail = "bad_reply";
     return HOST_FAILED;
   }
   if (enif_is_identical(tup[0], atom_error)) {
-    if (!enif_inspect_iolist_as_binary(renv, tup[1], &bin)) {
-      bin.data = (unsigned char *)"host error";
-      bin.size = 10;
+    if (!enif_is_map(renv, tup[1])) {
+      *fail = "bad_reply";
+      return HOST_FAILED;
     }
-    set_host_failure(inst, (const char *)bin.data, bin.size);
+    enif_clear_env(inst->host.error_env);
+    inst->host.error = enif_make_copy(inst->host.error_env, inst->host.reply);
+    inst->host.failed = 1;
     return HOST_FAILED;
   }
   *results = tup[1];
@@ -150,13 +160,15 @@ enum host_status host_exchange(instance_t *inst, hostfn_t *fn, ErlNifEnv *menv, 
 }
 
 /* After host_exchange, with the mutex released: the trap to return, if any. */
-wasm_trap_t *host_outcome(instance_t *inst, enum host_status st, const char *fail) {
+wasm_trap_t *host_outcome(instance_t *inst, const hostfn_t *fn, enum host_status st,
+                          const char *fail, const char *detail) {
   if (st == HOST_INTERRUPTED) {
     inst->interrupted_fired = 1;
     return wasmtime_trap_new("interrupted", 11);
   }
-  if (fail) set_host_failure(inst, fail, strlen(fail));
-  if (inst->host.failed) return wasmtime_trap_new(inst->host.msg, strlen(inst->host.msg));
+  if (fail) set_host_failure(inst, fn, fail, detail);
+  /* outcome() answers with the stored error; this only unwinds the guest */
+  if (inst->host.failed) return wasmtime_trap_new("host error", 10);
   return NULL;
 }
 
@@ -186,16 +198,15 @@ wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtime_val_r
     size_t i = 0;
     while (i < nresults && enif_get_list_cell(renv, l, &h, &l)) {
       if (!term_to_raw(renv, h, kind_of(rt->data[i]), &vals[i])) {
-        fail = "host function returned a value of the wrong type";
+        fail = "result_type";
         break;
       }
       i++;
     }
-    if (!fail && (i != nresults || !enif_is_empty_list(renv, l)))
-      fail = "host function returned the wrong number of values";
+    if (!fail && (i != nresults || !enif_is_empty_list(renv, l))) fail = "result_arity";
   }
   pthread_mutex_unlock(&inst->mu);
-  return host_outcome(inst, st, fail);
+  return host_outcome(inst, fn, st, fail, NULL);
 }
 
 /* The same for imports with references in their signature: Wasmtime hands
@@ -230,15 +241,14 @@ wasm_trap_t *host_callback_typed(void *envp, wasmtime_caller_t *caller, const wa
       vtype_t t;
       vtype_of(rt->data[i], &t);
       if (term_to_val(renv, inst, h, &t, &results[i])) {
-        fail = "host function returned a value of the wrong type";
+        fail = "result_type";
         break;
       }
       i++;
     }
-    if (!fail && (i != nresults || !enif_is_empty_list(renv, l)))
-      fail = "host function returned the wrong number of values";
+    if (!fail && (i != nresults || !enif_is_empty_list(renv, l))) fail = "result_arity";
     if (fail) unroot_vals(results, i);
   }
   pthread_mutex_unlock(&inst->mu);
-  return host_outcome(inst, st, fail);
+  return host_outcome(inst, fn, st, fail, NULL);
 }

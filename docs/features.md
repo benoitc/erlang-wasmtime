@@ -11,7 +11,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | WebAssembly proposals | Wasmtime 51 defaults, verified by compiling probe modules: bulk memory, wide arithmetic, reference types, multi-value, SIMD, relaxed SIMD, tail calls, extended const, multi-memory, memory64, exceptions, GC and typed function references, threads and shared memories |
 | Instantiate with host functions | yes, function imports only; an import you give wins over the WASI function of the same name; `instantiate/3` takes the import map as erlang_wasm does, `instantiate/2` the import map or the options |
 | Call exports | yes, `i32`, `i64`, `f32`, `f64`, `v128` values |
-| Traps | reported with `class => trap` and a `kind` per Wasmtime trap code |
+| Traps | erlang_wasm's kinds, `class => trap` or `exhaustion` (fuel, call stack) |
 | Interruption | `timeout` option and `interrupt/1`, epoch based: the epoch is bumped as they fire, so the guest stops at its next loop back-edge or call |
 | Memory cap | `memory_limit`, default 256 MB, enforced by the store limiter |
 | Table, element and instance caps | `max_tables`, `max_table_elements`, `max_instances` |
@@ -29,7 +29,7 @@ feature is missing the runtime says so with an error; it does not approximate.
 | Host functions in a dedicated process | `host => Pid` at instantiate, `handle_host_call/2` in that process |
 | Non-blocking calls | `call_async/3` and `await/2,3` |
 | Fuel metering | `compile(Bin, #{fuel => true})`, `call/4` with `fuel`, `fuel_remaining/1`; `kind => out_of_fuel` |
-| Structured traps | `trace` on trap errors: `[#{func_index, func_offset, func_name, module_name}]`, innermost first |
+| Structured traps | `ctx.trace` on trap errors: `[#{func_index, func_offset, func_name, module_name}]`, innermost first |
 | Validation without compiling | `validate/1`, `validate/2` with options |
 | Compile options | `compile/2`: `opt_level` (`none`, `speed`, `speed_and_size`), `proposals` on or off, `fuel`; `module_options/1`; `deserialize/2` to pick the engine |
 | Globals and tables from Erlang | `get_global/2` (the value in a list, as erlang_wasm; `global_get/2` is deprecated), `global_set/3`, `table_size/2`, `table_get/3`, `table_set/4`, `table_grow/3,4` |
@@ -73,55 +73,88 @@ feature is missing the runtime says so with an error; it does not approximate.
 
 ## Refused explicitly
 
-| Request | Error |
+Errors have erlang_wasm's shape, `#{class, kind, msg, ctx}`; see
+`wasmtime_error`.
+
+| Request | `class`, `kind` |
 |---|---|
-| Import the module does not provide | `class => link` |
-| Non-function import from Erlang | `kind => unsupported_import` |
-| `exnref` in a call or host signature, or `v128` and references in one signature | `kind => unsupported_type` |
-| A reference used with another instance | `kind => wrong_instance` |
-| `null` for a non-nullable type, a reference of the wrong family, an `{i31, N}` out of range | `kind => badarg` |
-| Memory access while the guest runs | `kind => busy` |
-| Memory access on an instance without memory | `kind => no_memory` |
-| Out of range memory access | `kind => out_of_bounds` |
-| Wrong argument count or type | `kind => badarity`, `kind => badarg` |
-| A host function calling the instance it runs on | `kind => reentrant` |
-| `compile/1`, `{wat, _}`, `serialize/1` or the `wasi` option on a build without them | `kind => unavailable` |
-| `fuel` on a module compiled without metering | `kind => fuel_disabled` |
-| A 33rd distinct compile option set | `kind => too_many_configurations` |
-| `opt_level` other than `speed`, or a proposal the library lacks, on a build without it | `kind => unavailable` |
-| Writing a constant global | `kind => immutable` |
-| `send/2` past `inbox_limit`, or after `close/1` | `kind => inbox_full`, `kind => closed` |
-| An `imports` entry for `erlang.send` or `erlang.recv` | `kind => reserved_import` |
-| `erlang.send` or `erlang.recv` imported with another type | `kind => unsupported_type` |
-| `stdout` or `stderr => stream` on a runtime-only build of a platform without a shim in `priv/shims` | `kind => unavailable` |
-| Pooling options out of range | `kind => badarg` |
-| A pool whose address space the host cannot reserve | `kind => pool_too_large` |
-| A module whose memory does not fit a pool slot | `class => compile` |
-| One instance more than the pool holds | `class => link` |
-| `allocator => pooling` on a build without the pooling allocator | `kind => unavailable` |
-| `preinit/3` on a module importing a memory, table or global | `class => preinit, kind => unsupported_import` |
-| `preinit/3` on GC types or a mutable reference global | `class => preinit, kind => unsupported_type` |
-| `preinit/3` on a shared memory, a component, or a reserved export name | `class => preinit, kind => unsupported` |
-| `preinit/3` when an init call changed a table | `class => preinit, kind => table_changed` |
-| `preinit/3` on bytes that are not a module | `class => preinit, kind => malformed` |
-| A call, or a ref of the instance, after `destroy/1` | `kind => stopped` |
-| A value that does not fit a component type (bad UTF-8, surrogate char, out of range, unknown case or flag, missing field) | `kind => badarg` |
-| A dropped or unknown resource handle | `kind => badarg` |
-| A component function returning a `stream`, `future` or `error-context` | `class => call, kind => badarg` |
-| A host import taking one | `class => link, kind => badarg` |
-| A component call after it was interrupted | `class => call, kind => trap` |
-| `load/1,2` past `max_resident_modules` (256), or without the application | `class => compile`, `kind => cache_full` or `not_started` |
-| `snapshot/1,2` on an instance not made for it, or of a module not from `load/1,2`; an image restored or loaded under another key or module | `class => snapshot`, `kind => not_snapshotable`, `module_not_loaded` or `snapshot_incompatible` |
-| `network => all` on a library without the patches, or `http => all` on a build without `wasi:http` | `class => wasi, kind => unavailable` |
-| `network => all` or `http => all` for a core module | `class => wasi, kind => unsupported` |
-| A `profile` other than `plugin` or `script` | `class => link, kind => unknown_profile` |
-| erlang_wasm's `max_depth`, `max_heap_words`, `max_host_calls` limits, or a limit of the wrong type | `class => link, kind => invalid_limits` |
-| A core-module accessor on a component instance | `kind => component` |
-| A component instance called after it trapped | `class => call` (the Component Model forbids re-entering it) |
-| The WASI 0.2 wall clock under `clocks => monotonic` | `class => trap, kind => clock_refused` |
+| Bytes that are not a module (`ctx.detail` says why) | `malformed`: `magic_header_not_detected`, `unknown_binary_version`, `unexpected_end`, `syntax_error` for text, `malformed_module` and others |
+| A module that does not validate | `invalid`: `type_mismatch`, `unknown_local` and the other `unknown_*`, `invalid_module` |
+| A precompiled module from another Wasmtime, CPU or option set | `link`, `incompatible_module` |
+| Import the module needs and was not given | `link`, `unknown_import` |
+| Import of another type | `link`, `incompatible_import_type` |
+| An import map value that is no fun and no `{Module, Function}` | `link`, `bad_import` |
+| Non-function import from Erlang | `link`, `unsupported_import` |
+| A module needing more memory, tables or instances than allowed | `exhaustion`, `memory_limit`, `table_limit` or `instance_limit` |
+| `exnref` in a call or host signature, or `v128` and references in one signature | `link`, `unsupported_type` |
+| A reference used with another instance | `trap`, `foreign_reference` |
+| `null` for a non-nullable type, a reference of the wrong family, an `{i31, N}` out of range | `link`, `argument_type` as an argument, `badarg` elsewhere |
+| Memory access while the guest runs | `link`, `instance_busy` |
+| Memory access on an instance without memory | `link`, `no_memory` |
+| Out of range memory access | `trap`, `out_of_bounds_memory_access` |
+| Out of range table or array index | `trap`, `out_of_bounds_table_access` or `out_of_bounds_array_access` |
+| Unknown export, or one that is no function | `link`, `unknown_export` or `not_a_function` |
+| Wrong argument count or type | `link`, `argument_arity` or `argument_type` |
+| A host function calling the instance it runs on | `link`, `reentrant` |
+| A host function that fails, times out or answers the wrong values | `trap`, `host_error`, the reason in `ctx.reason` |
+| `proc_exit` | `trap`, `host_error`, the status in `ctx.wasi_exit` |
+| A call past its `timeout` | `exhaustion`, `timeout` |
+| `compile/1`, `{wat, _}`, `serialize/1` or the `wasi` option on a build without them | `link`, `unavailable` |
+| `fuel` on a module compiled without metering | `link`, `fuel_disabled` |
+| A 33rd distinct compile option set | `exhaustion`, `too_many_configurations` |
+| `opt_level` other than `speed`, or a proposal the library lacks, on a build without it | `link`, `unavailable` |
+| Writing a constant global | `link`, `immutable` |
+| `send/2` past `inbox_limit`, or after `close/1` | `exhaustion`, `inbox_full`; `link`, `closed` |
+| An `imports` entry for `erlang.send` or `erlang.recv` | `link`, `reserved_import` |
+| `erlang.send` or `erlang.recv` imported with another type | `link`, `unsupported_type` |
+| `stdout` or `stderr => stream` on a runtime-only build of a platform without a shim in `priv/shims` | `link`, `unavailable` |
+| Pooling options out of range | `link`, `badarg` |
+| A pool whose address space the host cannot reserve | `exhaustion`, `pool_too_large` |
+| A module whose memory does not fit a pool slot | `exhaustion`, `pool_limit` |
+| One instance more than the pool holds | `exhaustion` or `link` |
+| `allocator => pooling` on a build without the pooling allocator | `link`, `unavailable` |
+| `preinit/3` on a module importing a memory, table or global | `link`, `unsupported_import` |
+| `preinit/3` on GC types or a mutable reference global | `link`, `unsupported_type` |
+| `preinit/3` on a shared memory, a component, or a reserved export name | `link`, `unsupported` |
+| `preinit/3` when an init call changed a table | `link`, `table_changed` |
+| `preinit/3` on bytes that are not a module | `malformed`, `malformed` |
+| A call, or a ref of the instance, after `destroy/1` | `link`, `stopped` |
+| A value that does not fit a component type (bad UTF-8, surrogate char, out of range, unknown case or flag, missing field) | `link`, `argument_type` |
+| A dropped or unknown resource handle | `link`, `badarg` or `argument_type` |
+| A component function returning or taking a `stream`, `future` or `error-context`, or a host import taking one | `link`, `unsupported_type` |
+| A component call after it was interrupted | `link`, `interrupted_instance` |
+| A component instance called after it trapped | `trap`, `cannot_enter_component` (the Component Model forbids re-entering it) |
+| `load/1,2` past `max_resident_modules` (256), or without the application | `exhaustion`, `cache_full`; `link`, `not_started` |
+| `snapshot/1,2` on an instance not made for it, or of a module not from `load/1,2`; an image restored or loaded under another key or module | `invalid`, `not_snapshotable`, `module_not_loaded` or `snapshot_incompatible` |
+| `snapshot/1,2` while a call runs | `link`, `busy` |
+| `network => all` on a library without the patches, or `http => all` on a build without `wasi:http` | `link`, `unavailable` |
+| `network => all` or `http => all` for a core module | `link`, `unsupported` |
+| A `profile` other than `plugin` or `script` | `link`, `unknown_profile` |
+| erlang_wasm's `max_depth`, `max_heap_words`, `max_host_calls` limits, or a limit of the wrong type | `link`, `invalid_limits` |
+| erlang_wasm's `link`, `snapshot_hooks`, `compile`, `compile_quality`, `compile_after`, `resource_limit` options; a `wasi` key or value this runtime does not have (`random => {seed, _}`, `net`) | `link`, `unsupported_option`, the keys in `ctx.keys` |
+| A core-module accessor on a component instance | `link`, `component` |
+| The WASI wall clock under `clocks => monotonic` | `trap`, `clock_refused` |
+
+## Differences from erlang_wasm
+
+- `exports/1` answers `{Kind, undefined}`: Wasmtime does not report the
+  index of an export.
+- A `call_indirect` past the end of its table is `out_of_bounds_table_access`
+  here; erlang_wasm says `undefined_element`. Wasmtime reports both with one
+  trap code.
+- `malformed` and `invalid` kinds follow Wasmtime's wording, so a rare
+  failure is `malformed_module` or `invalid_module` where erlang_wasm names
+  it.
 
 ## Deferred
 
+- **WASI import maps.** erlang_wasm builds WASI from Erlang import maps you
+  can change function by function (`wasi_preview1:imports/1`,
+  `wasi_preview2:io/0` and the rest, `wasi_http:http/1`, the `_with`
+  runners). Here Wasmtime implements WASI: you configure it with the `wasi`
+  options. An import you give still wins for a core module; a component's
+  WASI cannot be overridden.
+- **HTTP/2.** erlang_wasm's `wasi_http_h2` transport has no counterpart.
 - **Creating GC structs and arrays from Erlang.** Values the guest creates
   can be read and written field by field; creating one needs a type handle
   the C API only gives for an existing value. Exception references
@@ -147,8 +180,8 @@ feature is missing the runtime says so with an error; it does not approximate.
   holds `data.drop` or `elem.drop`; `preinit/3` compares tables instead and
   does not read code. See [preinit](preinit.md), "Notes".
 - **Streams and futures across the boundary.** `stream`, `future` and
-  `error-context` values are refused with `kind => badarg`: the C API cannot
-  represent them. erlang_wasm passes streams and futures.
+  `error-context` values are refused with `kind => unsupported_type`: the C API
+  cannot represent them. erlang_wasm passes streams and futures.
 - **`preinit/3` for components.** Core modules only; componentize-py
   pre-initializes what it builds.
 - **Snapshot adapters for script workers.** erlang_wasm's `wasm_javascript`,

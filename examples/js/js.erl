@@ -73,7 +73,9 @@ stop(#{inst := Inst, req := Req}) ->
     case wasmtime:await(Inst, Req, ?DEFAULT_TIMEOUT) of
         {ok, []} ->
             ok;
-        {error, #{class := exit, status := Status}} ->
+        {error, #{ctx := #{wasi_exit := 0}}} ->
+            ok;
+        {error, #{ctx := #{wasi_exit := Status}}} ->
             {ok, {_, Err, _}} = wasmtime:read_output(Inst),
             {error, {exit, Status, Err}};
         {error, Reason} ->
@@ -99,7 +101,8 @@ run(Engine, Args, Wasi, Opts) ->
             {ok, {Out, Err, _Dropped}} = wasmtime:read_output(Inst),
             case Result of
                 {ok, []} -> {ok, Out};
-                {error, #{class := exit, status := Status}} -> {error, {exit, Status, Err}};
+                {error, #{ctx := #{wasi_exit := 0}}} -> {ok, Out};
+                {error, #{ctx := #{wasi_exit := Status}}} -> {error, {exit, Status, Err}};
                 {error, #{kind := timeout}} -> {error, timeout};
                 {error, Reason} -> {error, Reason}
             end;

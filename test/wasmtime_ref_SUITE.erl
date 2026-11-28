@@ -81,7 +81,8 @@ ref_externref_global(_) ->
     {ok, 4} = wasmtime:table_grow(Inst, ~"e", 2, Other),
     {ok, E5} = wasmtime:table_get(Inst, ~"e", 5),
     {ok, other} = wasmtime:externref_data(E5),
-    {error, #{class := table, kind := out_of_bounds}} = wasmtime:table_get(Inst, ~"e", 6),
+    {error, #{class := trap, kind := out_of_bounds_table_access}} =
+        wasmtime:table_get(Inst, ~"e", 6),
     ok.
 
 ref_null(_) ->
@@ -92,9 +93,9 @@ ref_null(_) ->
     {ok, [0]} = wasmtime:call(Inst, ~"is_null", [Ref]),
     %% a funcref where an externref is expected, and the reverse
     {ok, F} = wasmtime:table_get(Inst, ~"t", 0),
-    {error, #{class := call, kind := badarg}} = wasmtime:call(Inst, ~"is_null", [F]),
-    {error, #{class := table, kind := badarg}} = wasmtime:table_set(Inst, ~"t", 3, Ref),
-    {error, #{class := call, kind := badarg}} = wasmtime:call(Inst, ~"is_null", [42]),
+    {error, #{class := link, kind := argument_type}} = wasmtime:call(Inst, ~"is_null", [F]),
+    {error, #{class := link, kind := badarg}} = wasmtime:table_set(Inst, ~"t", 3, Ref),
+    {error, #{class := link, kind := argument_type}} = wasmtime:call(Inst, ~"is_null", [42]),
     ok.
 
 ref_funcref_table(_) ->
@@ -109,10 +110,10 @@ ref_funcref_table(_) ->
     ok = wasmtime:table_set(Inst, ~"t", 2, Twice),
     {ok, [10]} = wasmtime:call(Inst, ~"call_slot", [2, 5, 0]),
     ok = wasmtime:table_set(Inst, ~"t", 2, null),
-    {error, #{class := trap, kind := indirect_call_to_null}} =
+    {error, #{class := trap, kind := uninitialized_element}} =
         wasmtime:call(Inst, ~"call_slot", [2, 5, 0]),
     %% call_ref honours the usual checks and options
-    {error, #{kind := badarity}} = wasmtime:call_ref(Inst, Add, [1]),
+    {error, #{kind := argument_arity}} = wasmtime:call_ref(Inst, Add, [1]),
     {ok, [3]} = wasmtime:call_ref(Inst, Add, [1, 2], #{timeout => 1000}),
     {ok, R} = wasmtime:call_async(Inst, ~"add", [1, 1]),
     {ok, [2]} = wasmtime:await(Inst, R),
@@ -122,18 +123,18 @@ ref_funcref_nonnull(_) ->
     Inst = refs_inst(),
     {ok, Add} = wasmtime:table_get(Inst, ~"t", 0),
     {ok, [1]} = wasmtime:call(Inst, ~"nonnull", [Add]),
-    {error, #{class := call, kind := badarg}} = wasmtime:call(Inst, ~"nonnull", [null]),
+    {error, #{class := link, kind := argument_type}} = wasmtime:call(Inst, ~"nonnull", [null]),
     ok.
 
 ref_wrong_instance(_) ->
     A = refs_inst(),
     B = refs_inst(),
     {ok, RefA} = wasmtime:externref(A, a),
-    {error, #{class := call, kind := wrong_instance}} = wasmtime:call(B, ~"id_ext", [RefA]),
-    {error, #{class := global, kind := wrong_instance}} = wasmtime:global_set(B, ~"g", RefA),
+    {error, #{class := trap, kind := foreign_reference}} = wasmtime:call(B, ~"id_ext", [RefA]),
+    {error, #{class := trap, kind := foreign_reference}} = wasmtime:global_set(B, ~"g", RefA),
     {ok, FA} = wasmtime:table_get(A, ~"t", 0),
-    {error, #{class := call, kind := wrong_instance}} = wasmtime:call_ref(B, FA, [1, 2]),
-    {error, #{class := call, kind := badarg}} = wasmtime:call_ref(A, RefA, []),
+    {error, #{class := trap, kind := foreign_reference}} = wasmtime:call_ref(B, FA, [1, 2]),
+    {error, #{class := link, kind := badarg}} = wasmtime:call_ref(A, RefA, []),
     ok.
 
 ref_host_functions(_) ->
@@ -147,7 +148,7 @@ ref_host_functions(_) ->
         {~"env", ~"take_fn"} => fun(Ctx, [F]) ->
             %% the guest is parked: calling it back is refused, but the
             %% funcref can be kept for later
-            {error, #{kind := reentrant}} = wasmtime:call_ref(Ctx, F, [20, 22]),
+            {error, #{kind := reentrant}} = wasmtime:call_ref(maps:get(instance, Ctx), F, [20, 22]),
             Self ! {fn, F},
             {ok, [1]}
         end
@@ -169,8 +170,8 @@ ref_host_functions(_) ->
     %% a host fun returning a value of the wrong type traps cleanly
     Bad = refs_inst(#{{~"env", ~"ext_id"} => fun(_, [_]) -> {ok, [42]} end}),
     {ok, R2} = wasmtime:externref(Bad, x),
-    {error, #{class := host, message := Msg}} = wasmtime:call(Bad, ~"via_host", [R2]),
-    ?assertMatch({_, _}, binary:match(Msg, ~"wrong type")),
+    {error, #{class := trap, ctx := #{reason := result_type}}} =
+        wasmtime:call(Bad, ~"via_host", [R2]),
     ok.
 
 ref_i31(_) ->
@@ -179,7 +180,7 @@ ref_i31(_) ->
     {ok, [{i31, -5}]} = wasmtime:call(Inst, ~"id_any", [{i31, -5}]),
     {ok, [-5]} = wasmtime:call(Inst, ~"i31v", [{i31, -5}]),
     {ok, [null]} = wasmtime:call(Inst, ~"id_any", [null]),
-    {error, #{kind := badarg}} = wasmtime:call(Inst, ~"id_any", [{i31, 1 bsl 31}]),
+    {error, #{kind := argument_type}} = wasmtime:call(Inst, ~"id_any", [{i31, 1 bsl 31}]),
     ok.
 
 ref_struct(_) ->
@@ -193,12 +194,12 @@ ref_struct(_) ->
     ok = wasmtime:struct_set(P, 2, 300),
     {ok, 44} = wasmtime:struct_get(P, 2),
     {ok, [30]} = wasmtime:call(Inst, ~"px", [P]),
-    {error, #{class := ref, kind := out_of_bounds}} = wasmtime:struct_set(P, 9, 1),
-    {error, #{class := ref}} = wasmtime:struct_get(P, 9),
-    {error, #{class := ref, kind := badarg}} = wasmtime:struct_set(P, 0, 1.5),
-    {error, #{class := ref, kind := badarg}} = wasmtime:array_len(P),
+    {error, #{class := link, kind := out_of_bounds}} = wasmtime:struct_set(P, 9, 1),
+    {error, #{class := link, kind := out_of_bounds}} = wasmtime:struct_get(P, 9),
+    {error, #{class := link, kind := badarg}} = wasmtime:struct_set(P, 0, 1.5),
+    {error, #{class := link, kind := badarg}} = wasmtime:array_len(P),
     %% the guest's own type check, through the typed call path
-    {error, #{class := call}} = wasmtime:call(Inst, ~"want_arr", [P]),
+    {error, #{class := link}} = wasmtime:call(Inst, ~"want_arr", [P]),
     {ok, [P2]} = wasmtime:call(Inst, ~"id_any", [P]),
     {ok, 30} = wasmtime:struct_get(P2, 0),
     ok.
@@ -211,9 +212,9 @@ ref_array(_) ->
     {ok, 9} = wasmtime:array_get(A, 4),
     ok = wasmtime:array_set(A, 0, 100),
     {ok, [100]} = wasmtime:call(Inst, ~"a0", [A]),
-    {error, #{class := ref}} = wasmtime:array_get(A, 5),
-    {error, #{class := ref}} = wasmtime:array_set(A, 5, 1),
-    {error, #{class := ref, kind := badarg}} = wasmtime:struct_get(A, 0),
+    {error, #{class := trap, kind := out_of_bounds_array_access}} = wasmtime:array_get(A, 5),
+    {error, #{class := trap, kind := out_of_bounds_array_access}} = wasmtime:array_set(A, 5, 1),
+    {error, #{class := link, kind := badarg}} = wasmtime:struct_get(A, 0),
     {ok, [1]} = wasmtime:call(Inst, ~"want_arr", [A]),
     ok.
 
@@ -244,8 +245,8 @@ ref_lifetime(_) ->
     ok = wasmtime:gc(Inst),
     {ok, R} = wasmtime:call_async(Inst, ~"loop", []),
     timer:sleep(20),
-    {error, #{kind := busy}} = wasmtime:gc(Inst),
-    {error, #{kind := busy}} = wasmtime:externref_data(Again),
+    {error, #{kind := instance_busy}} = wasmtime:gc(Inst),
+    {error, #{kind := instance_busy}} = wasmtime:externref_data(Again),
     ok = wasmtime:interrupt(Inst),
     {error, #{kind := interrupt}} = wasmtime:await(Inst, R),
     ok.

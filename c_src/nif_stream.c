@@ -181,7 +181,7 @@ static ERL_NIF_TERM shadow_one(wasmtime_linker_t *linker, ErlNifEnv *out, const 
       linker, "wasi_snapshot_preview1", 22, name, strlen(name), ft, cb, NULL, NULL);
   wasmtime_linker_allow_shadowing(linker, false);
   wasm_functype_delete(ft);
-  return e ? error_to_term(out, e, "wasi") : 0;
+  return e ? error_to_term(out, e, "wasi_config") : 0;
 }
 #endif
 
@@ -192,7 +192,7 @@ ERL_NIF_TERM shadow_wasi(wasmtime_linker_t *linker, int tty_mask, ErlNifEnv *out
   return tty_mask ? shadow_one(linker, out, "fd_fdstat_get", 2, fd_fdstat_cb) : 0;
 #else
   (void)linker, (void)tty_mask;
-  return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
+  return mk_error_s(out, "link", "unavailable", "this build of erlang_wasmtime has no WASI");
 #endif
 }
 
@@ -210,13 +210,13 @@ ERL_NIF_TERM take_real_wasi(instance_t *inst, ErlNifEnv *out) {
         !wasmtime_linker_get(wl, inst->wasm.ctx, "wasi_snapshot_preview1", 22, names[i],
                              strlen(names[i]), &ext) ||
         ext.kind != WASMTIME_EXTERN_FUNC)
-      return mk_error_s(out, "wasi", "config", "the WASI function to forward to is missing");
+      return mk_error_s(out, "link", "wasi_config", "the WASI function to forward to is missing");
     *reals[i] = ext.of.func;
   }
   return 0;
 #else
   (void)inst;
-  return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
+  return mk_error_s(out, "link", "unavailable", "this build of erlang_wasmtime has no WASI");
 #endif
 }
 
@@ -225,9 +225,9 @@ ERL_NIF_TERM link_wasi_shim(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM shim_
                             ErlNifEnv *out) {
   const char *why = "WASI shim";
   wasmtime_module_t *shim = engine_shim(inst->wasm.mod->engine, env, shim_bytes, &why);
-  if (!shim) return mk_error_s(out, "wasi", "unavailable", why);
+  if (!shim) return mk_error_s(out, "link", "unavailable", why);
   if (!inst->wasm.has_memory)
-    return mk_error_s(out, "wasi", "config", "streamed stdio needs an exported memory");
+    return mk_error_s(out, "link", "wasi_config", "streamed stdio needs an exported memory");
   wasmtime_extern_t rd = {.kind = WASMTIME_EXTERN_FUNC, .of.func = inst->inbox.real_fd_read};
   wasmtime_extern_t st = {.kind = WASMTIME_EXTERN_FUNC, .of.func = inst->inbox.real_fdstat};
   wasmtime_extern_t mem = {.kind = WASMTIME_EXTERN_MEMORY, .of.memory = inst->wasm.memory};
@@ -242,17 +242,17 @@ ERL_NIF_TERM link_wasi_shim(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM shim_
   if (trap) wasm_trap_delete(trap);
   if (e) {
     wasmtime_error_delete(e);
-    return mk_error_s(out, "wasi", "config",
+    return mk_error_s(out, "link", "wasi_config",
                       "streamed stdio could not link to this memory (shared or 64-bit?)");
   }
   wasmtime_extern_t fwd;
   if (!wasmtime_instance_export_get(inst->wasm.ctx, &si, "fd_read", 7, &fwd) ||
       fwd.kind != WASMTIME_EXTERN_FUNC)
-    return mk_error_s(out, "wasi", "config", "the WASI shim has no fd_read");
+    return mk_error_s(out, "link", "wasi_config", "the WASI shim has no fd_read");
   inst->inbox.shim_fd_read = fwd.of.func;
   if (!wasmtime_instance_export_get(inst->wasm.ctx, &si, "fd_fdstat_get", 13, &fwd) ||
       fwd.kind != WASMTIME_EXTERN_FUNC)
-    return mk_error_s(out, "wasi", "config", "the WASI shim has no fd_fdstat_get");
+    return mk_error_s(out, "link", "wasi_config", "the WASI shim has no fd_fdstat_get");
   inst->inbox.shim_fdstat = fwd.of.func;
   inst->inbox.has_shim = 1;
   return 0;
@@ -339,11 +339,11 @@ ERL_NIF_TERM nif_send(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   pthread_mutex_lock(&inst->mu);
   ERL_NIF_TERM r = atom_ok;
   if (inst->queue.stopping) {
-    r = mk_error_s(env, "stream", "stopped", "instance is stopped");
+    r = mk_error_s(env, "link", "stopped", "instance is stopped");
   } else if (inst->inbox.closed) {
-    r = mk_error_s(env, "stream", "closed", "the guest's input is closed");
+    r = mk_error_s(env, "link", "closed", "the guest's input is closed");
   } else if (inst->inbox.bytes + bin.size > inst->inbox.limit) {
-    r = mk_error_s(env, "stream", "inbox_full", "the guest has not read what was sent");
+    r = mk_error_s(env, "exhaustion", "inbox_full", "the guest has not read what was sent");
   } else {
     chunk_t *c = enif_alloc(sizeof *c);
     c->data = enif_alloc(bin.size ? bin.size : 1);

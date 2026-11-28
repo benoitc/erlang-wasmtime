@@ -66,19 +66,19 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
   if (enif_is_identical(wasi, atom_none)) return 0;
   for (int i = 0; i < 8; i++)
     if (!enif_get_map_value(env, wasi, keys[i], &t[i]))
-      return mk_error_s(out, "wasi", "config", "wasi option is malformed");
+      return mk_error_s(out, "link", "wasi_config", "wasi option is malformed");
   int network = 0, http = 0;
   if (!grant_of(env, wasi, "network", &network) || !grant_of(env, wasi, "http", &http))
-    return mk_error_s(out, "wasi", "config", "wasi network and http must be none or all");
+    return mk_error_s(out, "link", "wasi_config", "wasi network and http must be none or all");
 #if !NIF_HAVE_WASI
-  return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
+  return mk_error_s(out, "link", "unavailable", "this build of erlang_wasmtime has no WASI");
 #else
 #ifndef WASMTIME_FEATURE_WASI_HTTP
   if (http)
-    return mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no wasi:http");
+    return mk_error_s(out, "link", "unavailable", "this build of erlang_wasmtime has no wasi:http");
 #endif
   if (network && !sockets_available())
-    return mk_error_s(out, "wasi", "unavailable",
+    return mk_error_s(out, "link", "unavailable",
                       "this build of erlang_wasmtime cannot open sockets to a guest");
   *grants = (http ? WASI_GRANT_HTTP : 0) | (network ? WASI_GRANT_NETWORK : 0);
 
@@ -239,12 +239,12 @@ static ERL_NIF_TERM configure_wasi(instance_t *inst, ErlNifEnv *env, ErlNifEnv *
 done:
   if (err) {
     wasi_config_delete(cfg);
-    return mk_error_s(out, "wasi", "config", err);
+    return mk_error_s(out, "link", "wasi_config", err);
   }
   wasmtime_error_t *werr = wasmtime_context_set_wasi(inst->wasm.ctx, cfg); /* consumes cfg */
   if (werr) {
     wasmtime_error_delete(werr);
-    return mk_error_s(out, "wasi", "config", "wasi could not be configured");
+    return mk_error_s(out, "link", "wasi_config", "wasi could not be configured");
   }
 #ifdef WASMTIME_FEATURE_WASI_HTTP
   if (http) wasmtime_context_set_wasi_http(inst->wasm.ctx);
@@ -260,6 +260,7 @@ typedef struct {
   ERL_NIF_TERM wasi;    /* none | map, see configure_wasi */
   ERL_NIF_TERM shim;    /* binary() | undefined: the precompiled stdin shim */
   ErlNifSInt64 memory_limit, max_tables, max_table_elements, max_instances; /* -1: unlimited */
+  ERL_NIF_TERM fuel; /* integer() | infinity | undefined */
 } opts_t;
 
 static ERL_NIF_TERM opt_error(ErlNifEnv *out, const char *key) {
@@ -276,6 +277,7 @@ static ERL_NIF_TERM parse_options(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM
     return opt_error(out, "imports");
   if (!enif_get_map_value(env, map, atom_wasi, &o->wasi)) return opt_error(out, "wasi");
   if (!enif_get_map_value(env, map, atom_shim, &o->shim)) return opt_error(out, "shim");
+  if (!enif_get_map_value(env, map, atom_fuel, &o->fuel)) return opt_error(out, "fuel");
   struct {
     ERL_NIF_TERM key;
     const char *name;
@@ -451,7 +453,7 @@ static linker_entry_t *build_entry(module_res_t *m, ErlNifEnv *env, ERL_NIF_TERM
     wasmtime_error_t *werr = wasmtime_linker_define_wasi(le->linker);
     if (werr) {
       wasmtime_error_delete(werr);
-      *err = mk_error_s(out, "wasi", "config", "wasi could not be linked");
+      *err = mk_error_s(out, "link", "wasi_config", "wasi could not be linked");
     }
     if (!*err && monotonic) *err = restrict_clocks(le->linker, out);
     if (!*err && tty_mask) *err = shadow_wasi(le->linker, tty_mask, out);
@@ -540,6 +542,31 @@ static void cache_memory(instance_t *inst) {
   }
 }
 
+/* Initialization is guest code: the global, table and data initializers and
+ * the start section draw fuel on a metered engine, about one unit per byte of
+ * data copied. They get what `fuel` says. When instantiate gave none they get
+ * INIT_FUEL plus one unit per byte the store lets a memory hold, which pays
+ * for the data and still ends a start section that loops, and the store is
+ * left empty for calls to fill. */
+static void give_init_fuel(instance_t *inst, ErlNifEnv *env, const opts_t *o) {
+  if (!inst->wasm.mod->engine->fuel) return;
+  ErlNifUInt64 n, asked;
+  if (fuel_of(env, o->fuel, inst->wasm.mod->engine, &asked))
+    n = asked;
+  else
+    n = INIT_FUEL + (o->memory_limit < 0 ? UINT32_MAX : (ErlNifUInt64)o->memory_limit);
+  /* cannot fail: the engine meters fuel */
+  wasmtime_error_t *e = wasmtime_context_set_fuel(inst->wasm.ctx, n);
+  if (e) wasmtime_error_delete(e);
+}
+
+static void take_init_fuel(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM fuel) {
+  ErlNifUInt64 n;
+  if (!inst->wasm.mod->engine->fuel || fuel_of(env, fuel, inst->wasm.mod->engine, &n)) return;
+  wasmtime_error_t *e = wasmtime_context_set_fuel(inst->wasm.ctx, 0);
+  if (e) wasmtime_error_delete(e);
+}
+
 /* The REQ_INSTANTIATE request, on the worker thread. Each step answers 0
  * or the error to send; a failure leaves the instance stopped. */
 ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
@@ -548,6 +575,7 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
   ERL_NIF_TERM err;
   if ((err = parse_options(inst, env, req->opts, &o, out))) return err;
   configure_store(inst, &o);
+  give_init_fuel(inst, env, &o);
   int monotonic = 0, grants = 0, wasi = !enif_is_identical(o.wasi, atom_none);
   if ((err = configure_wasi(inst, env, out, o.wasi, &monotonic, &grants))) return err;
 #ifdef WASMTIME_FEATURE_COMPONENT_MODEL
@@ -559,6 +587,7 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
      * when it was granted, so the linker cache keys on it */
     wasi |= grants & WASI_GRANT_HTTP;
     if ((err = component_instantiate(inst, env, o.imports, wasi, monotonic, out))) return err;
+    take_init_fuel(inst, env, o.fuel);
     stdin_pump_start(inst);
     inst->wasm.instantiated = 1;
     return atom_ok;
@@ -566,7 +595,7 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
 #endif
   /* preview 1 has no wasi:http and no sockets */
   if (grants)
-    return mk_error_s(out, "wasi", "unsupported",
+    return mk_error_s(out, "link", "unsupported",
                       "network and http are for components (WASI 0.2), not core modules");
   if ((err = link_entry(inst, env, o.imports, wasi, monotonic, out))) return err;
   if ((err = instantiate_module(inst, out))) return err;
@@ -575,6 +604,7 @@ ERL_NIF_TERM do_instantiate(instance_t *inst, req_t *req, ErlNifEnv *out) {
     if ((err = take_real_wasi(inst, out))) return err;
     if ((err = link_wasi_shim(inst, env, o.shim, out))) return err;
   }
+  take_init_fuel(inst, env, o.fuel);
   stdin_pump_start(inst);
   inst->wasm.instantiated = 1;
   return atom_ok;

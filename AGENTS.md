@@ -19,7 +19,7 @@ three things true before it is called done, committed or opened as a pull
 request:
 
 1. **Guest failures are terms.** Nothing a guest does raises or aborts:
-   `{error, #{class, kind, message}}`, with a `trace` for traps. A test shows
+   `{error, #{class, kind, msg, ctx}}`, with `ctx.trace` for traps. A test shows
    the error path, not only the happy one.
 2. **No call that aborts.** Several Wasmtime C API calls abort the process on
    input they do not support (`wasm_valtype_kind` on GC types, an engine

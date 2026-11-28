@@ -55,8 +55,8 @@ the signature is read from the component instead.
 | `map<K, V>` | map |
 | `own<R>`, `borrow<R>` | integer handle |
 
-A term that does not fit the type is `{error, #{kind := badarg}}`, with the
-reason in `message`: an invalid UTF-8 string, a surrogate `char`, an
+A term that does not fit the type is `{error, #{kind := argument_type}}`,
+with the reason in `msg`: an invalid UTF-8 string, a surrogate `char`, an
 integer out of range, an unknown case or flag, a missing record field.
 `stream`, `future` and `error-context` cannot cross: see "Async exports and
 imports".
@@ -186,7 +186,7 @@ Notes:
 - A task still running when its function returned its result moves only
   during a later call into the instance.
 - A function whose result, or a host import whose argument, holds a
-  `stream`, `future` or `error-context` is refused with `kind => badarg`.
+  `stream`, `future` or `error-context` is refused with `kind => unsupported_type`.
   erlang_wasm's `start_async/4` and `pump/2` have no counterpart.
 - `timeout`, `interrupt/1` and a dead caller stop a call wherever it waits,
   in the guest, on a timer or on a socket. The instance cannot be entered

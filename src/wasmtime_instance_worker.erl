@@ -120,13 +120,11 @@ run(Pid, Request, Wait) ->
     catch
         exit:{timeout, _} ->
             exit(Pid, kill),
-            timed_out();
+            timed_out(Wait);
         exit:{noproc, _} ->
-            refused(link, no_worker, ~"worker is gone");
+            refused(link, no_worker, ~"worker is gone", #{});
         exit:{Reason, _} ->
-            refused(
-                trap, worker_died, iolist_to_binary(io_lib:format("worker died: ~0p", [Reason]))
-            )
+            refused(trap, worker_died, ~"worker died", #{reason => Reason})
     end.
 
 -spec stop(pid()) -> ok.
@@ -136,10 +134,11 @@ stop(Pid) -> gen_server:stop(Pid).
 -spec info(pid()) -> {ok, map()}.
 info(Pid) -> gen_server:call(Pid, info).
 
-timed_out() -> refused(trap, timeout, ~"request timed out").
+timed_out(Timeout) ->
+    refused(exhaustion, timeout, ~"request timed out", #{timeout => Timeout}).
 
-refused(Class, Kind, Message) ->
-    {error, #{class => Class, kind => Kind, message => Message}}.
+refused(Class, Kind, Message, Ctx) ->
+    wasmtime_error:new(Class, Kind, Message, Ctx).
 
 %% --------------------------------------------------------------- callbacks
 
@@ -167,12 +166,12 @@ handle_continue(instantiate, State) ->
     end.
 
 handle_call({run, _Function, _Args, _Deadline}, _From, #state{instance = undefined} = State) ->
-    {reply, refused(link, no_instance, ~"worker has no instance"), State};
+    {reply, refused(link, no_instance, ~"worker has no instance", #{}), State};
 handle_call({run, Function, Args, Deadline}, _From, #state{instance = Inst} = State) ->
     case remaining(Deadline) of
         0 ->
             %% It waited behind other requests past its own deadline.
-            {reply, timed_out(), State};
+            {reply, timed_out(0), State};
         Left ->
             Result = wasmtime:call(Inst, Function, Args, call_options(Left)),
             {reply, Result, recycle(State#state{served = State#state.served + 1})}

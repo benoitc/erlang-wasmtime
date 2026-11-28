@@ -64,7 +64,8 @@ stream_recv_small_buffer(_) ->
     {ok, [-13]} = wasmtime:call(Inst, ~"recv_into", [4]),
     {ok, [11]} = wasmtime:call(Inst, ~"recv_into", [11]),
     %% out of bounds pointers trap instead of touching memory
-    {error, #{class := trap, message := Msg}} = wasmtime:call(Inst, ~"send_at", [65530, 100]),
+    {error, #{class := trap, ctx := #{detail := Msg}}} =
+        wasmtime:call(Inst, ~"send_at", [65530, 100]),
     ?assertMatch({_, _}, binary:match(Msg, ~"out of bounds")),
     ok.
 
@@ -177,12 +178,14 @@ shim_files() ->
     {ok, Plain} = file:read_file(Path("plain")),
     {ok, Fuel} = file:read_file(Path("fuel")),
     {ok, M1} = wasmtime:deserialize(Plain),
-    [{~"memory", memory}, {~"fd_read", func}, {~"fd_fdstat_get", func}] = wasmtime:exports(M1),
+    #{~"memory" := {mem, _}, ~"fd_read" := {func, _}, ~"fd_fdstat_get" := {func, _}} =
+        wasmtime:exports(M1),
     {ok, _} = wasmtime:deserialize(Plain, #{
         proposals => #{simd => false, threads => false, gc => false}
     }),
     {ok, _} = wasmtime:deserialize(Fuel, #{fuel => true}),
-    {error, #{class := compile}} = wasmtime:deserialize(Plain, #{fuel => true}),
+    {error, #{class := link, kind := incompatible_module}} =
+        wasmtime:deserialize(Plain, #{fuel => true}),
     ok.
 
 %% ------------------------------------------------------------ references

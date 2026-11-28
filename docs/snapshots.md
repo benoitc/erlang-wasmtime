@@ -73,11 +73,11 @@ image to be valid: the imports' names, the WASI configuration.
 
 | Refused | Error |
 |---|---|
-| an instance made without `snapshotable => true`, or restored from an image | `class => snapshot, kind => not_snapshotable` |
+| an instance made without `snapshotable => true`, or restored from an image | `class => invalid, kind => not_snapshotable` |
 | a module from `compile/1,2` | `kind => module_not_loaded` |
 | a call running on the instance | `kind => busy` |
-| a table changed since the instance was made | `class => preinit, kind => table_changed` |
-| imported memories, tables or globals; GC types; a component | `class => preinit`, as for `preinit/3` |
+| a table changed since the instance was made | `class => link, kind => table_changed` |
+| imported memories, tables or globals; GC types; a component | the kinds of `preinit/3` |
 | an image file of another module | `kind => snapshot_incompatible` |
 | a file that is missing or not an image | `kind => snapshot_not_read` |
 

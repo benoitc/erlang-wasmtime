@@ -1,7 +1,7 @@
 -module(wasmtime_worker_error).
 -moduledoc """
 The errors the script worker answers with: erlang_wasm's
-`wasm_worker_error`, with this library's `message` key.
+`wasm_worker_error`.
 
 `class` says which layer decided the request had failed: `worker` is the
 kernel, `adapter` the adapter, and `runtime` means `wasmtime` returned an
@@ -33,17 +33,17 @@ closed: an adapter with more to say puts a binary code in `ctx`.
     | adapter_failure
     | runtime_failure.
 
--type worker_error() :: #{class := class(), kind := kind(), message := binary(), ctx := map()}.
+-type worker_error() :: #{class := class(), kind := kind(), msg := binary(), ctx := map()}.
 
 -doc "An error the kernel itself decided on.".
 -spec worker(kind(), binary(), map()) -> worker_error().
 worker(Kind, Message, Ctx) ->
-    #{class => worker, kind => Kind, message => Message, ctx => Ctx}.
+    #{class => worker, kind => Kind, msg => Message, ctx => Ctx}.
 
 -doc "An error the adapter diagnosed: `exit` or `adapter_failure`, the detail in `ctx`.".
 -spec adapter(exit | adapter_failure, binary(), map()) -> worker_error().
 adapter(Kind, Message, Ctx) when Kind =:= exit; Kind =:= adapter_failure ->
-    #{class => adapter, kind => Kind, message => Message, ctx => Ctx}.
+    #{class => adapter, kind => Kind, msg => Message, ctx => Ctx}.
 
 -doc "Wrap an error of `wasmtime` without reinterpreting it: it stays in `ctx.error`.".
 -spec runtime(map()) -> worker_error().
@@ -53,10 +53,10 @@ runtime(Error) -> runtime(Error, #{}).
 runtime(Error, Ctx) ->
     Message =
         case Error of
-            #{message := M} when is_binary(M) -> M;
+            #{msg := M} when is_binary(M) -> M;
             _ -> ~"runtime error"
         end,
-    #{class => runtime, kind => runtime_failure, message => Message, ctx => Ctx#{error => Error}}.
+    #{class => runtime, kind => runtime_failure, msg => Message, ctx => Ctx#{error => Error}}.
 
 -doc "Every kind this module can produce.".
 -spec kinds() -> [kind()].
@@ -81,7 +81,7 @@ kinds() ->
 
 -doc "Whether a term is a well-formed worker error.".
 -spec is_error(term()) -> boolean().
-is_error(#{class := Class, kind := Kind, message := Message, ctx := Ctx}) when
+is_error(#{class := Class, kind := Kind, msg := Message, ctx := Ctx}) when
     is_binary(Message), is_map(Ctx)
 ->
     lists:member(Kind, kinds()) andalso class_allows(Class, Kind);

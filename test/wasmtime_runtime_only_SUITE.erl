@@ -68,14 +68,14 @@ features_shape(_) ->
     ok.
 
 compile_unavailable(_) ->
-    {error, #{class := compile, kind := unavailable, message := Msg}} =
+    {error, #{class := link, kind := unavailable, msg := Msg}} =
         wasmtime:compile(<<0, "asm", 1, 0, 0, 0>>),
     ?assertMatch({_, _}, binary:match(Msg, ~"deserialize")),
-    {error, #{class := compile, kind := unavailable}} = wasmtime:compile({wat, ~"(module)"}),
+    {error, #{class := link, kind := unavailable}} = wasmtime:compile({wat, ~"(module)"}),
     ok.
 
 serialize_unavailable(Config) ->
-    {error, #{class := compile, kind := unavailable}} = wasmtime:serialize(load(Config, "basic")),
+    {error, #{class := link, kind := unavailable}} = wasmtime:serialize(load(Config, "basic")),
     ok.
 
 wasi_by_features(Config) ->
@@ -87,7 +87,7 @@ wasi_by_features(Config) ->
             {ok, []} = wasmtime:call(Inst, ~"_start", []),
             {ok, ~"hello\n"} = file:read_file(Out);
         #{wasi := false} ->
-            {error, #{class := wasi, kind := unavailable}} =
+            {error, #{class := link, kind := unavailable}} =
                 wasmtime:instantiate(Mod, #{wasi => #{stdout => {file, Out}}}),
             %% without the option the WASI imports are simply missing
             {error, #{class := link}} = wasmtime:instantiate(Mod)
@@ -96,7 +96,7 @@ wasi_by_features(Config) ->
 
 deserialize_and_call(Config) ->
     Mod = load(Config, "basic"),
-    [{~"memory", memory}, {~"add", func} | _] = wasmtime:exports(Mod),
+    #{~"memory" := {mem, _}, ~"add" := {func, _}} = wasmtime:exports(Mod),
     {ok, Inst} = wasmtime:instantiate(Mod),
     {ok, [3]} = wasmtime:call(Inst, ~"add", [1, 2]),
     {error, #{class := trap, kind := unreachable}} = wasmtime:call(Inst, ~"boom", []),
@@ -145,8 +145,10 @@ component_async(Config) ->
     end.
 
 deserialize_garbage(_) ->
-    {error, #{class := compile}} = wasmtime:deserialize(<<"not precompiled">>),
-    {error, #{class := compile}} = wasmtime:deserialize(<<0, "asm", 1, 0, 0, 0>>),
+    {error, #{class := link, kind := incompatible_module}} =
+        wasmtime:deserialize(<<"not precompiled">>),
+    {error, #{class := link, kind := incompatible_module}} =
+        wasmtime:deserialize(<<0, "asm", 1, 0, 0, 0>>),
     ok.
 
 host_functions(Config) ->
@@ -163,12 +165,14 @@ memory_access(Config) ->
     {ok, ~"hello"} = wasmtime:read_memory(Inst, 0, 5),
     ok = wasmtime:write_memory(Inst, 0, ~"J"),
     {ok, [$J]} = wasmtime:call(Inst, ~"load", [0]),
-    {ok, {1, 65536}} = wasmtime:memory_size(Inst),
+    {ok, 1} = wasmtime:memory_size(Inst),
     ok.
 
 interrupt(Config) ->
     {ok, Inst} = wasmtime:instantiate(load(Config, "basic")),
-    {error, #{class := trap, kind := timeout}} = wasmtime:call(Inst, ~"loop", [], #{timeout => 100}),
+    {error, #{class := exhaustion, kind := timeout}} = wasmtime:call(Inst, ~"loop", [], #{
+        timeout => 100
+    }),
     {ok, [3]} = wasmtime:call(Inst, ~"add", [1, 2]),
     ok.
 

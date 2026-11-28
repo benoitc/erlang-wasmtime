@@ -98,7 +98,8 @@ restore_starts_where_the_capture_was(_) ->
     {ok, [40]} = wasmtime:call(B, ~"n", []),
     %% the instrumented exports are not shown
     false = lists:any(
-        fun({N, _}) -> binary:match(N, ~"__wasmtime") =/= nomatch end, wasmtime:exports(Init)
+        fun(N) -> binary:match(N, ~"__wasmtime") =/= nomatch end,
+        maps:keys(wasmtime:exports(Init))
     ),
     ok.
 
@@ -122,15 +123,15 @@ imports_are_given_again(_) ->
 
 capture_needs_snapshotable(_) ->
     {ok, Plain} = wasmtime:instantiate(loaded(), imports(1), #{}),
-    {error, #{class := snapshot, kind := not_snapshotable}} = wasmtime:snapshot(Plain),
+    {error, #{class := invalid, kind := not_snapshotable}} = wasmtime:snapshot(Plain),
     {ok, Image} = wasmtime:snapshot(init_instance()),
-    {error, #{class := snapshot, kind := not_snapshotable}} =
+    {error, #{class := invalid, kind := not_snapshotable}} =
         wasmtime:restore(Image, imports(1), #{snapshotable => true}),
     ok.
 
 capture_needs_a_loaded_module(_) ->
     {ok, Compiled} = wasmtime:compile({wat, wat()}),
-    {error, #{class := snapshot, kind := module_not_loaded}} =
+    {error, #{class := invalid, kind := module_not_loaded}} =
         wasmtime:instantiate(Compiled, imports(1), #{snapshotable => true}),
     ok.
 
@@ -138,7 +139,7 @@ capture_refuses_a_running_instance(_) ->
     Init = init_instance(),
     {ok, Ref} = wasmtime:call_async(Init, ~"spin", []),
     timer:sleep(50),
-    {error, #{kind := busy}} = wasmtime:snapshot(Init),
+    {error, #{class := link, kind := busy}} = wasmtime:snapshot(Init),
     ok = wasmtime:interrupt(Init),
     {error, _} = wasmtime:await(Init, Ref),
     {ok, _} = wasmtime:snapshot(Init),
@@ -150,12 +151,12 @@ capture_refuses_a_running_instance(_) ->
 capture_refuses_a_changed_table(_) ->
     Init = init_instance(),
     {ok, []} = wasmtime:call(Init, ~"set_table", []),
-    {error, #{class := preinit, kind := table_changed}} = wasmtime:snapshot(Init),
+    {error, #{class := link, kind := table_changed}} = wasmtime:snapshot(Init),
     ok.
 
 capture_refuses_what_preinit_refuses(_) ->
     {ok, Imported} = wasmtime:load({wat, ~"(module (import \"env\" \"m\" (memory 1)))"}),
-    {error, #{class := preinit, kind := unsupported_import}} =
+    {error, #{class := link, kind := unsupported_import}} =
         wasmtime:instantiate(Imported, #{}, #{snapshotable => true}),
     ok.
 
@@ -163,12 +164,12 @@ compatibility_key(_) ->
     Init = init_instance(),
     {ok, Keyed} = wasmtime:snapshot(Init, #{version => ~"2", compatibility_key => {abi, 1}}),
     {ok, _} = wasmtime:restore(Keyed, imports(0), #{compatibility_key => {abi, 1}}),
-    {error, #{class := snapshot, kind := snapshot_incompatible}} =
+    {error, #{class := invalid, kind := snapshot_incompatible}} =
         wasmtime:restore(Keyed, imports(0), #{compatibility_key => {abi, 2}}),
-    {error, #{class := snapshot, kind := snapshot_incompatible}} =
+    {error, #{class := invalid, kind := snapshot_incompatible}} =
         wasmtime:restore(Keyed, imports(0), #{}),
     {ok, Plain} = wasmtime:snapshot(Init),
-    {error, #{class := snapshot, kind := snapshot_incompatible}} =
+    {error, #{class := invalid, kind := snapshot_incompatible}} =
         wasmtime:restore(Plain, imports(0), #{compatibility_key => {abi, 1}}),
     ok.
 
@@ -208,7 +209,7 @@ save_and_load(Config) ->
     {ok, Fresh} = wasmtime:restore(Loaded, imports(0), #{compatibility_key => k}),
     {ok, [40]} = wasmtime:call(Fresh, ~"n", []),
     {ok, [77]} = wasmtime:call(Fresh, ~"peek", []),
-    {error, #{class := snapshot, kind := snapshot_not_written}} =
+    {error, #{class := link, kind := snapshot_not_written}} =
         wasmtime:save_snapshot(Image, filename:join([Path, "no", "such", "dir"])),
     ok.
 
@@ -218,22 +219,22 @@ load_refuses(Config) ->
     {ok, Image} = wasmtime:snapshot(init_instance()),
     ok = wasmtime:save_snapshot(Image, Path),
     {ok, Other} = wasmtime:load({wat, ~"(module (memory 1))"}),
-    {error, #{class := snapshot, kind := snapshot_incompatible}} = wasmtime:load_snapshot(
+    {error, #{class := invalid, kind := snapshot_incompatible}} = wasmtime:load_snapshot(
         Path, Other
     ),
     {ok, Compiled} = wasmtime:compile({wat, wat()}),
-    {error, #{class := snapshot, kind := module_not_loaded}} = wasmtime:load_snapshot(
+    {error, #{class := invalid, kind := module_not_loaded}} = wasmtime:load_snapshot(
         Path, Compiled
     ),
-    {error, #{class := snapshot, kind := snapshot_not_read}} =
+    {error, #{class := link, kind := snapshot_not_read}} =
         wasmtime:load_snapshot(filename:join(Dir, "missing.snap"), loaded()),
     Junk = filename:join(Dir, "junk.snap"),
     ok = file:write_file(Junk, ~"not an image"),
-    {error, #{class := snapshot, kind := snapshot_not_read}} = wasmtime:load_snapshot(
+    {error, #{class := malformed, kind := snapshot_not_read}} = wasmtime:load_snapshot(
         Junk, loaded()
     ),
     ok = file:write_file(Junk, term_to_binary({wasmtime_snapshot, 1, not_a_hash, 1, 1, 1})),
-    {error, #{class := snapshot, kind := snapshot_not_read}} = wasmtime:load_snapshot(
+    {error, #{class := malformed, kind := snapshot_not_read}} = wasmtime:load_snapshot(
         Junk, loaded()
     ),
     ok.

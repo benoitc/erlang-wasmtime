@@ -66,7 +66,7 @@ compile_and_cache(WasmPath, Cache) ->
 ```
 
 A stale cache (other Wasmtime version, other CPU features) fails
-`deserialize/1` with `class => compile` and falls through to a fresh compile.
+`deserialize/1` with `kind => incompatible_module` and falls through to a fresh compile.
 
 ## Compile options and compatibility
 

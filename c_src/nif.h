@@ -126,6 +126,9 @@ wasmtime_component_linker_add_wasi_http_p3(wasmtime_component_linker_t *linker);
 #endif
 
 #define EPOCH_TICK_NS (10 * 1000 * 1000) /* 10 ms */
+/* Fuel for instantiating a metered module when none is given, beside the
+ * unit per byte of memory (nif_instantiate.c, give_init_fuel). */
+#define INIT_FUEL 10000000
 #define MAX_VALS 32
 
 /* -------------------------------------------------------------- atoms -- */
@@ -133,14 +136,14 @@ extern ERL_NIF_TERM atom_ok, atom_error, atom_true, atom_false, atom_compiler, a
     atom_none, atom_capture, atom_binary, atom_trace, atom_func_index, atom_func_offset,
     atom_func_name, atom_module_name, atom_immutable, atom_undefined, atom_inherit, atom_file,
     atom_read, atom_write, atom_nan, atom_infinity, atom_neg_infinity, atom_class, atom_kind,
-    atom_message, atom_status, atom_not_running, atom_func, atom_global, atom_table, atom_memory,
-    atom_tag, atom_wasmtime_result, atom_wasmtime_host_call, atom_no_pending_host_call,
-    atom_enqueued, atom_stream, atom_wasmtime_stream, atom_stdout, atom_stderr, atom_channel,
-    atom_null, atom_i31, atom_externref, atom_funcref, atom_struct, atom_array, atom_anyref,
-    atom_instance, atom_imports, atom_wasi, atom_memory_limit, atom_max_tables,
-    atom_max_table_elements, atom_max_instances, atom_host_timeout, atom_host, atom_inbox_limit,
-    atom_shim, atom_args, atom_env, atom_dirs, atom_stdin, atom_output_limit, atom_clocks,
-    atom_monotonic, atom_all;
+    atom_msg, atom_ctx, atom_not_running, atom_func, atom_global, atom_table, atom_memory, atom_tag,
+    atom_wasmtime_result, atom_wasmtime_host_call, atom_no_pending_host_call, atom_enqueued,
+    atom_stream, atom_wasmtime_stream, atom_stdout, atom_stderr, atom_channel, atom_null, atom_i31,
+    atom_externref, atom_funcref, atom_struct, atom_array, atom_anyref, atom_instance, atom_imports,
+    atom_wasi, atom_memory_limit, atom_max_tables, atom_max_table_elements, atom_max_instances,
+    atom_host_timeout, atom_host, atom_inbox_limit, atom_shim, atom_args, atom_env, atom_dirs,
+    atom_stdin, atom_output_limit, atom_clocks, atom_monotonic, atom_all, atom_detail, atom_name,
+    atom_reason, atom_wasi_exit, atom_module, atom_fuel;
 
 /* -------------------------------------------------------------- types -- */
 /* wasm_valtype_kind aborts the process on v128 and on non-nullable references
@@ -252,8 +255,9 @@ typedef struct instance {
     ErlNifEnv *reply_env;
     ERL_NIF_TERM reply;
     unsigned timeout_ms;
-    int failed; /* worker only: a host function failed the request */
-    char *msg;  /* worker only: its reason */
+    int failed;           /* worker only: a host function failed the request */
+    ErlNifEnv *error_env; /* worker only: holds error */
+    ERL_NIF_TERM error;   /* worker only: what the request answers with */
   } host;
 
   /* Bytes sent to the guest with send/2, one chunk per call, read by the
@@ -380,9 +384,14 @@ ERL_NIF_TERM mk_atom(ErlNifEnv *env, const char *s);
 ERL_NIF_TERM mk_binary(ErlNifEnv *env, const void *data, size_t len);
 ERL_NIF_TERM mk_error(ErlNifEnv *env, const char *cls, const char *kind, const char *msg,
                       size_t len);
+ERL_NIF_TERM mk_error_ctx(ErlNifEnv *env, const char *cls, const char *kind, const char *msg,
+                          size_t len, ERL_NIF_TERM ctx);
+ERL_NIF_TERM mk_name_error(ErlNifEnv *env, const char *cls, const char *kind, const char *msg,
+                           const void *name, size_t len);
+ERL_NIF_TERM arity_error(ErlNifEnv *env, size_t expected, ERL_NIF_TERM args);
 ERL_NIF_TERM mk_error_s(ErlNifEnv *env, const char *cls, const char *kind, const char *msg);
 ERL_NIF_TERM trap_to_term(ErlNifEnv *env, wasm_trap_t *trap);
-ERL_NIF_TERM error_to_term(ErlNifEnv *env, wasmtime_error_t *err, const char *cls);
+ERL_NIF_TERM error_to_term(ErlNifEnv *env, wasmtime_error_t *err, const char *hint);
 void vtype_of(const wasm_valtype_t *vt, vtype_t *t);
 uint8_t kind_of(const wasm_valtype_t *vt);
 shape_t shape_of(const wasm_functype_t *ft);
@@ -394,9 +403,10 @@ ERL_NIF_TERM val_to_term(ErlNifEnv *env, instance_t *inst, wasmtime_val_t *v);
 const char *term_to_val(ErlNifEnv *env, instance_t *inst, ERL_NIF_TERM term, const vtype_t *t,
                         wasmtime_val_t *v);
 void unroot_vals(wasmtime_val_t *vals, size_t n);
-ERL_NIF_TERM conv_error(ErlNifEnv *env, const char *cls, const char *kind);
-ERL_NIF_TERM term_or_unsupported(ErlNifEnv *env, const char *cls, ERL_NIF_TERM t);
+ERL_NIF_TERM conv_error(ErlNifEnv *env, const char *kind, const char *badarg);
+ERL_NIF_TERM term_or_unsupported(ErlNifEnv *env, ERL_NIF_TERM t);
 engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err);
+int fuel_of(ErlNifEnv *env, ERL_NIF_TERM term, const engine_t *engine, ErlNifUInt64 *fuel);
 ERL_NIF_TERM key_term(ErlNifEnv *env, const engine_t *e);
 ERL_NIF_TERM plain_key(ErlNifEnv *env, int fuel);
 int pool_fits(unsigned memories, unsigned core_instances);
@@ -454,7 +464,8 @@ ERL_NIF_TERM outcome(instance_t *inst, ErlNifEnv *out, wasmtime_error_t *e, wasm
 enum host_status { HOST_OK, HOST_INTERRUPTED, HOST_FAILED };
 enum host_status host_exchange(instance_t *inst, hostfn_t *fn, ErlNifEnv *menv, ERL_NIF_TERM args,
                                ERL_NIF_TERM *results, const char **fail);
-wasm_trap_t *host_outcome(instance_t *inst, enum host_status st, const char *fail);
+wasm_trap_t *host_outcome(instance_t *inst, const hostfn_t *fn, enum host_status st,
+                          const char *fail, const char *detail);
 wasm_trap_t *host_callback(void *envp, wasmtime_caller_t *caller, wasmtime_val_raw_t *vals,
                            size_t nvals);
 wasm_trap_t *host_callback_typed(void *envp, wasmtime_caller_t *caller, const wasmtime_val_t *args,

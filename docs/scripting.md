@@ -62,12 +62,12 @@ stops a script.
 
 ## Read a failure
 
-Every failure is `{error, #{class, kind, message, ctx}}`
+Every failure is `{error, #{class, kind, msg, ctx}}`
 (`wasmtime_worker_error`).
 
 | `class` | `kind` | Meaning |
 |---|---|---|
-| `adapter` | `adapter_failure`, `ctx.code` `exception` | the script raised; the message is in `message` |
+| `adapter` | `adapter_failure`, `ctx.code` `exception` | the script raised; the message is in `msg` |
 | `adapter` | `adapter_failure`, `ctx.code` `no_entry_point`, `no_result`, `bad_result` | no `main`, or a result that is not JSON |
 | `adapter` | `exit` | the interpreter exited with `ctx.code` |
 | `worker` | `timeout` | the request ran past `timeout`; the script was interrupted |

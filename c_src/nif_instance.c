@@ -92,7 +92,7 @@ void *worker_main(void *arg) {
     inst->queue.head = req->next;
     if (!req->cancelled) {
       ErlNifEnv *out = enif_alloc_env();
-      send_result(inst, req, out, mk_error_s(out, "call", "stopped", "instance is stopped"));
+      send_result(inst, req, out, mk_error_s(out, "link", "stopped", "instance is stopped"));
       enif_free_env(out);
     }
     req_done(inst, req);
@@ -166,7 +166,7 @@ void instance_dtor(ErlNifEnv *env, void *obj) {
   enif_free(inst->capture.buf[0].data);
   enif_free(inst->capture.buf[1].data);
   while (inst->inbox.head) inbox_drop_head(inst);
-  enif_free(inst->host.msg);
+  if (inst->host.error_env) enif_free_env(inst->host.error_env);
   if (inst->wasm.mod) enif_release_resource(inst->wasm.mod);
   pthread_mutex_destroy(&inst->mu);
   pthread_cond_destroy(&inst->cv);
@@ -273,14 +273,14 @@ ERL_NIF_TERM enqueue(ErlNifEnv *env, instance_t *inst, enum req_kind kind, ERL_N
   if (inst->queue.stopping) {
     pthread_mutex_unlock(&inst->mu);
     req_free(r);
-    return mk_error_s(env, "call", "stopped", "instance is stopped");
+    return mk_error_s(env, "link", "stopped", "instance is stopped");
   }
   /* A host function calling back into the instance it runs on would wait for
    * itself: the guest is parked until this process answers the host call. */
   if (inst->queue.state == ST_IN_HOST && enif_compare_pids(&inst->host.target, &r->caller) == 0) {
     pthread_mutex_unlock(&inst->mu);
     req_free(r);
-    return mk_error_s(env, "call", "reentrant",
+    return mk_error_s(env, "link", "reentrant",
                       "a host function cannot call the instance it is running on");
   }
   r->monitored = enif_monitor_process(env, inst, &r->caller, &r->mon) == 0;
@@ -306,18 +306,18 @@ ERL_NIF_TERM with_export(ErlNifEnv *env, ERL_NIF_TERM handle, ERL_NIF_TERM name,
   pthread_mutex_lock(&inst->mu);
   if (inst->queue.state == ST_RUNNING) {
     pthread_mutex_unlock(&inst->mu);
-    return mk_error_s(env, what, "busy", "guest is running");
+    return mk_error_s(env, "link", "instance_busy", "guest is running");
   }
   if (inst->wasm.component) {
     pthread_mutex_unlock(&inst->mu);
-    return mk_error_s(env, what, "component", "a component instance has no core exports");
+    return mk_error_s(env, "link", "component", "a component instance has no core exports");
   }
   if (!inst->wasm.instantiated ||
       !wasmtime_instance_export_get(inst->wasm.ctx, &inst->wasm.instance, (const char *)nm.data,
                                     nm.size, ext) ||
       ext->kind != kind) {
     pthread_mutex_unlock(&inst->mu);
-    return mk_error(env, what, "no_such_export", (const char *)nm.data, nm.size);
+    return mk_name_error(env, "link", "unknown_export", "unknown export", nm.data, nm.size);
   }
   *out = inst;
   return 0;
@@ -330,11 +330,11 @@ ERL_NIF_TERM with_ref(ErlNifEnv *env, ERL_NIF_TERM term, ref_t **out) {
   pthread_mutex_lock(&r->inst->mu);
   if (r->inst->queue.state == ST_RUNNING) {
     pthread_mutex_unlock(&r->inst->mu);
-    return mk_error_s(env, "ref", "busy", "guest is running");
+    return mk_error_s(env, "link", "instance_busy", "guest is running");
   }
   if (!r->inst->wasm.instantiated) {
     pthread_mutex_unlock(&r->inst->mu);
-    return mk_error_s(env, "ref", "stopped", "instance is stopped");
+    return mk_error_s(env, "link", "stopped", "instance is stopped");
   }
   *out = r;
   return 0;
@@ -354,11 +354,11 @@ ERL_NIF_TERM with_memory(ErlNifEnv *env, ERL_NIF_TERM handle, ERL_NIF_TERM name,
   pthread_mutex_lock(&inst->mu);
   if (inst->queue.state == ST_RUNNING) {
     pthread_mutex_unlock(&inst->mu);
-    return mk_error_s(env, "memory", "busy", "guest is running");
+    return mk_error_s(env, "link", "instance_busy", "guest is running");
   }
   if (!inst->wasm.instantiated || inst->wasm.component) {
     pthread_mutex_unlock(&inst->mu);
-    return mk_error_s(env, "memory", "no_memory", "instance exports no memory");
+    return mk_error_s(env, "link", "no_memory", "instance exports no memory");
   }
   if (named) {
     wasmtime_extern_t ext;
@@ -366,14 +366,15 @@ ERL_NIF_TERM with_memory(ErlNifEnv *env, ERL_NIF_TERM handle, ERL_NIF_TERM name,
                                       nm.size, &ext) ||
         ext.kind != WASMTIME_EXTERN_MEMORY) {
       pthread_mutex_unlock(&inst->mu);
-      return mk_error(env, "memory", "no_memory", (const char *)nm.data, nm.size);
+      return mk_name_error(env, "link", "no_memory", "instance exports no such memory", nm.data,
+                           nm.size);
     }
     *mem = ext.of.memory;
   } else if (inst->wasm.has_memory) {
     *mem = inst->wasm.memory;
   } else {
     pthread_mutex_unlock(&inst->mu);
-    return mk_error_s(env, "memory", "no_memory", "instance exports no memory");
+    return mk_error_s(env, "link", "no_memory", "instance exports no memory");
   }
   *out = inst;
   return 0;

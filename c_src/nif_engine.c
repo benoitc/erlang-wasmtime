@@ -261,21 +261,21 @@ engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err) {
   }
   if (nengines >= MAX_ENGINES) {
     pthread_mutex_unlock(&engines_mu);
-    *err = mk_error_s(env, "compile", "too_many_configurations",
+    *err = mk_error_s(env, "exhaustion", "too_many_configurations",
                       "at most 32 distinct compile option sets per VM");
     return 0;
   }
 #if !NIF_HAVE_COMPILER
   if (want.opt_level != 1) {
     pthread_mutex_unlock(&engines_mu);
-    *err = mk_error_s(env, "compile", "unavailable",
+    *err = mk_error_s(env, "link", "unavailable",
                       "this build of erlang_wasmtime has no compiler: opt_level must be speed");
     return 0;
   }
 #endif
   if (want.pooling && !pool_fits(want.pool_memories, want.pool_core_instances)) {
     pthread_mutex_unlock(&engines_mu);
-    *err = mk_error_s(env, "compile", "pool_too_large",
+    *err = mk_error_s(env, "exhaustion", "pool_too_large",
                       "this host cannot reserve the address space for that many pooled memories "
                       "(about 4 GB each): lower pooling memories or instances");
     return 0;
@@ -288,7 +288,7 @@ engine_t *engine_for(ErlNifEnv *env, ERL_NIF_TERM key, ERL_NIF_TERM *err) {
     if (!missing) missing = "setting";
     snprintf(msg, sizeof msg, "this build of erlang_wasmtime has no %s%s", missing,
              strcmp(missing, "pooling allocator") == 0 ? "" : " proposal");
-    *err = mk_error_s(env, "compile", "unavailable", msg);
+    *err = mk_error_s(env, "link", "unavailable", msg);
     return 0;
   }
   engine_t *e = enif_alloc(sizeof *e);

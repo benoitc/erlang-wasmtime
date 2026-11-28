@@ -215,14 +215,10 @@ static wasmtime_error_t *host_resource_dropped(void *data, wasmtime_context_t *c
       list = enif_make_list_cell(menv, enif_make_uint(menv, rep), enif_make_list(menv, 0));
   enum host_status st = host_exchange(inst, fn, menv, list, &value, &fail);
   pthread_mutex_unlock(&inst->mu);
-  wasm_trap_t *trap = host_outcome(inst, st, fail);
+  wasm_trap_t *trap = host_outcome(inst, fn, st, fail, NULL);
   if (!trap) return NULL;
-  wasm_message_t msg;
-  wasm_trap_message(trap, &msg);
-  wasmtime_error_t *e = wasmtime_error_new(msg.size ? msg.data : "host error");
-  wasm_byte_vec_delete(&msg);
   wasm_trap_delete(trap);
-  return e;
+  return wasmtime_error_new("host error");
 }
 
 /* Defines the resource `rname` of an interface as a host resource: its type
@@ -332,7 +328,7 @@ static ERL_NIF_TERM bind_component_imports(linker_entry_t *le, module_res_t *m, 
   wasmtime_component_type_delete(ct);
   if (refused) {
     if (e) wasmtime_error_delete(e);
-    return mk_error_s(out, "link", "badarg", NOT_CROSSING);
+    return mk_error_s(out, "link", "unsupported_type", NOT_CROSSING);
   }
   return e ? error_to_term(out, e, "link") : 0;
 }
@@ -366,10 +362,10 @@ static linker_entry_t *build_centry(module_res_t *m, ErlNifEnv *env, ERL_NIF_TER
 #endif
     }
 #endif
-    if (e) *err = error_to_term(out, e, "wasi");
+    if (e) *err = error_to_term(out, e, "wasi_config");
 #else
     (void)monotonic;
-    *err = mk_error_s(out, "wasi", "unavailable", "this build of erlang_wasmtime has no WASI");
+    *err = mk_error_s(out, "link", "unavailable", "this build of erlang_wasmtime has no WASI");
 #endif
   }
   if (!*err) *err = bind_component_imports(le, m, env, imports, out);
@@ -472,7 +468,7 @@ static ERL_NIF_TERM drop_resource(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM
                                   ErlNifEnv *out) {
   unsigned i;
   if (!enif_get_uint(env, h, &i) || i == 0 || i > inst->wasm.nres || !inst->wasm.res[i - 1])
-    return mk_error_s(out, "call", "badarg", "not a live resource handle of this instance");
+    return mk_error_s(out, "link", "badarg", "not a live resource handle of this instance");
   wasmtime_component_resource_any_t *r = inst->wasm.res[i - 1];
   wasmtime_context_set_epoch_deadline(inst->wasm.ctx, 1);
   wasmtime_error_t *e;
@@ -488,7 +484,7 @@ static ERL_NIF_TERM drop_resource(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM
   inst->wasm.res[i - 1] = NULL;
   pthread_mutex_unlock(&inst->mu);
   wasmtime_component_resource_any_delete(r);
-  ERL_NIF_TERM result = outcome(inst, out, e, NULL, "call");
+  ERL_NIF_TERM result = outcome(inst, out, e, NULL, "call_failed");
   return enif_is_identical(result, atom_ok) ? enif_make_tuple2(out, atom_ok, atom_undefined)
                                             : result;
 }
@@ -500,19 +496,20 @@ ERL_NIF_TERM component_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
   const ERL_NIF_TERM *dt;
   int dar;
   if (inst->wasm.cancelled)
-    return mk_error_s(out, "call", "trap",
+    return mk_error_s(out, "link", "interrupted_instance",
                       "the instance was interrupted and cannot be entered again");
   if (enif_get_tuple(env, req->name, &dar, &dt) && dar == 2 &&
       enif_is_identical(dt[0], mk_atom(env, "drop")))
     return drop_resource(inst, env, dt[1], out);
   if (!enif_inspect_iolist_as_binary(env, req->name, &name))
-    return mk_error_s(out, "call", "badarg", "export name must be a binary");
+    return mk_error_s(out, "link", "badarg", "export name must be a binary");
   wasmtime_component_export_index_t *idx = find_export(inst, (const char *)name.data, name.size);
   wasmtime_component_func_t func;
   int found =
       idx && wasmtime_component_instance_get_func(&inst->wasm.cinst, inst->wasm.ctx, idx, &func);
   if (idx) wasmtime_component_export_index_delete(idx);
-  if (!found) return mk_error(out, "call", "no_such_export", (const char *)name.data, name.size);
+  if (!found)
+    return mk_name_error(out, "link", "unknown_export", "unknown export", name.data, name.size);
 
   wasmtime_component_func_type_t *ft = wasmtime_component_func_type(&func, inst->wasm.ctx);
   size_t np = wasmtime_component_func_type_param_count(ft);
@@ -523,13 +520,13 @@ ERL_NIF_TERM component_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
   wasmtime_component_val_t *args = NULL;
   size_t built = 0;
   if (!enif_get_list_length(env, req->args, &nargs) || nargs != np) {
-    result = mk_error_s(out, "call", "badarity", "wrong number of arguments");
+    result = arity_error(out, np, enif_make_copy(out, req->args));
     goto done;
   }
   /* converting a stream, future or error-context result panics inside the C
    * API: refuse by type, before the call */
   if (has_result && !ctype_crosses(&rt)) {
-    result = mk_error_s(out, "call", "badarg", NOT_CROSSING);
+    result = mk_error_s(out, "link", "unsupported_type", NOT_CROSSING);
     goto done;
   }
   args = enif_alloc((np ? np : 1) * sizeof *args);
@@ -543,16 +540,17 @@ ERL_NIF_TERM component_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
     wasmtime_component_valtype_delete(&pt);
     if (why) {
       built++;
-      result = mk_error_s(out, "call", "badarg", why);
+      result = mk_error_s(out, "link",
+                          strcmp(why, NOT_CROSSING) ? "argument_type" : "unsupported_type", why);
       goto done;
     }
   }
   ErlNifUInt64 fuel;
-  if (enif_get_uint64(env, req->opts, &fuel)) {
+  if (fuel_of(env, req->opts, inst->wasm.mod->engine, &fuel)) {
     wasmtime_error_t *fe = wasmtime_context_set_fuel(inst->wasm.ctx, fuel);
     if (fe) {
       wasmtime_error_delete(fe);
-      result = mk_error_s(out, "call", "fuel_disabled",
+      result = mk_error_s(out, "link", "fuel_disabled",
                           "the component was not compiled with fuel metering");
       goto done;
     }
@@ -570,7 +568,7 @@ ERL_NIF_TERM component_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
 #endif
     e = wasmtime_component_func_call(&func, inst->wasm.ctx, args, np, &res, has_result ? 1 : 0);
   note_cancel(inst, e);
-  result = outcome(inst, out, e, NULL, "call");
+  result = outcome(inst, out, e, NULL, "call_failed");
   const ERL_NIF_TERM *rt2;
   int rar;
   if (enif_get_tuple(out, result, &rar, &rt2) && rar == 2 && enif_is_identical(rt2[0], atom_ok)) {
@@ -579,7 +577,7 @@ ERL_NIF_TERM component_call(instance_t *inst, req_t *req, ErlNifEnv *out) {
   } else if (enif_is_identical(result, atom_ok)) {
     ERL_NIF_TERM v = has_result ? cval_to_term(out, inst, &res, &rt) : atom_undefined;
     e = wasmtime_component_func_post_return(&func, inst->wasm.ctx);
-    result = e ? outcome(inst, out, e, NULL, "call") : enif_make_tuple2(out, atom_ok, v);
+    result = e ? outcome(inst, out, e, NULL, "call_failed") : enif_make_tuple2(out, atom_ok, v);
   }
   if (has_result) wasmtime_component_val_delete(&res);
 done:
@@ -611,23 +609,21 @@ wasmtime_error_t *component_host_callback(void *envp, wasmtime_context_t *ctx,
     if (has) wasmtime_component_valtype_delete(&pt);
   }
   ERL_NIF_TERM value;
+  const char *why = NULL;
   enum host_status st = host_exchange(inst, fn, menv, list, &value, &fail);
   if (st == HOST_OK && nresults == 1) {
     wasmtime_component_valtype_t rt;
     if (wasmtime_component_func_type_result(ty, &rt)) {
-      fail = term_to_cval(inst->host.reply_env, inst, value, &rt, &results[0]);
+      why = term_to_cval(inst->host.reply_env, inst, value, &rt, &results[0]);
+      if (why) fail = "result_type";
       wasmtime_component_valtype_delete(&rt);
     }
   }
   pthread_mutex_unlock(&inst->mu);
-  wasm_trap_t *trap = host_outcome(inst, st, fail);
+  wasm_trap_t *trap = host_outcome(inst, fn, st, fail, why);
   if (!trap) return NULL;
-  wasm_message_t msg;
-  wasm_trap_message(trap, &msg);
-  wasmtime_error_t *e = wasmtime_error_new(msg.size ? msg.data : "host error");
-  wasm_byte_vec_delete(&msg);
   wasm_trap_delete(trap);
-  return e;
+  return wasmtime_error_new("host error");
 }
 
 /* --------------------------------------------------- imports, exports */

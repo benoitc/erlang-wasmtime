@@ -141,5 +141,5 @@ state_change_source() ->
     >>.
 
 classify({ok, _Values}, _State) -> continue;
-classify({error, #{class := exit, status := Code}}, _State) -> {stop, {exited, Code}};
+classify({error, #{ctx := #{wasi_exit := Code}}}, _State) -> {stop, {exited, Code}};
 classify({error, _}, _State) -> {stop, trapped}.

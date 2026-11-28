@@ -75,7 +75,7 @@ at all.
 A thrown exception exits with status 1 and its message on stderr:
 
 ```erlang
-{error, #{class := exit, status := 1}} = wasmtime:call(Inst, ~"_start", []),
+{error, #{ctx := #{wasi_exit := 1}}} = wasmtime:call(Inst, ~"_start", []),
 {ok, {<<>>, ~"Error: boom\n    at <anonymous> (<cmdline>:1:11)\n\n", _}} = wasmtime:read_output(Inst).
 ```
 

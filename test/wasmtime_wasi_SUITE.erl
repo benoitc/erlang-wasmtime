@@ -130,8 +130,8 @@ wasi_read_dir_refuses_write(Config) ->
 
 wasi_no_wasi_no_imports(_) ->
     Mod = compile(wasi_argv_wat()),
-    {error, #{class := link, message := Msg}} = wasmtime:instantiate(Mod),
-    ?assertMatch({_, _}, binary:match(Msg, ~"wasi_snapshot_preview1")),
+    {error, #{class := link, kind := unknown_import, ctx := Ctx}} = wasmtime:instantiate(Mod),
+    #{module := ~"wasi_snapshot_preview1"} = Ctx,
     %% a wasi option that is not a map is rejected in Erlang
     ?assertError(function_clause, wasmtime:instantiate(Mod, #{wasi => yes})),
     ok.
@@ -206,7 +206,7 @@ wasi_read_output_while_running(_) ->
     Self = self(),
     Pause = fun(Ctx, []) ->
         %% inside the host call the guest is parked: read what it wrote so far
-        Self ! {mid, wasmtime:read_output(Ctx)},
+        Self ! {mid, wasmtime:read_output(maps:get(instance, Ctx))},
         {ok, []}
     end,
     Inst = instance(Slow, #{wasi => #{stdout => capture}, imports => #{{~"env", ~"pause"} => Pause}}),

@@ -96,6 +96,7 @@ on an instance at a time; concurrent callers are queued.
     error/0,
     frame/0,
     host_fun/0,
+    host_context/0,
     imports/0,
     snapshot/0,
     valtype/0,
@@ -169,30 +170,12 @@ guest's collector reclaim it. A ref belongs to one instance.
 -opaque ref() :: reference().
 
 -doc """
-Every failure has a class, a machine-readable kind and a message. Non-zero
-WASI exits also carry `status`; traps carry the wasm frames in `trace`,
-innermost first.
+Every failure has a class, a machine-readable kind, a message and a context
+map, as erlang_wasm's errors do; see `wasmtime_error`. A trap carries the
+wasm frames in `ctx.trace`, innermost first, and a program that called
+`proc_exit` its status in `ctx.wasi_exit`.
 """.
--type error() ::
-    {error, #{
-        class :=
-            compile
-            | link
-            | call
-            | trap
-            | host
-            | wasi
-            | memory
-            | global
-            | table
-            | exit
-            | preinit
-            | snapshot,
-        kind := atom(),
-        message := binary(),
-        status => integer(),
-        trace => [frame()]
-    }}.
+-type error() :: {error, wasmtime_error:error()}.
 
 -doc "One wasm frame of a trap: the function's index and byte offset, and its names when the module has them.".
 -type frame() :: #{
@@ -286,14 +269,23 @@ one Wasmtime engine, created on first use and kept; at most 32 exist per VM.
     | exceptions.
 
 -doc """
-A host function. Returns the results the guest expects, or `{error, Reason}`
-which traps the guest. For a component import it may also take the argument
-list alone and return the value itself, erlang_wasm's typed form
+A host function. It takes a context map, whose `instance` is the instance
+that called it, and the arguments, and returns the results the guest expects,
+or `{trap, Reason}` which traps the guest (`{error, Reason}` does the same).
+`{Module, Function}` names one. For a component import it may also take the
+argument list alone and return the value itself, erlang_wasm's typed form
 (`import_fun/2`); an exception then traps the guest.
 """.
 -type host_fun() ::
-    fun((instance(), [value() | term()]) -> {ok, [value() | term()]} | {error, term()})
+    fun(
+        (host_context(), [value() | term()]) ->
+            {ok, [value() | term()]} | {trap, term()} | {error, term()}
+    )
+    | {module(), atom()}
     | fun(([term()]) -> term()).
+
+-doc "What a host function receives first. Memory functions accept it.".
+-type host_context() :: #{instance := instance()}.
 
 -doc """
 WASI configuration. Nothing is granted by default.
@@ -425,11 +417,9 @@ load_file(Path) ->
                 _ -> load(Bin)
             end;
         {error, Reason} ->
-            {error, #{
-                class => compile,
-                kind => file_error,
-                message => format_reason({Path, Reason})
-            }}
+            wasmtime_error:new(link, file_error, ~"cannot read module file", #{
+                path => Path, reason => Reason
+            })
     end.
 
 -doc """
@@ -450,18 +440,27 @@ Use it when you need the bytes rather than a module: `preinit/3` and
 wat2wasm(Text) -> wasmtime_nif:wat2wasm(iolist_to_binary(Text)).
 
 -doc """
-Decode and validate a binary module without compiling it.
+Validate a module and answer it, as erlang_wasm's `wasm:validate/1`.
 
-Cheaper than `compile/1` when the question is only whether the bytes are a
-well-formed module; the errors have the same shape.
+Given the bytes of a module, decode and validate them without compiling,
+which is cheaper than `compile/1`; the errors have the same shape. A module
+you already compiled is valid and is answered as it is.
 """.
--spec validate(binary()) -> ok | error().
-validate(Bin) -> validate(Bin, #{}).
+-spec validate(binary() | module_ref()) -> {ok, binary() | module_ref()} | error().
+validate(Source) -> validate(Source, #{}).
 
 -doc "Validate against `t:compile_options/0`: with proposals disabled, a module using one is refused.".
--spec validate(binary(), compile_options()) -> ok | error().
+-spec validate(binary() | module_ref(), compile_options()) ->
+    {ok, binary() | module_ref()} | error().
 validate(Bin, Opts) when is_binary(Bin) ->
-    with_key(Opts, fun(Key) -> wasmtime_nif:validate(Bin, Key) end).
+    case with_key(Opts, fun(Key) -> wasmtime_nif:validate(Bin, Key) end) of
+        ok -> {ok, Bin};
+        {error, _} = Error -> Error
+    end;
+validate(Mod, _Opts) when is_reference(Mod) ->
+    %% badarg for anything but a module
+    _ = module_kind(Mod),
+    {ok, Mod}.
 
 -doc """
 Whether a compiled module is a core module or a component.
@@ -618,8 +617,9 @@ run(Inst) -> run(Inst, #{}).
 Run a WASI 0.2 or 0.3 command component: call its `wasi:cli/run` export.
 
 Returns `ok` when the program ends normally. `run` answering its error
-case, or `exit` with a non-zero status, is `{error, #{class := exit,
-status := Status}}`, as for a preview 1 program. `Opts` are `call/4`'s.
+case, or `exit` with a non-zero status, is `{error, #{class := trap, kind :=
+host_error, ctx := #{wasi_exit := Status}}}`, as for a preview 1 program.
+`Opts` are `call/4`'s.
 """.
 -spec run(instance(), #{timeout => timeout(), fuel => non_neg_integer()}) -> ok | error().
 run(Inst, Opts) ->
@@ -630,9 +630,11 @@ run(Inst, Opts) ->
         {ok, undefined} ->
             ok;
         {ok, {error, _}} ->
-            {error, #{
-                class => exit, kind => exit, status => 1, message => ~"run returned an error"
-            }};
+            wasmtime_error:new(trap, host_error, ~"run returned an error", #{
+                wasi_exit => 1, reason => {wasi_exit, 1}
+            });
+        {error, #{ctx := #{wasi_exit := 0}}} ->
+            ok;
         {error, _} = Error ->
             Error
     end.
@@ -645,25 +647,37 @@ handle(#instance{handle = H}) -> H.
 -spec imports(module_ref()) -> [{binary(), binary(), func | global | table | memory | tag}].
 imports(Mod) -> wasmtime_nif:module_imports(Mod).
 
--doc "List what a module, or the module of an instance, exports, as `{Name, Kind}`.".
--spec exports(module_ref() | instance()) -> [{binary(), func | global | table | memory | tag}].
-exports(#instance{module = Mod}) -> wasmtime_nif:module_exports(Mod);
-exports(Mod) -> wasmtime_nif:module_exports(Mod).
+-doc """
+What a module, or the module of an instance, exports, as erlang_wasm's
+`wasm:exports/1`: `#{Name => {Kind, Index}}`. Wasmtime does not report the
+index, so it is `undefined` here. A component also exports `instance`s, and
+lists their functions as `Interface#Function`.
+""".
+-spec exports(module_ref() | instance()) -> #{binary() => {atom(), undefined}}.
+exports(#instance{module = Mod}) ->
+    exports(Mod);
+exports(Mod) ->
+    #{Name => {export_kind(Kind), undefined} || {Name, Kind} <- wasmtime_nif:module_exports(Mod)}.
+
+export_kind(memory) -> mem;
+export_kind(Kind) -> Kind.
 
 -doc """
 The type of every function a core module exports, without instantiating it,
 as erlang_wasm's `wasm:func_types_of/1`: `#{Name => {ok, {Params, Results}}}`.
+Bytes that do not compile answer `{error, {undecodable_core, Error}}`.
 
 Takes a compiled module, or what `compile/1` takes. Bytes are compiled
 first, so pass the module when you already have one. A component has no core
 function exports and answers an empty map.
 """.
 -spec func_types_of(module_ref() | binary() | {wat, iodata()}) ->
-    {ok, #{binary() => {ok, {[valtype()], [valtype()]}}}} | error().
+    {ok, #{binary() => {ok, {[valtype()], [valtype()]}}}}
+    | {error, {undecodable_core, wasmtime_error:error()}}.
 func_types_of(Source) when is_binary(Source); is_tuple(Source) ->
     case compile(Source) of
         {ok, Mod} -> func_types_of(Mod);
-        {error, _} = Error -> Error
+        {error, Error} -> {error, {undecodable_core, Error}}
     end;
 func_types_of(Mod) ->
     {ok,
@@ -674,21 +688,18 @@ func_types_of(Mod) ->
 
 -doc """
 The type of one function export, `{ok, {Params, Results}}`, without
-instantiating. `kind => not_a_func_export` when the module exports no
-function of that name.
+instantiating. `{error, {not_a_func_export, Name}}` when the module exports
+no function of that name.
 """.
 -spec func_type_of(module_ref() | binary() | {wat, iodata()}, binary()) ->
-    {ok, {[valtype()], [valtype()]}} | error().
+    {ok, {[valtype()], [valtype()]}}
+    | {error, {not_a_func_export, binary()} | {undecodable_core, wasmtime_error:error()}}.
 func_type_of(Source, Name) ->
     case func_types_of(Source) of
         {ok, #{Name := Type}} ->
             Type;
         {ok, _} ->
-            {error, #{
-                class => link,
-                kind => not_a_func_export,
-                message => <<"no function export named ", Name/binary>>
-            }};
+            {error, {not_a_func_export, Name}};
         {error, _} = Error ->
             Error
     end.
@@ -715,7 +726,11 @@ memory at most. Options:
   `max_instances` counts core instances: 10 by default for a module, 100
   for a component, which holds several.
 - `timeout`, `fuel`, `max_memory_pages`: the limits of `wasmtime_limits`.
-  `timeout` and `fuel` become the defaults of every call on the instance.
+  `timeout` and `fuel` become the defaults of every call on the instance,
+  and bound the module's initialization too, which costs about one unit per
+  byte of data. A metered module instantiated without `fuel` is initialized
+  on 10,000,000 units plus one per byte of `memory_limit`, and then holds
+  none.
 - `profile`: `plugin` or `script`, erlang_wasm's compile tiers. Accepted and
   without effect: Wasmtime has one tier.
 - `snapshotable`: `true` to allow `snapshot/1,2` on the instance. The module
@@ -747,6 +762,10 @@ Instantiate a module with its imports, as erlang_wasm's `wasm:instantiate/3`.
 and the map does not provide fails with `class => link`. `Opts` are the
 options of `instantiate/2`; an `imports` key in it is ignored.
 
+erlang_wasm's `link`, `snapshot_hooks`, `compile`, `compile_quality`,
+`compile_after` and `resource_limit` have no equivalent here and are refused
+with `kind => unsupported_option`.
+
 ```erlang
 Log = fun(_Ctx, [N]) -> logger:info("got ~p", [N]), {ok, []} end,
 {ok, Inst} = wasmtime:instantiate(Mod, #{{~"env", ~"log"} => Log}, #{memory_limit => 16 bsl 20}).
@@ -754,29 +773,63 @@ Log = fun(_Ctx, [N]) -> logger:info("got ~p", [N]), {ok, []} end,
 """.
 -spec instantiate(module_ref(), imports(), options()) -> {ok, instance()} | error().
 instantiate(Mod, Imports, Opts) when is_map(Imports), is_map(Opts) ->
-    case check_options(Opts) of
-        ok ->
-            maybe_snapshotable(Mod, Imports, page_limit(Opts));
-        {error, {unknown_profile, Profile}} ->
-            {error, #{
-                class => link,
-                kind => unknown_profile,
-                message => format_reason({unknown_profile, Profile})
-            }};
-        {error, {invalid_limits, Bad}} ->
-            {error, #{
-                class => link,
-                kind => invalid_limits,
-                message => format_reason({invalid_limits, Bad})
-            }}
+    maybe
+        ok ?= check_options(Opts),
+        ok ?= check_imports(Imports),
+        maybe_snapshotable(Mod, Imports, page_limit(Opts))
     end.
 
 %% erlang_wasm's `profile` picks its compile tier. There is one tier here, so
 %% a known profile is accepted and changes nothing.
 check_options(#{profile := Profile}) when Profile =/= plugin, Profile =/= script ->
-    {error, {unknown_profile, Profile}};
+    wasmtime_error:new(link, unknown_profile, ~"profile must be plugin or script", #{
+        profile => Profile
+    });
 check_options(Opts) ->
-    wasmtime_limits:validate(Opts).
+    Unsupported = [link, snapshot_hooks, compile, compile_quality, compile_after, resource_limit],
+    case maps:keys(maps:with(Unsupported, Opts)) of
+        [] -> check_limits(Opts);
+        Keys -> unsupported_option(Keys)
+    end.
+
+check_limits(Opts) ->
+    case wasmtime_limits:validate(Opts) of
+        ok ->
+            ok;
+        {error, {invalid_limits, Bad}} ->
+            invalid_limits(Bad)
+    end.
+
+%% A call may be given no fuel at all, so only the limits that are never
+%% enforced are refused here.
+check_call_limits(Opts) ->
+    case maps:keys(maps:with([max_depth, max_heap_words, max_host_calls], Opts)) of
+        [] -> ok;
+        Keys -> invalid_limits(Keys)
+    end.
+
+invalid_limits(Keys) ->
+    wasmtime_error:new(
+        link, invalid_limits, ~"limit is not a value that limit can take", #{keys => Keys}
+    ).
+
+unsupported_option(Keys) ->
+    wasmtime_error:new(
+        link, unsupported_option, ~"this runtime does not support the option", #{keys => Keys}
+    ).
+
+check_imports(Imports) ->
+    Callable = fun
+        (Fun) when is_function(Fun, 1); is_function(Fun, 2) -> true;
+        ({Module, Function}) -> is_atom(Module) andalso is_atom(Function);
+        (_) -> false
+    end,
+    case [Key || Key := Value <- Imports, not Callable(Value)] of
+        [] ->
+            ok;
+        [Key | _] ->
+            wasmtime_error:new(link, bad_import, ~"import is not callable", #{name => Key})
+    end.
 
 %% `max_memory_pages` is `memory_limit` in pages; an explicit byte limit wins.
 page_limit(#{memory_limit := _} = Opts) -> Opts;
@@ -801,7 +854,9 @@ maybe_snapshotable(Mod, Imports, #{snapshotable := true} = Opts) ->
     else
         error ->
             snapshot_error(
-                module_not_loaded, ~"a snapshotable instance needs a module from load/1,2"
+                invalid,
+                module_not_loaded,
+                ~"a snapshotable instance needs a module from load/1,2"
             );
         {error, _} = Error ->
             Error
@@ -809,13 +864,20 @@ maybe_snapshotable(Mod, Imports, #{snapshotable := true} = Opts) ->
 maybe_snapshotable(Mod, Imports, Opts) ->
     do_instantiate(Mod, Imports, Opts).
 
-snapshot_error(Kind, Message) ->
-    {error, #{class => snapshot, kind => Kind, message => Message}}.
+snapshot_error(Class, Kind, Msg) -> snapshot_error(Class, Kind, Msg, #{}).
+
+snapshot_error(Class, Kind, Msg, Ctx) -> wasmtime_error:new(Class, Kind, Msg, Ctx).
 
 do_instantiate(Mod, Imports, Opts) ->
+    maybe
+        {ok, Wasi} ?= wasi_options(maps:get(wasi, Opts, none)),
+        do_instantiate(Mod, Imports, Opts, Wasi)
+    end.
+
+do_instantiate(Mod, Imports, Opts, Wasi) ->
     Ref = make_ref(),
     Id = erlang:unique_integer([positive, monotonic]),
-    case wasmtime_nif:instantiate(Mod, nif_options(Mod, Imports, Opts), Ref, Id) of
+    case wasmtime_nif:instantiate(Mod, nif_options(Mod, Imports, Opts, Wasi), Ref, Id) of
         {ok, Handle} ->
             Inst = #instance{
                 handle = Handle,
@@ -825,19 +887,30 @@ do_instantiate(Mod, Imports, Opts) ->
                 module = Mod,
                 defaults = call_defaults(Opts)
             },
-            case wait_result(Inst, Id, infinity) of
-                ok -> {ok, Inst};
-                {error, _} = Error -> Error
+            %% `timeout` bounds the start section too
+            case wait_result(Inst, Id, maps:get(timeout, Opts, infinity)) of
+                ok ->
+                    {ok, Inst};
+                {error, _} = Error ->
+                    ok = destroy(Inst),
+                    Error
             end;
         {error, _} = Error ->
             Error
     end.
 
+%% `fuel => infinity` stays: each call then refills a metered store.
 call_defaults(Opts) ->
-    maps:filter(fun(_, V) -> V =/= infinity end, maps:with([timeout, fuel], Opts)).
+    maps:filter(
+        fun
+            (timeout, V) -> V =/= infinity;
+            (fuel, _) -> true
+        end,
+        maps:with([timeout, fuel], Opts)
+    ).
 
 %% The map the NIF reads by key; see parse_options in c_src/nif_instantiate.c.
-nif_options(Mod, Imports, Opts) ->
+nif_options(Mod, Imports, Opts, Wasi) ->
     HostTimeout =
         case maps:get(host_timeout, Opts, ?DEFAULT_HOST_TIMEOUT) of
             infinity -> 16#FFFFFFFF;
@@ -849,7 +922,6 @@ nif_options(Mod, Imports, Opts) ->
     true = is_pid(StreamPid),
     InboxLimit = maps:get(inbox_limit, Opts, ?DEFAULT_INBOX_LIMIT),
     true = is_integer(InboxLimit) andalso InboxLimit > 0,
-    Wasi = wasi_options(maps:get(wasi, Opts, none)),
     #{
         imports => maps:keys(Imports),
         wasi => Wasi,
@@ -862,7 +934,8 @@ nif_options(Mod, Imports, Opts) ->
         host => HostPid,
         stream => StreamPid,
         inbox_limit => InboxLimit,
-        shim => stdin_shim(Mod, Wasi)
+        shim => stdin_shim(Mod, Wasi),
+        fuel => maps:get(fuel, Opts, undefined)
     }.
 
 %% A `stream` stdout or stderr reports itself a terminal through an
@@ -931,9 +1004,26 @@ limit(Key, Opts, Default) ->
         N when is_integer(N), N > 0 -> N
     end.
 
+%% A key or value that would grant or change nothing is refused: the caller
+%% believes it did.
 wasi_options(none) ->
-    none;
+    {ok, none};
 wasi_options(Wasi) when is_map(Wasi) ->
+    Known = [args, env, dirs, stdin, stdout, stderr, output_limit, clocks, network, http],
+    %% erlang_wasm's defaults, which are what happens anyway
+    Default = fun
+        (random, strong) -> false;
+        (net, none) -> false;
+        (Key, _) -> not lists:member(Key, Known)
+    end,
+    Clocks = clocks(maps:get(clocks, Wasi, all)),
+    case maps:keys(maps:filter(Default, Wasi)) of
+        [] when Clocks =/= unsupported -> {ok, wasi_nif_options(Wasi, Clocks)};
+        [] -> unsupported_option([clocks]);
+        Keys -> unsupported_option(Keys)
+    end.
+
+wasi_nif_options(Wasi, Clocks) ->
     #{
         args =>
             case maps:get(args, Wasi, []) of
@@ -943,6 +1033,7 @@ wasi_options(Wasi) when is_map(Wasi) ->
         env =>
             case maps:get(env, Wasi, []) of
                 inherit -> inherit;
+                Env when is_map(Env) -> [{bin(K), bin(V)} || K := V <- Env];
                 Env -> [{bin(K), bin(V)} || {K, V} <- Env]
             end,
         dirs => [{bin(Guest), bin(Host), Perm} || {Guest, Host, Perm} <- maps:get(dirs, Wasi, [])],
@@ -950,7 +1041,7 @@ wasi_options(Wasi) when is_map(Wasi) ->
         stdout => stdio(maps:get(stdout, Wasi, none)),
         stderr => stdio(maps:get(stderr, Wasi, none)),
         output_limit => maps:get(output_limit, Wasi, ?DEFAULT_OUTPUT_LIMIT),
-        clocks => clocks(maps:get(clocks, Wasi, all)),
+        clocks => Clocks,
         network => grant(maps:get(network, Wasi, none)),
         http => grant(maps:get(http, Wasi, none))
     }.
@@ -959,8 +1050,17 @@ wasi_options(Wasi) when is_map(Wasi) ->
 grant(none) -> none;
 grant(all) -> all.
 
-clocks(all) -> all;
-clocks(monotonic) -> monotonic.
+%% `all` or `monotonic`, also as erlang_wasm's list of clocks.
+clocks(all) ->
+    all;
+clocks(monotonic) ->
+    monotonic;
+clocks(List) when is_list(List) ->
+    case lists:usort(List) of
+        [monotonic] -> monotonic;
+        [monotonic, realtime] -> all;
+        _ -> unsupported
+    end.
 
 stdio(none) -> none;
 stdio(inherit) -> inherit;
@@ -989,7 +1089,9 @@ components, the signature being read from the component.
 
 Host functions the guest calls run in this process, so it must be able to
 receive messages until the call returns. With `timeout` the guest is
-interrupted when the time is up and `{error, #{kind := timeout}}` is returned.
+interrupted when the time is up and `{error, #{class := exhaustion, kind :=
+timeout}}` is returned. erlang_wasm's `max_depth` and `max_host_calls` are
+refused with `kind => invalid_limits`.
 With `fuel` the call may execute that many units of fuel (about one per
 instruction) before it traps with `kind := out_of_fuel`; the module must have
 been compiled with `fuel => true`.
@@ -1006,7 +1108,10 @@ call(Inst, Name, {_Params, _Result}, Args) when is_list(Args) ->
     %% erlang_wasm's form: the signature is read from the component instead
     call(Inst, Name, Args, #{});
 call(Inst, Name, Args, Opts) when is_list(Args), is_map(Opts) ->
-    do_call(Inst, iolist_to_binary(Name), Args, Opts).
+    maybe
+        ok ?= check_call_limits(Opts),
+        do_call(Inst, iolist_to_binary(Name), Args, Opts)
+    end.
 
 -doc #{equiv => call_ref(Inst, Ref, Args, #{})}.
 -spec call_ref(instance(), ref(), [value()]) -> {ok, [value()]} | error().
@@ -1019,7 +1124,10 @@ or a host function argument), with the options of `call/4`.
 -spec call_ref(instance(), ref(), [value()], #{timeout => timeout(), fuel => non_neg_integer()}) ->
     {ok, [value()]} | error().
 call_ref(Inst, Ref, Args, Opts) when is_reference(Ref), is_list(Args), is_map(Opts) ->
-    do_call(Inst, Ref, Args, Opts).
+    maybe
+        ok ?= check_call_limits(Opts),
+        do_call(Inst, Ref, Args, Opts)
+    end.
 
 do_call(#instance{handle = H, defaults = Defaults} = Inst, Name, Args, Opts0) ->
     Opts = maps:merge(Defaults, Opts0),
@@ -1131,17 +1239,17 @@ wait_result(#instance{handle = H, ref = Ref, imports = Imports} = Inst, Id, Time
         case wasmtime_nif:cancel(H, Id) of
             ok ->
                 settle(Inst, Id),
-                timeout_error();
+                timeout_error(Timeout);
             not_running ->
                 receive
                     {wasmtime_result, Ref, Id, Result} -> Result
-                after 0 -> timeout_error()
+                after 0 -> timeout_error(Timeout)
                 end
         end
     end.
 
-timeout_error() ->
-    {error, #{class => trap, kind => timeout, message => ~"call timed out"}}.
+timeout_error(Timeout) ->
+    wasmtime_error:new(exhaustion, timeout, ~"call timed out", #{timeout => Timeout}).
 
 %% After a cancel no result message follows, but a host call sent before the
 %% cancel may still be queued; answer it so nothing lingers.
@@ -1150,17 +1258,17 @@ settle(#instance{handle = H, ref = Ref} = Inst, Id) ->
         {wasmtime_result, Ref, Id, _} ->
             ok;
         {wasmtime_host_call, Ref, HostId, _, _} ->
-            _ = wasmtime_nif:host_reply(H, HostId, {error, ~"interrupted"}),
+            _ = wasmtime_nif:host_reply(H, HostId, host_error(#{reason => interrupted})),
             settle(Inst, Id)
     after 0 -> ok
     end.
 
-%% A host fun answers {ok, [Results]} or {error, Reason}, for a core import
-%% and for a component import alike (zero or one result there), as in
-%% erlang_wasm. A component import may also be an arity-1 fun, erlang_wasm's
-%% typed form (import_fun/2): it returns the value bare and raises to trap.
-%% The NIF reads {ok, Results} for a core import and {ok, Value} for a
-%% component one.
+%% A host fun answers {ok, [Results]}, {trap, Reason} or {error, Reason}, for
+%% a core import and for a component import alike (zero or one result there),
+%% as in erlang_wasm. A component import may also be an arity-1 fun,
+%% erlang_wasm's typed form (import_fun/2): it returns the value bare and
+%% raises to trap. The NIF reads {ok, Results} for a core import, {ok, Value}
+%% for a component one, and {error, Map}, the error the call answers with.
 %% The guest dropped a host resource and the import map has no fun for it:
 %% the entry goes (wasmtime_component, c_src/nif_component.c).
 run_host(Imports, {_, <<"[resource-drop]", _/binary>>} = Key, _Inst, [Handle]) when
@@ -1169,23 +1277,33 @@ run_host(Imports, {_, <<"[resource-drop]", _/binary>>} = Key, _Inst, [Handle]) w
     ok = wasmtime_component:host_drop(Handle),
     {ok, undefined};
 run_host(Imports, Key, #instance{kind = Kind} = Inst, Args) ->
-    Fun = maps:get(Key, Imports),
-    try
-        case {Kind, erlang:fun_info(Fun, arity)} of
-            {component, {arity, 1}} -> {typed, Fun(Args)};
-            _ -> Fun(Inst, Args)
-        end
-    of
-        {typed, Value} -> {ok, Value};
+    try apply_host(maps:get(Key, Imports), Kind, #{instance => Inst}, Args) of
+        {typed, Value} ->
+            {ok, Value};
         {ok, [Value]} when Kind =:= component -> {ok, Value};
         {ok, []} when Kind =:= component -> {ok, undefined};
         {ok, Results} when Kind =:= module, is_list(Results) -> {ok, Results};
-        {error, Reason} -> {error, format_reason(Reason)};
-        Other -> {error, format_reason({bad_return, Other})}
+        {Failed, Reason} when Failed =:= trap; Failed =:= error ->
+            host_error(#{host => Key, reason => Reason});
+        Other ->
+            host_error(#{host => Key, reason => {bad_return, Other}})
     catch
+        %% a wasmtime_error constructor in the fun: the call answers with it
+        throw:{wasmtime_error, Error} ->
+            {error, Error};
         Class:Reason:Stack ->
-            {error, format_reason({Class, Reason, Stack})}
+            host_error(#{host => Key, reason => Reason, class => Class, stacktrace => Stack})
     end.
+
+apply_host({Module, Function}, _Kind, Context, Args) ->
+    Module:Function(Context, Args);
+apply_host(Fun, component, _Context, Args) when is_function(Fun, 1) ->
+    {typed, Fun(Args)};
+apply_host(Fun, _Kind, Context, Args) ->
+    Fun(Context, Args).
+
+host_error(Ctx) ->
+    wasmtime_error:new(trap, host_error, ~"host error", Ctx).
 
 -doc #{equiv => snapshot(Inst, #{})}.
 -spec snapshot(instance()) -> {ok, snapshot()} | error().
@@ -1220,11 +1338,13 @@ changed since the instance was made (`class => preinit`). See
 -spec snapshot(instance(), #{version => term(), compatibility_key => term()}) ->
     {ok, snapshot()} | error().
 snapshot(#instance{snap = undefined}, Opts) when is_map(Opts) ->
-    snapshot_error(not_snapshotable, ~"instantiate with `snapshotable => true` to capture");
+    snapshot_error(
+        invalid, not_snapshotable, ~"instantiate with `snapshotable => true` to capture"
+    );
 snapshot(#instance{snap = Snap} = Inst, Opts) when is_map(Opts) ->
     #{prepared := Prepared, tables := Tables, source := Source, compile := CompileOpts} = Snap,
     maybe
-        {ok, Wasm} ?= wasmtime_preinit:capture(Inst, Prepared, Tables, CompileOpts),
+        {ok, Wasm} ?= idle(wasmtime_preinit:capture(Inst, Prepared, Tables, CompileOpts)),
         {ok, Mod} ?= compile(Wasm, CompileOpts),
         {ok, #snapshot{
             module = Mod,
@@ -1234,6 +1354,10 @@ snapshot(#instance{snap = Snap} = Inst, Opts) when is_map(Opts) ->
             key = maps:get(compatibility_key, Opts, undefined)
         }}
     end.
+
+%% erlang_wasm's kind for a capture refused because a call is running
+idle({error, #{kind := instance_busy} = Error}) -> {error, Error#{kind := busy}};
+idle(Result) -> Result.
 
 -doc """
 Make a fresh instance at a captured point, as erlang_wasm's `wasm:restore/3`.
@@ -1246,14 +1370,18 @@ ran before the capture. `Opts` are `instantiate/3`'s, plus the
 """.
 -spec restore(snapshot(), imports(), options()) -> {ok, instance()} | error().
 restore(#snapshot{key = Key}, _Imports, #{compatibility_key := Other}) when Other =/= Key ->
-    snapshot_error(snapshot_incompatible, ~"the image was captured with another compatibility key");
+    snapshot_error(
+        invalid, snapshot_incompatible, ~"the image was captured with another compatibility key"
+    );
 restore(#snapshot{key = Key}, _Imports, Opts) when
     Key =/= undefined, not is_map_key(compatibility_key, Opts)
 ->
-    snapshot_error(snapshot_incompatible, ~"the image was captured with a compatibility key");
+    snapshot_error(
+        invalid, snapshot_incompatible, ~"the image was captured with a compatibility key"
+    );
 restore(#snapshot{}, _Imports, #{snapshotable := true}) ->
     snapshot_error(
-        not_snapshotable, ~"an instance restored from an image cannot be captured again"
+        invalid, not_snapshotable, ~"an instance restored from an image cannot be captured again"
     );
 restore(#snapshot{module = Mod}, Imports, Opts) when is_map(Imports), is_map(Opts) ->
     instantiate(Mod, Imports, Opts).
@@ -1280,7 +1408,9 @@ save_snapshot(#snapshot{wasm = Wasm, source = Source, version = Version, key = K
     else
         {error, Reason} ->
             _ = file:delete(Tmp),
-            snapshot_error(snapshot_not_written, format_reason({Path, Reason}))
+            snapshot_error(link, snapshot_not_written, ~"cannot write the snapshot", #{
+                path => Path, reason => Reason
+            })
     end.
 
 -doc """
@@ -1302,13 +1432,19 @@ load_snapshot(Path, Mod) ->
         {error, #{}} = Error ->
             Error;
         {error, Reason} ->
-            snapshot_error(snapshot_not_read, format_reason({Path, Reason}));
+            snapshot_error(link, snapshot_not_read, ~"cannot read the snapshot", #{
+                path => Path, reason => Reason
+            });
         error ->
-            snapshot_error(module_not_loaded, ~"load_snapshot/2 needs a module from load/1,2");
+            snapshot_error(
+                invalid, module_not_loaded, ~"load_snapshot/2 needs a module from load/1,2"
+            );
         false ->
-            snapshot_error(snapshot_incompatible, ~"the image was captured from another module");
+            snapshot_error(
+                invalid, snapshot_incompatible, ~"the image was captured from another module"
+            );
         _ ->
-            snapshot_error(snapshot_not_read, ~"not a snapshot file")
+            snapshot_error(malformed, snapshot_not_read, ~"not a snapshot file", #{path => Path})
     end.
 
 %% Decoded with `safe`: a file cannot create atoms or funs. What it holds is
@@ -1361,36 +1497,12 @@ or the whole `{error, Map}`.
 ```erlang
 {error, E} = wasmtime:call(Inst, ~"run", []),
 logger:error("~ts", [wasmtime:format_error(E)]).
-%% trap: wasm trap: wasm `unreachable` instruction executed (unreachable)
+%% trap: unreachable (unreachable) in run
 ```
 """.
--spec format_error(error() | map()) -> iolist().
-format_error({error, Map}) when is_map(Map) -> format_error(Map);
-format_error(#{class := Class, kind := Kind, message := Message} = Map) ->
-    [
-        atom_to_binary(Class),
-        ": ",
-        first_line(Message),
-        " (",
-        atom_to_binary(Kind),
-        ")",
-        format_extra(maps:with([status, trace], Map))
-    ].
-
-first_line(Message) -> hd(binary:split(Message, ~"\n")).
-
-format_extra(#{status := Status}) ->
-    [" status ", integer_to_binary(Status)];
-format_extra(#{trace := [#{func_index := Index, func_name := Name} | _]}) ->
-    [" in ", frame_name(Name, Index)];
-format_extra(_) ->
-    [].
-
-frame_name(undefined, Index) -> ["func ", integer_to_binary(Index)];
-frame_name(Name, _Index) -> Name.
-
-format_reason(Bin) when is_binary(Bin) -> Bin;
-format_reason(Term) -> unicode:characters_to_binary(io_lib:format("~0p", [Term])).
+-spec format_error(error() | wasmtime_error:error()) -> iolist().
+format_error({error, Error}) -> format_error(Error);
+format_error(Error) -> wasmtime_error:format(Error).
 
 %% ------------------------------------------------------------------- memory
 
@@ -1533,35 +1645,46 @@ read_output(#instance{handle = H}) -> wasmtime_nif:read_output(H).
 Read `Len` bytes at `Ptr` from the instance's default memory: the export
 named `memory`, or the first exported memory.
 
-Works while the instance is idle or while a host function runs (pass the
-instance the host fun received). Fails with `kind => busy` if the guest is
-executing.
+Works while the instance is idle or while a host function runs: the memory
+functions also take the context a host function receives. Fails with
+`kind => instance_busy` if the guest is executing.
 """.
--spec read_memory(instance(), non_neg_integer(), non_neg_integer()) -> {ok, binary()} | error().
+-spec read_memory(instance() | host_context(), non_neg_integer(), non_neg_integer()) ->
+    {ok, binary()} | error().
 read_memory(Inst, Ptr, Len) -> read_memory(Inst, default, Ptr, Len).
 
 -doc "Same as `read_memory/3` on the exported memory called `Name`.".
--spec read_memory(instance(), default | iodata(), non_neg_integer(), non_neg_integer()) ->
-    {ok, binary()} | error().
-read_memory(#instance{handle = H}, Name, Ptr, Len) -> wasmtime_nif:read_memory(H, Name, Ptr, Len).
+-spec read_memory(
+    instance() | host_context(), default | iodata(), non_neg_integer(), non_neg_integer()
+) -> {ok, binary()} | error().
+read_memory(Inst, Name, Ptr, Len) -> wasmtime_nif:read_memory(handle_of(Inst), Name, Ptr, Len).
+
+handle_of(#instance{handle = H}) -> H;
+handle_of(#{instance := #instance{handle = H}}) -> H.
 
 -doc "Write `Data` at `Ptr` in the default memory. Same rules as `read_memory/3`.".
--spec write_memory(instance(), non_neg_integer(), iodata()) -> ok | error().
+-spec write_memory(instance() | host_context(), non_neg_integer(), iodata()) -> ok | error().
 write_memory(Inst, Ptr, Data) -> write_memory(Inst, default, Ptr, Data).
 
 -doc "Same as `write_memory/3` on the exported memory called `Name`.".
--spec write_memory(instance(), default | iodata(), non_neg_integer(), iodata()) -> ok | error().
-write_memory(#instance{handle = H}, Name, Ptr, Data) ->
-    wasmtime_nif:write_memory(H, Name, Ptr, Data).
+-spec write_memory(
+    instance() | host_context(), default | iodata(), non_neg_integer(), iodata()
+) -> ok | error().
+write_memory(Inst, Name, Ptr, Data) ->
+    wasmtime_nif:write_memory(handle_of(Inst), Name, Ptr, Data).
 
--doc "Size of the default memory as `{Pages, Bytes}`.".
--spec memory_size(instance()) -> {ok, {non_neg_integer(), non_neg_integer()}} | error().
+-doc "Size of the default memory in pages.".
+-spec memory_size(instance() | host_context()) -> {ok, non_neg_integer()} | error().
 memory_size(Inst) -> memory_size(Inst, default).
 
--doc "Size of the exported memory called `Name` as `{Pages, Bytes}`.".
--spec memory_size(instance(), default | iodata()) ->
-    {ok, {non_neg_integer(), non_neg_integer()}} | error().
-memory_size(#instance{handle = H}, Name) -> wasmtime_nif:memory_size(H, Name).
+-doc "Size of the exported memory called `Name` in pages.".
+-spec memory_size(instance() | host_context(), default | iodata()) ->
+    {ok, non_neg_integer()} | error().
+memory_size(Inst, Name) ->
+    case wasmtime_nif:memory_size(handle_of(Inst), Name) of
+        {ok, {Pages, _Bytes}} -> {ok, Pages};
+        {error, _} = Error -> Error
+    end.
 
 -doc "What the linked Wasmtime library can do; see `t:features/0`.".
 -spec features() -> features().

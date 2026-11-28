@@ -71,7 +71,7 @@ pooling_key(_, _, _, {_, _, T}) when not is_integer(T); T < 1; T > ?POOL_MAX_SLO
 pooling_key(N, Max, Keep, {C, M, T}) ->
     {ok, {pooling, N, Max, Keep, C, M, T}}.
 
-pool_error(Msg) -> {error, #{class => compile, kind => badarg, message => Msg}}.
+pool_error(Msg) -> wasmtime_error:new(link, badarg, Msg).
 
 %% Sorted, checked, with the implications Wasmtime insists on: relaxed SIMD
 %% sits on SIMD, so turning SIMD off turns relaxed SIMD off too, and asking
@@ -87,11 +87,7 @@ proposal_overrides(Proposals) when is_map(Proposals) ->
     ),
     case {maps:get(simd, Proposals, true), maps:get(relaxed_simd, Proposals, false)} of
         {false, true} ->
-            {error, #{
-                class => compile,
-                kind => badarg,
-                message => ~"relaxed_simd needs simd: disable both or neither"
-            }};
+            wasmtime_error:new(link, badarg, ~"relaxed_simd needs simd: disable both or neither");
         {false, false} ->
             {ok, lists:usort([{relaxed_simd, false} | Overrides])};
         {true, _} ->

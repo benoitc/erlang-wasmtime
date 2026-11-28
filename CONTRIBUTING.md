@@ -88,6 +88,7 @@ The order the code enforces, with one file per step:
    | `wasmtime_ref_SUITE` | references: funcref, externref, GC values |
    | `wasmtime_component_SUITE` | components: WIT values, host imports, resources, WASI 0.2 |
    | `wasmtime_component_async_SUITE` | component async, stopping a waiting guest, types that cannot cross |
+   | `wasmtime_parity_SUITE` | what erlang_wasm offers and where it stands here; set `ERLANG_WASM_DIR` to a built erlang_wasm checkout to compare the two |
    | `wasmtime_wasi3_SUITE` | WASI 0.3 commands, with Wasmtime's own test programs |
    | `wasmtime_preinit_SUITE` | pre-initialization, the pooling allocator |
    | `wasmtime_script_SUITE` | `wasmtime_script_worker` with `wasmtime_test_adapter`; the language cases need `WASMTIME_LANG_DIR` |
@@ -112,7 +113,7 @@ options map with its default; `parse_options` or `configure_wasi` in
 
 ## Conventions
 
-- Guest failures never raise. `{error, #{class, kind, message}}` and a
+- Guest failures never raise. `{error, #{class, kind, msg, ctx}}` and a
   `trace` for traps. New `kind`s are listed in `docs/features.md`.
 - One OS thread per instance, requests queued, results as messages. Do not
   add a code path where a scheduler thread waits on the worker.

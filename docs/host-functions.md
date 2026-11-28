@@ -30,21 +30,26 @@ end,
 The import map is the second argument, keyed by `{Module, Name}`. Options
 go in a third: `wasmtime:instantiate(Mod, Imports, #{memory_limit => ...})`.
 
-The fun receives the instance as `Ctx` and the arguments as a list of values.
-Return `{ok, Results}` with exactly the values the import's type declares, or
-`{error, Reason}`.
+The fun receives a context map and the arguments as a list of values.
+`Ctx` holds the `instance` that called it, and the memory functions take
+`Ctx` directly. Return `{ok, Results}` with exactly the values the import's
+type declares, or `{trap, Reason}`. `{Module, Function}` names a host
+function as well as a fun does.
 
 ## What happens on error
 
-`{error, Reason}` traps the guest. The call returns:
+`{trap, Reason}` (or `{error, Reason}`) traps the guest. The call returns:
 
 ```erlang
-{error, #{class := host, kind := host_error, message := ~"unknown key"}}
+{error, #{class := trap, kind := host_error,
+          ctx := #{reason := ~"unknown key", host := {~"env", ~"lookup"}}}}
 ```
 
-A non-binary `Reason` is formatted with `~0p`. An exception in the fun is caught
-and reported the same way, with the class, reason and stacktrace in `message`.
-The instance stays usable.
+An exception in the fun is caught and reported the same way, with `class`,
+`reason` and `stacktrace` in `ctx`. A fun that returns the wrong values gives
+`reason := result_arity` or `result_type`. To answer with an error of your
+own choosing, raise it with a `wasmtime_error` constructor such as
+`wasmtime_error:exhaustion(host_call_limit)`. The instance stays usable.
 
 ## Where the fun runs
 
@@ -82,8 +87,7 @@ Handler ! {set, Inst}.
 guest; it returns `ignore` for any other message. Host calls made by the
 module's start section during `instantiate/2` still go to the caller, which
 is the only process that has the instance at that point. If the handler
-process is gone the guest traps at once with `message => ~"host process is
-gone"`.
+process is gone the guest traps at once with `reason := host_gone`.
 
 ## Bound the wait
 
@@ -92,7 +96,7 @@ gone"`.
 ```
 
 If a host function has not returned after `host_timeout` milliseconds (default
-30000), the guest traps with `message => ~"host function timed out"`. The Erlang
+30000), the guest traps with `reason := host_timeout`. The Erlang
 fun itself is not killed; it runs to completion and its late result is dropped.
 
 A `timeout` on `wasmtime:call/4` does not help here: it fires from the calling
@@ -114,7 +118,7 @@ hand long work to another process.
 - Imports with exception-typed parameters or results (`exnref`)
   are refused with `kind => unsupported_type`.
 - An import the module needs and the map does not provide fails instantiation
-  with `class => link`. Extra keys in the map are ignored, so one map can serve
+  with `class => link, kind => unknown_import`. Extra keys in the map are ignored, so one map can serve
   several modules.
 - If the calling process dies during a host call, the instance is interrupted
   and the next queued call proceeds. `wasmtime:interrupt/1` from another

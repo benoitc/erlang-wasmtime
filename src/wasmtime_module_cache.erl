@@ -61,7 +61,7 @@ load(Source, Opts) ->
             Error
     catch
         exit:{noproc, _} ->
-            refused(not_started, ~"the erlang_wasmtime application is not started")
+            refused(link, not_started, ~"the erlang_wasmtime application is not started")
     end.
 
 -spec unload(wasmtime:module_ref()) -> ok.
@@ -130,8 +130,8 @@ binary_source(Wasm, Opts) ->
 source_bytes({wat, Text}) -> {wat, iolist_to_binary(Text)};
 source_bytes(Bin) when is_binary(Bin) -> Bin.
 
-refused(Kind, Message) ->
-    {error, #{class => compile, kind => Kind, message => Message}}.
+refused(Class, Kind, Message) ->
+    wasmtime_error:new(Class, Kind, Message).
 
 %% ------------------------------------------------------------------ server
 
@@ -183,7 +183,7 @@ acquire(Key, {Pid, _} = From, #state{resident = Resident, compiling = Compiling}
             {noreply, watch(Pid, S#state{compiling = Waiting})};
         _ when map_size(Resident) + map_size(Compiling) >= S#state.max_resident ->
             Message = ~"the module cache is full: unload modules you no longer use",
-            {reply, refused(cache_full, Message), S};
+            {reply, refused(exhaustion, cache_full, Message), S};
         _ ->
             {reply, compile_it, watch(Pid, S#state{compiling = Compiling#{Key => {Pid, []}}})}
     end.

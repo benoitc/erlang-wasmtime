@@ -255,19 +255,20 @@ void unroot_vals(wasmtime_val_t *vals, size_t n) {
   for (size_t i = 0; i < n; i++) wasmtime_val_unroot(&vals[i]);
 }
 
-/* The wasmtime_val_t in `v` was consumed or unrooted: report a term-side
- * conversion failure as the call error. */
-ERL_NIF_TERM conv_error(ErlNifEnv *env, const char *cls, const char *kind) {
+/* The wasmtime_val_t in `v` was consumed or unrooted: report why a term did
+ * not convert. `badarg` is the kind of a term that does not fit its type. */
+ERL_NIF_TERM conv_error(ErlNifEnv *env, const char *kind, const char *badarg) {
   if (strcmp(kind, "wrong_instance") == 0)
-    return mk_error_s(env, cls, kind, "the reference belongs to another instance");
+    return mk_error_s(env, "trap", "foreign_reference",
+                      "the reference belongs to another instance");
   if (strcmp(kind, "unsupported_type") == 0)
-    return mk_error_s(env, cls, kind, "exception references cannot cross the boundary");
+    return mk_error_s(env, "link", kind, "exception references cannot cross the boundary");
   if (strcmp(kind, "unavailable") == 0)
-    return mk_error_s(env, cls, kind, "this build of erlang_wasmtime has no GC support");
-  return mk_error_s(env, cls, kind, "value does not match the type");
+    return mk_error_s(env, "link", kind, "this build of erlang_wasmtime has no GC support");
+  return mk_error_s(env, "link", badarg, "value does not match the type");
 }
 
-ERL_NIF_TERM term_or_unsupported(ErlNifEnv *env, const char *cls, ERL_NIF_TERM t) {
-  if (!t) return mk_error_s(env, cls, "unsupported_type", "the value cannot cross the boundary");
+ERL_NIF_TERM term_or_unsupported(ErlNifEnv *env, ERL_NIF_TERM t) {
+  if (!t) return mk_error_s(env, "link", "unsupported_type", "the value cannot cross the boundary");
   return enif_make_tuple2(env, atom_ok, t);
 }

@@ -86,8 +86,9 @@ async_export(_) ->
 
 async_export_trap(_) ->
     Inst = instance(compile(double())),
-    {error, #{class := trap, trace := [_ | _]}} = wasmtime:call(Inst, ~"double", [0]),
-    {error, #{class := call}} = wasmtime:call(Inst, ~"double", [1]),
+    {error, #{class := trap, ctx := #{trace := [_ | _]}}} = wasmtime:call(Inst, ~"double", [0]),
+    {error, #{class := trap, kind := cannot_enter_component}} =
+        wasmtime:call(Inst, ~"double", [1]),
     ok.
 
 %% The guest calls a host function declared `async`, lowered synchronously.
@@ -149,7 +150,7 @@ pooled_calls(_) ->
 %% Turning reference types off turns component async off with it, instead of
 %% asking Wasmtime for an engine it cannot build.
 reference_types_off(_) ->
-    {error, #{class := compile}} =
+    {error, #{class := invalid}} =
         wasmtime:compile({wat, double()}, #{proposals => #{reference_types => false, gc => false}}),
     ok.
 
@@ -175,9 +176,9 @@ stream_export(Result) ->
 stream_result_refused(_) ->
     Wat = stream_export(~"(func (export \"f\") (result $s) (canon lift (core func $i \"f\")))"),
     Inst = instance(compile(Wat)),
-    {error, #{class := call, kind := badarg}} = wasmtime:call(Inst, ~"f", []),
+    {error, #{class := link, kind := unsupported_type}} = wasmtime:call(Inst, ~"f", []),
     %% refused before the guest ran: the instance still answers
-    {error, #{class := call, kind := badarg}} = wasmtime:call(Inst, ~"f", []),
+    {error, #{class := link, kind := unsupported_type}} = wasmtime:call(Inst, ~"f", []),
     ok.
 
 nested_result_refused(_) ->
@@ -194,7 +195,7 @@ nested_result_refused(_) ->
         (canon lift (core func $i "f") (memory (core memory $i "mem")))))
     """
     ),
-    {error, #{class := call, kind := badarg}} = wasmtime:call(instance(Mod), ~"f", []),
+    {error, #{class := link, kind := unsupported_type}} = wasmtime:call(instance(Mod), ~"f", []),
     ok.
 
 stream_param_refused(_) ->
@@ -207,7 +208,7 @@ stream_param_refused(_) ->
       (func (export "f") (param "s" $s) (canon lift (core func $i "f"))))
     """
     ),
-    {error, #{class := call, kind := badarg}} = wasmtime:call(instance(Mod), ~"f", [1]),
+    {error, #{class := link, kind := unsupported_type}} = wasmtime:call(instance(Mod), ~"f", [1]),
     ok.
 
 host_import_stream_refused(_) ->
@@ -223,7 +224,7 @@ host_import_stream_refused(_) ->
     """
     ),
     Take = fun(_Inst, [_]) -> {ok, []} end,
-    {error, #{class := link, kind := badarg}} =
+    {error, #{class := link, kind := unsupported_type}} =
         wasmtime:instantiate(Mod, #{imports => #{{~"", ~"take"} => Take}}),
     ok.
 
@@ -248,7 +249,7 @@ interrupt_waiting_guest(Config) ->
     {L, Inst} = blocked_guest(Config),
     {error, #{kind := timeout}} = wasmtime:run(Inst, #{timeout => 200}),
     %% the worker is free again: this answers instead of queueing forever
-    {error, #{class := call}} = wasmtime:run(Inst, #{timeout => 2000}),
+    {error, #{class := link}} = wasmtime:run(Inst, #{timeout => 2000}),
     {ok, S} = gen_tcp:accept(L, 2000),
     ok = wasmtime:destroy(Inst),
     {ok, _} = gen_tcp:recv(S, 0, 2000),
@@ -264,7 +265,7 @@ caller_death_frees_waiting_guest(Config) ->
     receive
         {'DOWN', Ref, process, Pid, killed} -> ok
     end,
-    {error, #{class := call}} = wasmtime:run(Inst, #{timeout => 2000}),
+    {error, #{class := link}} = wasmtime:run(Inst, #{timeout => 2000}),
     ok = wasmtime:destroy(Inst),
     {error, closed} = gen_tcp:recv(S, 0, 2000),
     ok = gen_tcp:close(L).

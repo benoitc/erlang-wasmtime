@@ -32,6 +32,8 @@
     async_host_served_in_await/1,
     fuel_bounds_a_call/1,
     fuel_needs_metered_module/1,
+    fuel_covers_initialization/1,
+    fuel_infinity/1,
     fuel_precompiled/1,
     trap_trace/1,
     globals_get_set/1,
@@ -82,6 +84,8 @@ groups() ->
         {api, [parallel], [
             fuel_bounds_a_call,
             fuel_needs_metered_module,
+            fuel_covers_initialization,
+            fuel_infinity,
             fuel_precompiled,
             trap_trace,
             globals_get_set,
@@ -110,9 +114,9 @@ func_i32_boundaries(_) ->
     %% unsigned input wraps to the signed result
     {ok, [-1]} = wasmtime:call(Inst, ~"id", [4294967295]),
     {ok, [-2147483648]} = wasmtime:call(Inst, ~"id", [2147483648]),
-    {error, #{kind := badarg}} = wasmtime:call(Inst, ~"id", [4294967296]),
-    {error, #{kind := badarg}} = wasmtime:call(Inst, ~"id", [-2147483649]),
-    {error, #{kind := badarg}} = wasmtime:call(Inst, ~"id", [1.0]),
+    {error, #{kind := argument_type}} = wasmtime:call(Inst, ~"id", [4294967296]),
+    {error, #{kind := argument_type}} = wasmtime:call(Inst, ~"id", [-2147483649]),
+    {error, #{kind := argument_type}} = wasmtime:call(Inst, ~"id", [1.0]),
     ok.
 
 func_i64_boundaries(_) ->
@@ -122,7 +126,7 @@ func_i64_boundaries(_) ->
     {ok, [Max]} = wasmtime:call(Inst, ~"id", [Max]),
     {ok, [Min]} = wasmtime:call(Inst, ~"id", [Min]),
     {ok, [-1]} = wasmtime:call(Inst, ~"id", [18446744073709551615]),
-    {error, #{kind := badarg}} = wasmtime:call(Inst, ~"id", [18446744073709551616]),
+    {error, #{kind := argument_type}} = wasmtime:call(Inst, ~"id", [18446744073709551616]),
     ok.
 
 func_f32_roundtrip(_) ->
@@ -198,8 +202,8 @@ func_v128(_) ->
         wasmtime:call(Inst, ~"add", [A, B]),
     {ok, [<<7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7>>]} =
         wasmtime:call(Inst, ~"splat", [7]),
-    {error, #{kind := badarg}} = wasmtime:call(Inst, ~"id", [<<1, 2, 3>>]),
-    {error, #{kind := badarg}} = wasmtime:call(Inst, ~"id", [42]),
+    {error, #{kind := argument_type}} = wasmtime:call(Inst, ~"id", [<<1, 2, 3>>]),
+    {error, #{kind := argument_type}} = wasmtime:call(Inst, ~"id", [42]),
     ok.
 
 func_multi_value(_) ->
@@ -231,11 +235,11 @@ func_many_params(_) ->
 
 func_wrong_types(_) ->
     Inst = instance(~"(module (func (export \"f\") (param i32 f64) (result i32) local.get 0))"),
-    {error, #{class := call, kind := badarg}} = wasmtime:call(Inst, ~"f", [1.0, 1.0]),
-    {error, #{class := call, kind := badarg}} = wasmtime:call(Inst, ~"f", [1, <<>>]),
-    {error, #{class := call, kind := badarg}} = wasmtime:call(Inst, ~"f", [1, nan_typo]),
-    {error, #{class := call, kind := badarity}} = wasmtime:call(Inst, ~"f", []),
-    {error, #{class := call, kind := badarity}} = wasmtime:call(Inst, ~"f", [1, 2.0, 3]),
+    {error, #{class := link, kind := argument_type}} = wasmtime:call(Inst, ~"f", [1.0, 1.0]),
+    {error, #{class := link, kind := argument_type}} = wasmtime:call(Inst, ~"f", [1, <<>>]),
+    {error, #{class := link, kind := argument_type}} = wasmtime:call(Inst, ~"f", [1, nan_typo]),
+    {error, #{class := link, kind := argument_arity}} = wasmtime:call(Inst, ~"f", []),
+    {error, #{class := link, kind := argument_arity}} = wasmtime:call(Inst, ~"f", [1, 2.0, 3]),
     ?assertError(function_clause, wasmtime:call(Inst, ~"f", not_a_list)),
     ok.
 
@@ -274,17 +278,21 @@ func_start_function(_) ->
 trap_indirect_call_to_null(_) ->
     Inst = instance(table_wat()),
     {ok, [1]} = wasmtime:call(Inst, ~"call", [0]),
-    {error, #{class := trap, kind := indirect_call_to_null}} = wasmtime:call(Inst, ~"call", [1]),
+    {error, #{class := trap, kind := uninitialized_element}} = wasmtime:call(Inst, ~"call", [1]),
     ok.
 
 trap_bad_signature(_) ->
     Inst = instance(table_wat()),
-    {error, #{class := trap, kind := bad_signature}} = wasmtime:call(Inst, ~"call_f", [0]),
+    {error, #{class := trap, kind := indirect_call_type_mismatch}} = wasmtime:call(
+        Inst, ~"call_f", [0]
+    ),
     ok.
 
 trap_table_out_of_bounds(_) ->
     Inst = instance(table_wat()),
-    {error, #{class := trap, kind := table_out_of_bounds}} = wasmtime:call(Inst, ~"call", [99]),
+    {error, #{class := trap, kind := out_of_bounds_table_access}} = wasmtime:call(Inst, ~"call", [
+        99
+    ]),
     ok.
 
 trap_bad_conversion(_) ->
@@ -296,9 +304,11 @@ trap_bad_conversion(_) ->
         """
     ),
     {ok, [3]} = wasmtime:call(Inst, ~"trunc", [3.7]),
-    {error, #{class := trap, kind := bad_conversion_to_integer}} = wasmtime:call(Inst, ~"trunc", [
-        nan
-    ]),
+    {error, #{class := trap, kind := invalid_conversion_to_integer}} = wasmtime:call(
+        Inst, ~"trunc", [
+            nan
+        ]
+    ),
     {error, #{class := trap, kind := integer_overflow}} = wasmtime:call(Inst, ~"trunc", [1.0e20]),
     {ok, [2147483647]} = wasmtime:call(Inst, ~"sat", [1.0e20]),
     {ok, [0]} = wasmtime:call(Inst, ~"sat", [nan]),
@@ -306,7 +316,8 @@ trap_bad_conversion(_) ->
 
 trap_unreachable_message(_) ->
     Inst = instance(~"(module (func (export \"f\") unreachable))"),
-    {error, #{class := trap, kind := unreachable, message := Msg}} = wasmtime:call(Inst, ~"f", []),
+    {error, #{class := trap, kind := unreachable, msg := ~"unreachable", ctx := #{detail := Msg}}} =
+        wasmtime:call(Inst, ~"f", []),
     ?assertMatch({_, _}, binary:match(Msg, ~"wasm trap")),
     ?assertMatch({_, _}, binary:match(Msg, ~"backtrace")),
     ok.
@@ -369,7 +380,7 @@ fuel_bounds_a_call(_) ->
     {ok, Left} = wasmtime:fuel_remaining(Inst),
     ?assert(Left < 1000 andalso Left > 0),
     %% an endless loop stops when the fuel is gone, no timeout needed
-    {error, #{class := trap, kind := out_of_fuel}} = wasmtime:call(Inst, ~"loop", [], #{
+    {error, #{class := exhaustion, kind := out_of_fuel}} = wasmtime:call(Inst, ~"loop", [], #{
         fuel => 10000
     }),
     {ok, 0} = wasmtime:fuel_remaining(Inst),
@@ -388,9 +399,66 @@ fuel_bounds_a_call(_) ->
 
 fuel_needs_metered_module(_) ->
     Inst = instance(fuel_wat()),
-    {error, #{class := call, kind := fuel_disabled}} = wasmtime:call(Inst, ~"one", [], #{fuel => 10}),
-    {error, #{class := call, kind := fuel_disabled}} = wasmtime:fuel_remaining(Inst),
+    {error, #{class := link, kind := fuel_disabled}} = wasmtime:call(Inst, ~"one", [], #{fuel => 10}),
+    {error, #{class := link, kind := fuel_disabled}} = wasmtime:fuel_remaining(Inst),
     {ok, [1]} = wasmtime:call(Inst, ~"one", []),
+    ok.
+
+%% Instantiating a metered module costs fuel: its data segments and start
+%% section run as guest code.
+fuel_covers_initialization(_) ->
+    {ok, Data} = wasmtime:compile(
+        {wat, [
+            ~"(module (memory (export \"memory\") 80) (data (i32.const 0) \"hi\")",
+            ~" (data (i32.const 5000000) \"far\") (func (export \"one\") (result i32) i32.const 1))"
+        ]},
+        #{fuel => true}
+    ),
+    %% without fuel: initialized, and calls still run on nothing
+    {ok, Inst} = wasmtime:instantiate(Data),
+    {ok, ~"far"} = wasmtime:read_memory(Inst, 5000000, 3),
+    {ok, 0} = wasmtime:fuel_remaining(Inst),
+    {error, #{kind := out_of_fuel}} = wasmtime:call(Inst, ~"one", []),
+    {ok, [1]} = wasmtime:call(Inst, ~"one", [], #{fuel => 100}),
+    %% with fuel: what the start section leaves is the instance's
+    {ok, Started} = wasmtime:compile(
+        {wat,
+            ~"""
+            (module
+              (global $n (mut i32) (i32.const 0))
+              (func $s (loop $l
+                (global.set $n (i32.add (global.get $n) (i32.const 1)))
+                (br_if $l (i32.lt_u (global.get $n) (i32.const 1000)))))
+              (start $s)
+              (func (export "n") (result i32) global.get $n))
+            """},
+        #{fuel => true}
+    ),
+    {ok, Fuelled} = wasmtime:instantiate(Started, #{}, #{fuel => 100000}),
+    {ok, Left} = wasmtime:fuel_remaining(Fuelled),
+    ?assert(Left < 100000 andalso Left > 50000),
+    {ok, [1000]} = wasmtime:call(Fuelled, ~"n", []),
+    {error, #{class := exhaustion, kind := out_of_fuel}} =
+        wasmtime:instantiate(Started, #{}, #{fuel => 500}),
+    %% without fuel a start section is still bounded
+    {ok, Endless} = wasmtime:compile(
+        {wat, ~"(module (func $s (loop br 0)) (start $s))"}, #{fuel => true}
+    ),
+    {error, #{class := exhaustion, kind := out_of_fuel}} =
+        wasmtime:instantiate(Endless, #{}, #{timeout => 5000}),
+    ok.
+
+fuel_infinity(_) ->
+    {ok, Mod} = wasmtime:compile({wat, fuel_wat()}, #{fuel => true}),
+    {ok, Inst} = wasmtime:instantiate(Mod, #{}, #{fuel => infinity}),
+    {ok, [1]} = wasmtime:call(Inst, ~"one", []),
+    {ok, Ref} = wasmtime:call_async(Inst, ~"one", []),
+    {ok, [1]} = wasmtime:await(Inst, Ref),
+    {ok, Metered} = wasmtime:instantiate(Mod),
+    {ok, [1]} = wasmtime:call(Metered, ~"one", [], #{fuel => infinity}),
+    %% a module without metering takes it too
+    Plain = instance(fuel_wat()),
+    {ok, [1]} = wasmtime:call(Plain, ~"one", [], #{fuel => infinity}),
     ok.
 
 fuel_precompiled(_) ->
@@ -416,16 +484,16 @@ trap_trace(_) ->
           (func (export "div") (param i32) (result i32) i32.const 1 local.get 0 i32.div_s))
         """
     ),
-    {error, #{class := trap, kind := unreachable, trace := [Inner, Outer]}} =
+    {error, #{class := trap, kind := unreachable, ctx := #{trace := [Inner, Outer]}}} =
         wasmtime:call(Inst, ~"outer", []),
     #{func_index := 0, func_name := ~"inner", func_offset := Off0} = Inner,
     #{func_index := 1, func_name := ~"outer", func_offset := Off1} = Outer,
     ?assert(is_integer(Off0) andalso is_integer(Off1)),
-    {error, #{kind := integer_division_by_zero, trace := [#{func_index := 2}]}} =
+    {error, #{kind := integer_divide_by_zero, ctx := #{trace := [#{func_index := 2}]}}} =
         wasmtime:call(Inst, ~"div", [0]),
     %% errors without frames have no trace key
-    {error, #{class := call} = E} = wasmtime:call(Inst, ~"nope", []),
-    false = maps:is_key(trace, E),
+    {error, #{class := link, ctx := Ctx}} = wasmtime:call(Inst, ~"nope", []),
+    false = maps:is_key(trace, Ctx),
     ok.
 
 globals_get_set(_) ->
@@ -442,7 +510,7 @@ globals_get_set(_) ->
         """
     ),
     {ok, [7]} = wasmtime:get_global(Inst, ~"c"),
-    {error, #{class := global, kind := immutable}} = wasmtime:global_set(Inst, ~"c", 8),
+    {error, #{class := link, kind := immutable}} = wasmtime:global_set(Inst, ~"c", 8),
     {ok, [1]} = wasmtime:get_global(Inst, ~"m32"),
     ok = wasmtime:global_set(Inst, ~"m32", 41),
     {ok, []} = wasmtime:call(Inst, ~"bump", []),
@@ -458,10 +526,10 @@ globals_get_set(_) ->
     ),
     ok = wasmtime:global_set(Inst, ~"v", <<0:128>>),
     {ok, [<<0:128>>]} = wasmtime:get_global(Inst, ~"v"),
-    {error, #{class := global, kind := badarg}} = wasmtime:global_set(Inst, ~"m32", 1.5),
-    {error, #{class := global, kind := badarg}} = wasmtime:global_set(Inst, ~"m32", 1 bsl 40),
-    {error, #{class := global, kind := no_such_export}} = wasmtime:get_global(Inst, ~"nope"),
-    {error, #{class := global, kind := no_such_export}} = wasmtime:get_global(Inst, ~"bump"),
+    {error, #{class := link, kind := badarg}} = wasmtime:global_set(Inst, ~"m32", 1.5),
+    {error, #{class := link, kind := badarg}} = wasmtime:global_set(Inst, ~"m32", 1 bsl 40),
+    {error, #{class := link, kind := unknown_export}} = wasmtime:get_global(Inst, ~"nope"),
+    {error, #{class := link, kind := unknown_export}} = wasmtime:get_global(Inst, ~"bump"),
     ok.
 
 tables_size_grow(_) ->
@@ -478,10 +546,10 @@ tables_size_grow(_) ->
     {ok, 3} = wasmtime:table_size(Inst, ~"funcs"),
     {ok, [3]} = wasmtime:call(Inst, ~"size", []),
     %% past the declared maximum
-    {error, #{class := table}} = wasmtime:table_grow(Inst, ~"funcs", 5),
+    {error, #{class := exhaustion, kind := table_limit}} = wasmtime:table_grow(Inst, ~"funcs", 5),
     {ok, 1} = wasmtime:table_grow(Inst, ~"externs", 2),
     {ok, 3} = wasmtime:table_size(Inst, ~"externs"),
-    {error, #{class := table, kind := no_such_export}} = wasmtime:table_size(Inst, ~"size"),
+    {error, #{class := link, kind := unknown_export}} = wasmtime:table_size(Inst, ~"size"),
     ok.
 
 %% --------------------------------------------------------- engine options

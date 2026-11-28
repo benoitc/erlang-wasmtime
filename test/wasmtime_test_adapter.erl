@@ -142,5 +142,5 @@ conformance_fixtures(_Artifact) ->
     }.
 
 classify({ok, _}, _State) -> continue;
-classify({error, #{class := exit, status := Code}}, _State) -> {stop, {exited, Code}};
+classify({error, #{ctx := #{wasi_exit := Code}}}, _State) -> {stop, {exited, Code}};
 classify({error, _}, _State) -> {stop, trapped}.

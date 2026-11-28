@@ -6,8 +6,13 @@
 
 start_link() -> supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
-%% The module cache is the only process: instances have their own OS thread
-%% and no Erlang process, so nothing else needs supervising.
+%% The module cache and the actor registry are the only processes: instances
+%% have their own OS thread and no Erlang process. The actor table is made
+%% here so it outlives the registry.
 init([]) ->
-    Cache = #{id => wasmtime_module_cache, start => {wasmtime_module_cache, start_link, []}},
-    {ok, {#{strategy => one_for_one, intensity => 5, period => 10}, [Cache]}}.
+    ok = wasmtime_actor_registry:new_table(),
+    Children = [
+        #{id => Module, start => {Module, start_link, []}}
+     || Module <- [wasmtime_module_cache, wasmtime_actor_registry]
+    ],
+    {ok, {#{strategy => one_for_one, intensity => 5, period => 10}, Children}}.

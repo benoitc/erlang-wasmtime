@@ -29,6 +29,23 @@ erlang_wasm:
 {error, #{class := trap, kind := host_error, ctx := #{wasi_exit := 3}}}
 ```
 
+## Run a program and collect its output
+
+```erlang
+{ok, Mod} = wasmtime:load_file("hello.wasm"),
+{ok, Status, Stdout, Stderr} = wasmtime_wasi:run(Mod, #{args => [~"hello"]}).
+```
+
+`wasmtime_wasi:run/2` calls `_start` and answers the exit status, 0 when the
+program returns. A trap that is not an exit is `{error, Error}`. For a
+component, give it its input and take its output:
+
+```erlang
+{ok, Component} = file:read_file("upper.wasm"),
+{ok, #{stdout := ~"HELLO", exit_code := 0}} =
+    wasmtime_wasi_preview2:run_command(Component, ~"hello").
+```
+
 ## Grant a directory
 
 ```erlang
@@ -74,6 +91,29 @@ Erlang; see [streams](streams.md).
 line and environment; the default is none of either. The inherited command
 line is what the platform gives a dynamically loaded library: the VM's
 arguments on Linux (glibc) and macOS, an empty list on FreeBSD.
+
+## Send output to a process or a fun
+
+```erlang
+{ok, Inst} = wasmtime:instantiate(Mod, #{}, #{wasi => #{
+    stdout => self(),
+    stderr => fun(Bytes) -> logger:warning("~ts", [Bytes]) end}}).
+```
+
+A pid receives `{wasi_output, From, Bytes}`; an atom names an io device such
+as `standard_io`. The process waiting for the call delivers the bytes, so they
+have all arrived when it returns. A fun that raises loses those bytes and the
+call goes on.
+
+## Make randomness repeatable
+
+```erlang
+{ok, Inst} = wasmtime:instantiate(Mod, #{}, #{wasi => #{random => {seed, 42}}}).
+```
+
+With a seed, `random_get` answers the same bytes every run; `random => none`
+makes it fail with `ENOTCAPABLE`. Both are for core modules: a component's
+randomness is Wasmtime's.
 
 ## Keep the guest off the wall clock
 

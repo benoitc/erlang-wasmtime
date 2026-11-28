@@ -21,7 +21,9 @@
     imports_multi_result_host/1,
     host_process_serves_calls/1,
     host_process_reentrancy_refused/1,
-    host_process_gone/1
+    host_process_gone/1,
+    extern_links_two_instances/1,
+    extern_refusals/1
 ]).
 
 all() ->
@@ -41,7 +43,9 @@ groups() ->
             imports_called_many_times,
             imports_host_reads_and_writes_memory,
             imports_no_result_host,
-            imports_multi_result_host
+            imports_multi_result_host,
+            extern_links_two_instances,
+            extern_refusals
         ]},
         {host_process, [parallel], [
             host_process_serves_calls,
@@ -331,4 +335,52 @@ linker_error_not_cached(_) ->
     {ok, _} = wasmtime:instantiate(Mod, #{
         imports => #{{~"env", ~"f"} => fun(_, []) -> {ok, []} end}
     }),
+    ok.
+
+library() ->
+    ~"""
+    (module
+      (memory (export "memory") 1)
+      (global (export "g") i32 (i32.const 1))
+      (func (export "add") (param i32 i32) (result i32) local.get 0 local.get 1 i32.add)
+      (func (export "boom") unreachable))
+    """.
+
+user() ->
+    ~"""
+    (module
+      (import "lib" "add" (func $add (param i32 i32) (result i32)))
+      (import "lib" "boom" (func $boom))
+      (func (export "twice") (param i32) (result i32) local.get 0 local.get 0 call $add)
+      (func (export "go") call $boom))
+    """.
+
+%% erlang_wasm's extern/2: an export of one instance as another's import.
+extern_links_two_instances(_) ->
+    Library = instance(library()),
+    {ok, Add} = wasmtime:extern(Library, ~"add"),
+    {ok, Boom} = wasmtime:extern(Library, ~"boom"),
+    {ok, Inst} = wasmtime:instantiate(
+        compile(user()), #{{~"lib", ~"add"} => Add, {~"lib", ~"boom"} => Boom}, #{}
+    ),
+    {ok, [42]} = wasmtime:call(Inst, ~"twice", [21]),
+    %% the callee's error is the call's
+    {error, #{class := trap, kind := unreachable}} = wasmtime:call(Inst, ~"go", []),
+    ok = wasmtime:destroy(Library),
+    {error, #{class := link, kind := stopped}} = wasmtime:call(Inst, ~"twice", [1]),
+    ok.
+
+extern_refusals(_) ->
+    Library = instance(library()),
+    {error, #{class := link, kind := unknown_export}} = wasmtime:extern(Library, ~"nope"),
+    [
+        {error, #{class := link, kind := unsupported_extern}} = wasmtime:extern(Library, Name)
+     || Name <- [~"memory", ~"g"]
+    ],
+    {ok, Boom} = wasmtime:extern(Library, ~"boom"),
+    {error, #{class := link, kind := incompatible_import_type, ctx := Ctx}} =
+        wasmtime:instantiate(
+            compile(user()), #{{~"lib", ~"add"} => Boom, {~"lib", ~"boom"} => Boom}, #{}
+        ),
+    #{where := {~"lib", ~"add"}, declared := {[i32, i32], [i32]}, provided := {[], []}} = Ctx,
     ok.

@@ -143,7 +143,7 @@ extern ERL_NIF_TERM atom_ok, atom_error, atom_true, atom_false, atom_compiler, a
     atom_wasi, atom_memory_limit, atom_max_tables, atom_max_table_elements, atom_max_instances,
     atom_host_timeout, atom_host, atom_inbox_limit, atom_shim, atom_args, atom_env, atom_dirs,
     atom_stdin, atom_output_limit, atom_clocks, atom_monotonic, atom_all, atom_detail, atom_name,
-    atom_reason, atom_wasi_exit, atom_module, atom_fuel;
+    atom_reason, atom_wasi_exit, atom_module, atom_fuel, atom_caller;
 
 /* -------------------------------------------------------------- types -- */
 /* wasm_valtype_kind aborts the process on v128 and on non-nullable references
@@ -267,6 +267,7 @@ typedef struct instance {
     size_t bytes, limit;
     int closed;
     ErlNifPid stream_pid; /* receives {wasmtime_stream, Ref, Kind, Bytes} */
+    int to_caller;        /* ... unless set: the running request's caller does */
     int stdin;            /* stdin => stream: Wasmtime reads a pipe the pump fills */
     int pipe_w;           /* the pipe's write end, -1 when none; the pump owns it */
     int pump_abort;       /* atomic: close the pipe now, drop what is queued */

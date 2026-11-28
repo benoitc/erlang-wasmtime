@@ -37,7 +37,12 @@
     compiling = #{} :: map(),
     %% Pid => {MonitorRef, #{Key => Count}}
     claims = #{} :: map(),
-    max_resident :: pos_integer()
+    max_resident :: pos_integer(),
+    %% the optional caps on source bytes held and on compiles per second
+    max_bytes :: pos_integer() | infinity,
+    max_rate :: pos_integer() | infinity,
+    %% {Second, Compiles in it}
+    window = {0, 0} :: {integer(), non_neg_integer()}
 }).
 
 -type state() :: #state{}.
@@ -137,8 +142,12 @@ refused(Class, Kind, Message) ->
 
 -spec init([]) -> {ok, state()}.
 init([]) ->
-    Max = application:get_env(erlang_wasmtime, max_resident_modules, ?DEFAULT_MAX_RESIDENT),
-    {ok, #state{max_resident = Max}}.
+    Env = fun(Key, Default) -> application:get_env(erlang_wasmtime, Key, Default) end,
+    {ok, #state{
+        max_resident = Env(max_resident_modules, ?DEFAULT_MAX_RESIDENT),
+        max_bytes = Env(max_resident_module_bytes, infinity),
+        max_rate = Env(max_module_loads_per_second, infinity)
+    }}.
 
 handle_call({acquire, Key}, From, S) ->
     acquire(Key, From, S);
@@ -181,12 +190,41 @@ acquire(Key, {Pid, _} = From, #state{resident = Resident, compiling = Compiling}
         {_, #{Key := {Compiler, Waiters}}} ->
             Waiting = Compiling#{Key := {Compiler, Waiters ++ [From]}},
             {noreply, watch(Pid, S#state{compiling = Waiting})};
-        _ when map_size(Resident) + map_size(Compiling) >= S#state.max_resident ->
-            Message = ~"the module cache is full: unload modules you no longer use",
-            {reply, refused(exhaustion, cache_full, Message), S};
         _ ->
-            {reply, compile_it, watch(Pid, S#state{compiling = Compiling#{Key => {Pid, []}}})}
+            case admit(S) of
+                {ok, S1} ->
+                    S2 = S1#state{compiling = Compiling#{Key => {Pid, []}}},
+                    {reply, compile_it, watch(Pid, S2)};
+                {error, _} = Error ->
+                    {reply, Error, S}
+            end
     end.
+
+%% Room for one more compile. A module is counted once resident, so the byte
+%% cap can be passed by the one being compiled.
+admit(#state{resident = Resident, compiling = Compiling} = S) ->
+    Full = ~"the module cache is full: unload modules you no longer use",
+    case
+        map_size(Resident) + map_size(Compiling) >= S#state.max_resident orelse
+            resident_bytes(S) >= S#state.max_bytes
+    of
+        true -> refused(exhaustion, cache_full, Full);
+        false -> rate(S, erlang:monotonic_time(second))
+    end.
+
+%% `infinity` compares above every number.
+resident_bytes(#state{sources = Sources}) ->
+    lists:sum([source_size(Source) || {Source, _, _} <- maps:values(Sources)]).
+
+source_size({wat, Text}) -> iolist_size(Text);
+source_size(Bytes) -> byte_size(Bytes).
+
+rate(#state{window = {Second, N}, max_rate = Max}, Second) when N >= Max ->
+    refused(exhaustion, load_rate_exceeded, ~"too many modules loaded this second");
+rate(#state{window = {Second, N}} = S, Second) ->
+    {ok, S#state{window = {Second, N + 1}}};
+rate(S, Now) ->
+    {ok, S#state{window = {Now, 1}}}.
 
 %% The compiler reports. A caller that is no longer the compiler of that
 %% key (the server restarted meanwhile) keeps its module and takes no claim.

@@ -15,7 +15,9 @@ Built binaries, so the suite needs no Rust toolchain.
   - `hostcall`, `hostagg`: import `example:host/clock` and `example:agg/host`;
   - `realupper`, `argv`, `envvar`, `exitcode`: unmodified Rust programs
     built for `wasm32-wasip2`;
-  - `wasiver`: imports `wasi:random/random@0.2.0`.
+  - `wasiver`: imports `wasi:random/random@0.2.0`;
+  - `actor`: the guest of `wasmtime_actor_SUITE`, erlang_wasm's
+    `test/fixtures/component/actor`.
 
 erlang_wasm's other WASI fixtures import `wasi:*` interfaces without a
 version, which erlang_wasm accepts and Wasmtime does not; they are not used

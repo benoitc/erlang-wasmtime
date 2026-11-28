@@ -295,8 +295,9 @@ static ERL_NIF_TERM parse_options(instance_t *inst, ErlNifEnv *env, ERL_NIF_TERM
   if (!enif_get_map_value(env, map, atom_host, &v)) return opt_error(out, "host");
   inst->host.has_pid = enif_get_local_pid(env, v, &inst->host.pid);
   if (!inst->host.has_pid && !enif_is_identical(v, atom_undefined)) return opt_error(out, "host");
-  if (!enif_get_map_value(env, map, atom_stream, &v) ||
-      !enif_get_local_pid(env, v, &inst->inbox.stream_pid))
+  if (!enif_get_map_value(env, map, atom_stream, &v)) return opt_error(out, "stream");
+  inst->inbox.to_caller = enif_is_identical(v, atom_caller);
+  if (!inst->inbox.to_caller && !enif_get_local_pid(env, v, &inst->inbox.stream_pid))
     return opt_error(out, "stream");
   ErlNifUInt64 limit;
   if (!enif_get_map_value(env, map, atom_inbox_limit, &v) || !enif_get_uint64(env, v, &limit))

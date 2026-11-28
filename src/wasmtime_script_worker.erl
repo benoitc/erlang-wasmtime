@@ -314,7 +314,7 @@ start_request(Request, Pid, W0) ->
         dir => Dir,
         deadline => Deadline
     },
-    {Runner, RMon} = spawn_monitor(fun() -> runner(Worker, Ref, Job) end),
+    {Runner, RMon} = spawn_opt(fun() -> runner(Worker, Ref, Job) end, runner_options(Limits)),
     {reply, {ok, Ref}, W#state{
         ref = Ref,
         runner = Runner,
@@ -381,6 +381,12 @@ clean(#state{adapter = Adapter, astate = AState, dir = Dir, timer = Timer, smon 
     end,
     _ = Dir =:= undefined orelse file:del_dir_r(Dir),
     W#state{timer = undefined, smon = undefined, dir = undefined, astate = none}.
+
+%% `max_heap_words` bounds the Erlang heap of the process running a request.
+runner_options(#{max_heap_words := Words}) ->
+    [monitor, {max_heap_size, #{size => Words, kill => true, error_logger => true}}];
+runner_options(_) ->
+    [monitor].
 
 %% ------------------------------------------------------------------ runner
 
@@ -529,7 +535,11 @@ instantiate(#{module := Module, imports := #{bindings := Bindings}} = Spec, #{li
                 Options0
         end,
     Options = maps:merge(Options1, maps:with([max_memory_pages, fuel], Limits)),
-    case wasmtime:instantiate(Module, Bindings, Options) of
+    %% the request's host calls, its start section's included
+    {Counted, _} = wasmtime_host_budget:wrap(
+        Bindings, maps:get(max_host_calls, Limits, undefined)
+    ),
+    case wasmtime:instantiate(Module, Counted, Options) of
         {ok, Inst} -> Inst;
         {error, Error} -> refuse(wasmtime_worker_error:runtime(Error))
     end.

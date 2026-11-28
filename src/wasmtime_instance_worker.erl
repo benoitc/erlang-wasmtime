@@ -64,7 +64,9 @@ under it.
     isolation = fresh :: fresh | reuse,
     instance :: wasmtime:instance() | undefined,
     served = 0 :: non_neg_integer(),
-    name :: term()
+    name :: term(),
+    %% `max_host_calls`, counted per request
+    budget = none :: term()
 }).
 
 -type state() :: #state{}.
@@ -149,15 +151,41 @@ init({Module, Opts}) ->
     process_flag(trap_exit, true),
     Name = maps:get(name, Opts, undefined),
     proc_lib:set_label({wasmtime_instance_worker, Name}),
+    {Limits, Imports, Budget} = own_limits(Opts),
     State = #state{
         module = Module,
-        imports = maps:get(imports, Opts, #{}),
-        options = maps:merge(maps:get(options, Opts, #{}), maps:get(limits, Opts, #{})),
+        imports = Imports,
+        budget = Budget,
+        options = maps:merge(
+            maps:get(options, Opts, #{}),
+            Limits
+        ),
         isolation = maps:get(isolation, Opts, fresh),
         name = Name
     },
     %% In handle_continue, so a large module does not block the supervisor.
     {ok, State, {continue, instantiate}}.
+
+%% `max_heap_words` and `max_host_calls` are the worker's, not the
+%% instance's: what is left of `limits` is what instantiate is given. Invalid
+%% values stay there, for instantiate to refuse.
+own_limits(Opts) ->
+    Limits = maps:get(limits, Opts, #{}),
+    Own =
+        case wasmtime_limits:validate(Limits) of
+            ok -> [max_heap_words, max_host_calls];
+            {error, _} -> []
+        end,
+    case maps:with(Own, Limits) of
+        #{max_heap_words := Words} ->
+            process_flag(max_heap_size, #{size => Words, kill => true, error_logger => true});
+        #{} ->
+            ok
+    end,
+    {Imports, Budget} = wasmtime_host_budget:wrap(
+        maps:get(imports, Opts, #{}), maps:get(max_host_calls, maps:with(Own, Limits), undefined)
+    ),
+    {maps:without(Own, Limits), Imports, Budget}.
 
 handle_continue(instantiate, State) ->
     case new_instance(State) of
@@ -173,6 +201,7 @@ handle_call({run, Function, Args, Deadline}, _From, #state{instance = Inst} = St
             %% It waited behind other requests past its own deadline.
             {reply, timed_out(0), State};
         Left ->
+            ok = wasmtime_host_budget:reset(State#state.budget),
             Result = wasmtime:call(Inst, Function, Args, call_options(Left)),
             {reply, Result, recycle(State#state{served = State#state.served + 1})}
     end;
@@ -197,7 +226,9 @@ remaining(Deadline) -> max(Deadline - erlang:monotonic_time(millisecond), 0).
 call_options(infinity) -> #{};
 call_options(Left) -> #{timeout => Left}.
 
-new_instance(#state{module = Module, imports = Imports, options = Options}) ->
+%% A start section has a budget of its own.
+new_instance(#state{module = Module, imports = Imports, options = Options} = State) ->
+    ok = wasmtime_host_budget:reset(State#state.budget),
     wasmtime:instantiate(Module, Imports, Options).
 
 %% Under `fresh` the instance is replaced after every request, so nothing

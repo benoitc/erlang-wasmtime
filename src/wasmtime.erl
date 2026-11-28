@@ -29,6 +29,7 @@ on an instance at a time; concurrent callers are queued.
     module_kind/1,
     imports/1,
     exports/1,
+    extern/2,
     func_type_of/2,
     func_types_of/1,
     serialize/1,
@@ -97,6 +98,7 @@ on an instance at a time; concurrent callers are queued.
     frame/0,
     host_fun/0,
     host_context/0,
+    extern/0,
     imports/0,
     snapshot/0,
     valtype/0,
@@ -111,7 +113,6 @@ on an instance at a time; concurrent callers are queued.
 
 -define(DEFAULT_MEMORY_LIMIT, 256 * 1024 * 1024).
 -define(DEFAULT_HOST_TIMEOUT, 30000).
--define(DEFAULT_OUTPUT_LIMIT, 16 * 1024 * 1024).
 -define(DEFAULT_INBOX_LIMIT, 16 * 1024 * 1024).
 
 %% `handle` is the NIF resource, `ref` the reference carried by every message
@@ -126,7 +127,11 @@ on an instance at a time; concurrent callers are queued.
     %% `timeout` and `fuel` given at instantiate: the defaults of every call
     defaults = #{} :: #{timeout => timeout(), fuel => non_neg_integer()},
     %% made with `snapshotable => true`: what snapshot/2 needs
-    snap :: undefined | map()
+    snap :: undefined | map(),
+    %% `stdout` and `stderr` given as a pid, device or fun, and the `stream`
+    %% process for what has no sink
+    sinks = #{} :: wasmtime_wasi_config:sinks(),
+    stream :: pid() | undefined
 }).
 
 -record(snapshot, {
@@ -284,6 +289,10 @@ argument list alone and return the value itself, erlang_wasm's typed form
     | {module(), atom()}
     | fun(([term()]) -> term()).
 
+-doc "A function export taken with `extern/2`, to give to another instance.".
+-type extern() ::
+    {wasm_func, fun((term(), [value()]) -> {ok, [value()]}), {[valtype()], [valtype()]}}.
+
 -doc "What a host function receives first. Memory functions accept it.".
 -type host_context() :: #{instance := instance()}.
 
@@ -291,13 +300,19 @@ argument list alone and return the value itself, erlang_wasm's typed form
 WASI configuration. Nothing is granted by default.
 
 - `args`, `env`: what the guest sees, or `inherit` for the VM's own.
-- `dirs`: preopened directories, read-only unless `write`.
-- `stdin`: end of file by default; a file, the VM's stdin, bytes, or
-  `stream`: what `send/2` queues, as the guest reads it.
+- `dirs`: preopened directories, `{Guest, Host}` or `{Guest, Host, read |
+  write}`, read-only unless `write`.
+- `stdin`: end of file by default; a file, the VM's stdin, bytes (a binary
+  or `{binary, Bytes}`), or `stream`: what `send/2` queues, as the guest
+  reads it.
 - `stdout`, `stderr`: discarded by default; a file, the VM's own,
   `capture` into memory, read with `read_output/1`, or `stream`: every
   write goes to the `stream` process as `{wasmtime_stream, Ref, stdout |
-  stderr, Bytes}` at once.
+  stderr, Bytes}` at once. As in erlang_wasm, also a pid, which gets
+  `{wasi_output, From, Bytes}`, an io device name, or a fun of the bytes:
+  the process waiting for the call delivers them.
+- `random`: `strong` (the default). For a core module also `{seed, N}`, the
+  same bytes every run, or `none`, which answers `ENOTCAPABLE`.
 - `output_limit`: bytes kept per captured stream (default 16 MB); the guest
   never sees a short write, `read_output/1` reports what was dropped.
 - `clocks`: `all` (the default) or `monotonic`. With `monotonic` the guest
@@ -315,15 +330,18 @@ WASI configuration. Nothing is granted by default.
   patches (`features/0`, `wasi_sockets`) answers `kind => unavailable`; a
   core module answers `kind => unsupported`.
 """.
+-type sink() :: pid() | atom() | fun((binary()) -> term()).
+
 -type wasi_options() :: #{
     args => inherit | [iodata()],
     env => inherit | [{iodata(), iodata()}],
     dirs => [{Guest :: iodata(), Host :: iodata(), read | write}],
-    stdin => none | inherit | stream | {file, iodata()} | {binary, iodata()},
-    stdout => none | inherit | stream | {file, iodata()} | capture,
-    stderr => none | inherit | stream | {file, iodata()} | capture,
+    stdin => none | inherit | stream | {file, iodata()} | {binary, iodata()} | binary(),
+    stdout => none | inherit | stream | {file, iodata()} | capture | sink(),
+    stderr => none | inherit | stream | {file, iodata()} | capture | sink(),
+    random => strong | none | {seed, integer()},
     output_limit => pos_integer(),
-    clocks => all | monotonic,
+    clocks => all | monotonic | [monotonic | realtime],
     network => none | all,
     http => none | all
 }.
@@ -340,7 +358,7 @@ A value type, spelled as erlang_wasm does. A reference to a concrete
     | v128
     | {ref, null | nonull, atom()}.
 
--type imports() :: #{{binary(), binary()} => host_fun()}.
+-type imports() :: #{{binary(), binary()} => host_fun() | extern()}.
 
 -type options() :: #{
     imports => imports(),
@@ -370,6 +388,9 @@ instantiated any number of times, from any process.
 
 A runtime-only build has no compiler: this returns
 `{error, #{kind := unavailable}}` and modules come from `deserialize/1`.
+
+Set `max_module_bytes` in the application environment to refuse larger
+sources with `kind => module_too_large`.
 """.
 -spec compile(binary() | {wat, iodata()}) -> {ok, module_ref()} | error().
 compile(Source) -> compile(Source, #{}).
@@ -377,9 +398,21 @@ compile(Source) -> compile(Source, #{}).
 -doc "Compile with `t:compile_options/0`.".
 -spec compile(binary() | {wat, iodata()}, compile_options()) -> {ok, module_ref()} | error().
 compile({wat, Text}, Opts) ->
-    with_key(Opts, fun(Key) -> wasmtime_nif:compile(iolist_to_binary(Text), true, Key) end);
+    compile_bytes(iolist_to_binary(Text), true, Opts);
 compile(Bin, Opts) when is_binary(Bin) ->
-    with_key(Opts, fun(Key) -> wasmtime_nif:compile(Bin, false, Key) end).
+    compile_bytes(Bin, false, Opts).
+
+%% Refused before any work, as compiling costs memory and time in proportion
+%% to the input. `max_module_bytes` is unlimited unless set.
+compile_bytes(Bytes, Text, Opts) ->
+    case application:get_env(erlang_wasmtime, max_module_bytes) of
+        {ok, Max} when byte_size(Bytes) > Max ->
+            wasmtime_error:new(exhaustion, module_too_large, ~"module too large", #{
+                bytes => byte_size(Bytes), limit => Max
+            });
+        _ ->
+            with_key(Opts, fun(Key) -> wasmtime_nif:compile(Bytes, Text, Key) end)
+    end.
 
 -doc #{equiv => load(Source, #{})}.
 -spec load(binary() | {wat, iodata()}) -> {ok, module_ref()} | error().
@@ -400,6 +433,11 @@ back, and a process that dies gives back all of its own. The module leaves
 the cache with its last claim. The cache holds 256 modules unless
 `max_resident_modules` in the application environment says otherwise; past
 that, `load/2` answers `kind => cache_full`.
+
+The environment may also set `max_resident_module_bytes`, past which a new
+load answers `kind => cache_full`, and `max_module_loads_per_second`, past
+which it answers `kind => load_rate_exceeded`. Both are unlimited unless set;
+only loads that compile count.
 
 The `erlang_wasmtime` application must be started: without it the answer is
 `kind => not_started`.
@@ -663,6 +701,85 @@ export_kind(memory) -> mem;
 export_kind(Kind) -> Kind.
 
 -doc """
+Take a function an instance exports in the form another module imports it, as
+erlang_wasm's `wasm:extern/2`.
+
+```erlang
+{ok, Add} = wasmtime:extern(Library, ~"add"),
+{ok, Inst} = wasmtime:instantiate(Mod, #{{~"lib", ~"add"} => Add}, #{}).
+```
+
+The two instances stay apart: a call crosses from one thread to the other
+through the process that is waiting. An error in the export is the error of
+the call that reached it. A signature that does not match the import is
+`kind => incompatible_import_type`. A reference belongs to its instance, so a
+function passing one answers `kind => foreign_reference`, and two instances
+that call each other in a loop get `kind => reentrant`.
+
+Only functions can be shared. A memory, table, global or tag, and anything of
+a component, is `kind => unsupported_extern`; a snapshotable instance hands out
+nothing (`kind => instance_snapshotable`).
+""".
+-spec extern(instance(), binary()) -> {ok, extern()} | error().
+extern(#instance{snap = Snap}, Name) when Snap =/= undefined ->
+    wasmtime_error:new(
+        link, instance_snapshotable, ~"a snapshotable instance does not hand out handles", #{
+            name => Name
+        }
+    );
+extern(#instance{kind = component}, Name) ->
+    unsupported_extern(Name);
+extern(#instance{module = Mod} = Inst, Name) ->
+    case exports(Mod) of
+        #{Name := {func, _}} ->
+            {ok, Type} = func_type_of(Mod, Name),
+            Fun = fun(_Context, Args) ->
+                case call(Inst, Name, Args) of
+                    {ok, Results} -> {ok, Results};
+                    {error, Error} -> erlang:throw({wasmtime_error, Error})
+                end
+            end,
+            {ok, {wasm_func, Fun, Type}};
+        #{Name := _} ->
+            unsupported_extern(Name);
+        #{} ->
+            wasmtime_error:new(link, unknown_export, ~"unknown export", #{name => Name})
+    end.
+
+unsupported_extern(Name) ->
+    wasmtime_error:new(link, unsupported_extern, ~"only core functions can be shared", #{
+        name => Name
+    }).
+
+%% A function of another instance carries its type, so a mismatch is a link
+%% error here and not a failed call later.
+link_externs(Mod, Imports) ->
+    case [Key || Key := {wasm_func, _, _} <- Imports] of
+        [] ->
+            {ok, Imports};
+        Externs ->
+            Declared =
+                #{
+                    {M, N} => {Params, Results}
+                 || {M, N, Params, Results} <- wasmtime_nif:module_import_types(Mod)
+                },
+            link_externs(Externs, Declared, Imports)
+    end.
+
+link_externs([], _Declared, Imports) ->
+    {ok, Imports};
+link_externs([Key | Keys], Declared, Imports) ->
+    #{Key := {wasm_func, Fun, Type}} = Imports,
+    case Declared of
+        #{Key := Other} when Other =/= Type ->
+            wasmtime_error:new(link, incompatible_import_type, ~"incompatible import type", #{
+                where => Key, declared => Other, provided => Type
+            });
+        #{} ->
+            link_externs(Keys, Declared, Imports#{Key := Fun})
+    end.
+
+-doc """
 The type of every function a core module exports, without instantiating it,
 as erlang_wasm's `wasm:func_types_of/1`: `#{Name => {ok, {Params, Results}}}`.
 Bytes that do not compile answer `{error, {undecodable_core, Error}}`.
@@ -772,11 +889,14 @@ Log = fun(_Ctx, [N]) -> logger:info("got ~p", [N]), {ok, []} end,
 ```
 """.
 -spec instantiate(module_ref(), imports(), options()) -> {ok, instance()} | error().
-instantiate(Mod, Imports, Opts) when is_map(Imports), is_map(Opts) ->
+instantiate(Mod, Imports0, Opts0) when is_map(Imports0), is_map(Opts0) ->
     maybe
+        {ok, Imports1, Opts} ?= wasmtime_wasi_config:take_imports(Imports0, Opts0),
+        Imports = root_imports(Mod, Imports1),
         ok ?= check_options(Opts),
-        ok ?= check_imports(Imports),
-        maybe_snapshotable(Mod, Imports, page_limit(Opts))
+        {ok, Linked} ?= link_externs(Mod, Imports),
+        ok ?= check_imports(Linked),
+        maybe_snapshotable(Mod, Linked, page_limit(Opts))
     end.
 
 %% erlang_wasm's `profile` picks its compile tier. There is one tier here, so
@@ -792,12 +912,16 @@ check_options(Opts) ->
         Keys -> unsupported_option(Keys)
     end.
 
+%% The workers' limits are no limits of an instance.
 check_limits(Opts) ->
+    Workers = maps:keys(maps:with([max_host_calls, max_heap_words], Opts)),
     case wasmtime_limits:validate(Opts) of
-        ok ->
+        ok when Workers =:= [] ->
             ok;
+        ok ->
+            invalid_limits(Workers);
         {error, {invalid_limits, Bad}} ->
-            invalid_limits(Bad)
+            invalid_limits(Bad ++ Workers)
     end.
 
 %% A call may be given no fuel at all, so only the limits that are never
@@ -817,6 +941,23 @@ unsupported_option(Keys) ->
     wasmtime_error:new(
         link, unsupported_option, ~"this runtime does not support the option", #{keys => Keys}
     ).
+
+%% A component's own functions are under `""`; erlang_wasm calls that
+%% interface `$root`.
+root_imports(Mod, Imports) ->
+    case module_kind(Mod) of
+        component ->
+            maps:fold(
+                fun
+                    ({~"$root", Name}, Fun, Acc) -> Acc#{{<<>>, Name} => Fun};
+                    (Key, Fun, Acc) -> Acc#{Key => Fun}
+                end,
+                #{},
+                Imports
+            );
+        module ->
+            Imports
+    end.
 
 check_imports(Imports) ->
     Callable = fun
@@ -870,14 +1011,19 @@ snapshot_error(Class, Kind, Msg, Ctx) -> wasmtime_error:new(Class, Kind, Msg, Ct
 
 do_instantiate(Mod, Imports, Opts) ->
     maybe
-        {ok, Wasi} ?= wasi_options(maps:get(wasi, Opts, none)),
-        do_instantiate(Mod, Imports, Opts, Wasi)
+        {ok, Wasi, #{sinks := Sinks, imports := Replaced}} ?=
+            wasmtime_wasi_config:options(maps:get(wasi, Opts, none), module_kind(Mod)),
+        %% an import the caller gives wins over the one an option makes
+        do_instantiate(Mod, maps:merge(Replaced, Imports), Opts, Wasi, Sinks)
     end.
 
-do_instantiate(Mod, Imports, Opts, Wasi) ->
+do_instantiate(Mod, Imports, Opts, Wasi, Sinks) ->
     Ref = make_ref(),
     Id = erlang:unique_integer([positive, monotonic]),
-    case wasmtime_nif:instantiate(Mod, nif_options(Mod, Imports, Opts, Wasi), Ref, Id) of
+    StreamPid = maps:get(stream, Opts, self()),
+    true = is_pid(StreamPid),
+    NifOpts = (nif_options(Mod, Imports, Opts, Wasi))#{stream => stream_to(Sinks, StreamPid)},
+    case wasmtime_nif:instantiate(Mod, NifOpts, Ref, Id) of
         {ok, Handle} ->
             Inst = #instance{
                 handle = Handle,
@@ -885,7 +1031,9 @@ do_instantiate(Mod, Imports, Opts, Wasi) ->
                 imports = Imports,
                 kind = module_kind(Mod),
                 module = Mod,
-                defaults = call_defaults(Opts)
+                defaults = call_defaults(Opts),
+                sinks = Sinks,
+                stream = StreamPid
             },
             %% `timeout` bounds the start section too
             case wait_result(Inst, Id, maps:get(timeout, Opts, infinity)) of
@@ -898,6 +1046,10 @@ do_instantiate(Mod, Imports, Opts, Wasi) ->
         {error, _} = Error ->
             Error
     end.
+
+%% Output for a sink is streamed to whoever is waiting for the call.
+stream_to(Sinks, StreamPid) when map_size(Sinks) =:= 0 -> StreamPid;
+stream_to(_Sinks, _StreamPid) -> caller.
 
 %% `fuel => infinity` stays: each call then refills a metered store.
 call_defaults(Opts) ->
@@ -918,8 +1070,6 @@ nif_options(Mod, Imports, Opts, Wasi) ->
         end,
     HostPid = maps:get(host, Opts, undefined),
     true = HostPid =:= undefined orelse is_pid(HostPid),
-    StreamPid = maps:get(stream, Opts, self()),
-    true = is_pid(StreamPid),
     InboxLimit = maps:get(inbox_limit, Opts, ?DEFAULT_INBOX_LIMIT),
     true = is_integer(InboxLimit) andalso InboxLimit > 0,
     #{
@@ -932,7 +1082,6 @@ nif_options(Mod, Imports, Opts, Wasi) ->
         max_instances => limit(max_instances, Opts, default_instances(Mod)),
         host_timeout => HostTimeout,
         host => HostPid,
-        stream => StreamPid,
         inbox_limit => InboxLimit,
         shim => stdin_shim(Mod, Wasi),
         fuel => maps:get(fuel, Opts, undefined)
@@ -1003,71 +1152,6 @@ limit(Key, Opts, Default) ->
         unlimited -> -1;
         N when is_integer(N), N > 0 -> N
     end.
-
-%% A key or value that would grant or change nothing is refused: the caller
-%% believes it did.
-wasi_options(none) ->
-    {ok, none};
-wasi_options(Wasi) when is_map(Wasi) ->
-    Known = [args, env, dirs, stdin, stdout, stderr, output_limit, clocks, network, http],
-    %% erlang_wasm's defaults, which are what happens anyway
-    Default = fun
-        (random, strong) -> false;
-        (net, none) -> false;
-        (Key, _) -> not lists:member(Key, Known)
-    end,
-    Clocks = clocks(maps:get(clocks, Wasi, all)),
-    case maps:keys(maps:filter(Default, Wasi)) of
-        [] when Clocks =/= unsupported -> {ok, wasi_nif_options(Wasi, Clocks)};
-        [] -> unsupported_option([clocks]);
-        Keys -> unsupported_option(Keys)
-    end.
-
-wasi_nif_options(Wasi, Clocks) ->
-    #{
-        args =>
-            case maps:get(args, Wasi, []) of
-                inherit -> inherit;
-                Args -> [bin(A) || A <- Args]
-            end,
-        env =>
-            case maps:get(env, Wasi, []) of
-                inherit -> inherit;
-                Env when is_map(Env) -> [{bin(K), bin(V)} || K := V <- Env];
-                Env -> [{bin(K), bin(V)} || {K, V} <- Env]
-            end,
-        dirs => [{bin(Guest), bin(Host), Perm} || {Guest, Host, Perm} <- maps:get(dirs, Wasi, [])],
-        stdin => stdio(maps:get(stdin, Wasi, none)),
-        stdout => stdio(maps:get(stdout, Wasi, none)),
-        stderr => stdio(maps:get(stderr, Wasi, none)),
-        output_limit => maps:get(output_limit, Wasi, ?DEFAULT_OUTPUT_LIMIT),
-        clocks => Clocks,
-        network => grant(maps:get(network, Wasi, none)),
-        http => grant(maps:get(http, Wasi, none))
-    }.
-
-%% Grants are all or nothing: see `t:wasi_options/0`.
-grant(none) -> none;
-grant(all) -> all.
-
-%% `all` or `monotonic`, also as erlang_wasm's list of clocks.
-clocks(all) ->
-    all;
-clocks(monotonic) ->
-    monotonic;
-clocks(List) when is_list(List) ->
-    case lists:usort(List) of
-        [monotonic] -> monotonic;
-        [monotonic, realtime] -> all;
-        _ -> unsupported
-    end.
-
-stdio(none) -> none;
-stdio(inherit) -> inherit;
-stdio(capture) -> capture;
-stdio(stream) -> stream;
-stdio({file, Path}) -> {file, bin(Path)};
-stdio({binary, Bytes}) -> {binary, iolist_to_binary(Bytes)}.
 
 bin(B) when is_binary(B) -> B;
 bin(L) -> unicode:characters_to_binary(L).
@@ -1231,6 +1315,9 @@ wait_result(#instance{handle = H, ref = Ref, imports = Imports} = Inst, Id, Time
             Result;
         {wasmtime_host_call, Ref, HostId, Key, Args} ->
             _ = wasmtime_nif:host_reply(H, HostId, run_host(Imports, Key, Inst, Args)),
+            wait_result(Inst, Id, Timeout);
+        {wasmtime_stream, Ref, Which, Bytes} when map_size(Inst#instance.sinks) > 0 ->
+            ok = streamed(Inst, Which, Bytes),
             wait_result(Inst, Id, Timeout)
     after Timeout ->
         %% cancel/2 ends request Id and drops its result. `not_running` means
@@ -1248,6 +1335,14 @@ wait_result(#instance{handle = H, ref = Ref, imports = Imports} = Inst, Id, Time
         end
     end.
 
+%% Bytes of an instance with sinks: to the sink, or else on to the `stream`
+%% process they were meant for.
+streamed(#instance{sinks = Sinks}, Which, Bytes) when is_map_key(Which, Sinks) ->
+    wasmtime_wasi_config:deliver(Sinks, Which, Bytes);
+streamed(#instance{ref = Ref, stream = Stream}, Which, Bytes) ->
+    Stream ! {wasmtime_stream, Ref, Which, Bytes},
+    ok.
+
 timeout_error(Timeout) ->
     wasmtime_error:new(exhaustion, timeout, ~"call timed out", #{timeout => Timeout}).
 
@@ -1259,6 +1354,9 @@ settle(#instance{handle = H, ref = Ref} = Inst, Id) ->
             ok;
         {wasmtime_host_call, Ref, HostId, _, _} ->
             _ = wasmtime_nif:host_reply(H, HostId, host_error(#{reason => interrupted})),
+            settle(Inst, Id);
+        {wasmtime_stream, Ref, Which, Bytes} when map_size(Inst#instance.sinks) > 0 ->
+            ok = streamed(Inst, Which, Bytes),
             settle(Inst, Id)
     after 0 -> ok
     end.

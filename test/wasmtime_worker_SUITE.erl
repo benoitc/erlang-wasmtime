@@ -245,7 +245,7 @@ limits_are_validated(_) ->
                 {'EXIT', W, {instantiate_failed, #{kind := invalid_limits}}} -> ok
             end
         end
-     || Limits <- [#{max_heap_words => 1024}, #{timeout => soon}, #{max_depth => 10}]
+     || Limits <- [#{max_host_calls => lots}, #{timeout => soon}, #{max_depth => 10}]
     ],
     process_flag(trap_exit, false),
     ok.

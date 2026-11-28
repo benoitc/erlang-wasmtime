@@ -16,25 +16,26 @@ function neither lists. Update both together.
 | erlang_wasm | Here | Status |
 |---|---|---|
 | `wasm`: all but the two below | `wasmtime` | done |
-| `wasm:extern/2`, `call_func/3` | `wasmtime` | phase 2, functions only |
+| `wasm:extern/2` | `wasmtime` | done, functions only |
+| `wasm:encode/1` (0.13.0) | none | refused; `wat2wasm/1` for text |
 | `wasm_error` | `wasmtime_error` | done |
 | `wasm_limits` | `wasmtime_limits` | done |
 | `wasm_engine`: `page_limit/0`, `set_page_limit/1`, `pages_in_use/0`, `stats/0` | `wasmtime_engine` | phase 7, spike |
 | `wasm_component`: `host_*` | `wasmtime_component` | done |
-| `wasm_component`: `decode`, `prepare`, `instantiate`, `call`, `call_async`, `destroy`, `exports`, `drop_resource`, `import_fun` | `wasmtime_component` | phase 2 |
+| `wasm_component`: `decode`, `prepare`, `instantiate`, `call`, `call_async`, `destroy`, `exports`, `drop_resource`, `import_fun` | `wasmtime_component` | done |
 | `wasm_component`: `start_async`, `pump` | `wasmtime_component` | phase 6 |
 | `wasm_component`: `snapshot`, `restore`, `acquire`, `release` | none | refused: no component snapshots |
-| `wasi`: `run`, `imports` | `wasmtime_wasi` | phase 2 |
-| `wasi_preview1:exit_code/1` | `wasmtime_wasi_preview1` | phase 2 |
+| `wasi`: `run`, `imports` | `wasmtime_wasi` | done; `imports` carries the configuration, not functions |
+| `wasi_preview1`: `exit_code`, `imports/1` | `wasmtime_wasi_preview1` | done |
 | `wasi_preview1:imports` and the other map builders | none | refused: Wasmtime implements WASI |
-| `wasi_preview2`, `wasi_preview3`: `run_command` | `wasmtime_wasi_preview2`, `preview3` | phase 2 |
+| `wasi_preview2`, `wasi_preview3`: `run_command` | `wasmtime_wasi_preview2`, `preview3` | done |
 | `wasi_preview2`, `wasi_preview3`: `run_serve` | same | phase 4 |
 | `wasi_preview2`, `wasi_preview3`: import maps and `_with` runners | none | refused: Wasmtime implements WASI |
 | `wasi_http_listener`, `wasi_http_h1`, `wasi_http_transport` | `wasmtime_http_*` | phase 4 |
 | `wasi_http_h2` | none | refused: no HTTP/2 |
 | `wasi_nn` | `wasmtime_wasi_nn` | phase 7 |
 | `wasm_instance_worker` | `wasmtime_instance_worker` | done |
-| `wasm_actor` | `wasmtime_actor` | phase 2 |
+| `wasm_actor` | `wasmtime_actor` | done |
 | `wasm_script_worker`: `run`, `submit`, `await`, `cancel`, `start_link`, `stop`, `default_limits` | `wasmtime_script_worker` | done |
 | `wasm_script_worker`: `channel_write`, `cleanup_stats`, `cleanup_requests` | same | phase 5 |
 | `wasm_worker_error` | `wasmtime_worker_error` | done; kinds `result_limit`, `no_reaper`, `cleanup_saturated`, `unauthorised`, `request_finished` come with phase 5 |
@@ -49,13 +50,13 @@ function neither lists. Update both together.
 | erlang_wasm | Here | Status |
 |---|---|---|
 | `instantiate`: `fuel`, `max_memory_pages`, `timeout`, `profile`, `snapshotable` | same | done |
-| `instantiate`: `max_host_calls`, `max_heap_words` | workers | phase 2; refused now (`invalid_limits`) |
+| `instantiate`: `max_host_calls`, `max_heap_words` | workers | done on workers; refused on instances (`invalid_limits`) |
 | `instantiate`: `max_depth` | none | refused (`invalid_limits`) |
 | `instantiate`: `link`, `snapshot_hooks`, `compile*`, `resource_limit` | none | refused (`unsupported_option`); `resource_limit` in phase 3 |
-| WASI: `args`, `env`, `dirs`, `clocks`, `stdin`, `stdout`, `stderr` | same | done; stdio to a pid or io device in phase 2 |
-| WASI: `random => {seed, N} \| none` | same | phase 2; refused now |
+| WASI: `args`, `env`, `dirs`, `clocks`, `stdin`, `stdout`, `stderr` | same | done; a `stdin` fun is refused |
+| WASI: `random => {seed, N} \| none` | same | done for core modules |
 | WASI: `net`, HTTP allow and deny, `initial_cwd` | same | phase 3; refused now |
-| limits cache env caps | `load/2` | phase 2 |
+| cache env caps | same names | done, unlimited unless set |
 
 ## Errors
 
@@ -84,11 +85,10 @@ runs the same failing calls on both runtimes.
 
 ## Phases
 
-2. Missing API in Erlang only.
 3. Patch batch A: resource and size limits, `initial_cwd`, address grants for
    sockets and HTTP, fast path for `list<u8>`.
 4. Patch batch B: serving HTTP.
-5. Workers: reactor snapshot adapters, `restore_ahead`, reaper, result
-   channel, conformance kit.
+5. Workers: reactor snapshot adapters, `restore_ahead`, reaper (with the
+   sweep of leftover request directories), result channel, conformance kit.
 6. Patch batch C: streams and futures.
 7. `wasi_nn`, unversioned imports, spikes.

@@ -16,6 +16,8 @@
 - Breaking: erlang_wasm options this library cannot honour, unknown `wasi`
   keys, and `max_depth` or `max_host_calls` on a call are refused instead of
   ignored.
+- A new guide explains how to write code that runs on this library and on
+  erlang_wasm, and how to switch between them.
 - Host functions can be given as `{Module, Function}` and can answer
   `{trap, Reason}`. `wasmtime_error` builds and formats errors.
 - The `wasi` options accept `env` as a map and `clocks` as a list.

@@ -101,6 +101,7 @@ it: a release starts it for you, a shell needs
 - [Troubleshooting](docs/troubleshooting.md)
 - [Design](docs/design.md): how the NIF is put together, for contributors; see also [CONTRIBUTING.md](CONTRIBUTING.md)
 - [Features](docs/features.md): what is implemented, what is refused, what is deferred
+- [Switch to or from erlang_wasm](docs/erlang-wasm.md): write your code once, choose the runtime in your configuration
 - [Examples](examples/README.md): user-defined event transforms in JavaScript, a guest that reads ETS, logs and notifies processes
 
 ## Related

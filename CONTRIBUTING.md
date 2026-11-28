@@ -17,16 +17,15 @@ AddressSanitizer and the runtime-only build. Run the two extra ones
 yourself when you touch the NIF:
 
 ```sh
-# AddressSanitizer, Linux
-WASMTIME_NIF_SANITIZE=address rebar3 compile
+# AddressSanitizer, Linux. Keep the variable on both commands: `rebar3 ct`
+# compiles too, and would put the plain NIF back
+export WASMTIME_NIF_SANITIZE=address
+rebar3 compile
 LD_PRELOAD="$(gcc -print-file-name=libasan.so)" \
 ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:alloc_dealloc_mismatch=0" rebar3 ct
-
-# AddressSanitizer, macOS
-WASMTIME_NIF_SANITIZE=address rebar3 compile
-ASAN_RT="$(ls "$(dirname "$(xcrun -f clang)")"/../lib/clang/*/lib/darwin/libclang_rt.asan_osx_dynamic.dylib | head -1)"
-DYLD_INSERT_LIBRARIES="$ASAN_RT" \
-ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:alloc_dealloc_mismatch=0" rebar3 ct
+unset WASMTIME_NIF_SANITIZE
+# on macOS the runtime cannot be preloaded through rebar3, whose shell
+# wrappers drop DYLD_INSERT_LIBRARIES: run this on Linux, as CI does
 
 # Runtime-only library (no compiler): fixtures come from a full build
 escript scripts/precompile-fixtures.escript test/wasmtime_runtime_only_SUITE_data /tmp/cwasm
